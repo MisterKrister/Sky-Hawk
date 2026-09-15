@@ -51,9 +51,8 @@ object PartyCommands : SkyMyceModule() {
     @Subscription
     fun onPartyChat(event: PlayerMessageEvent) {
         if (event.type != ChatChannel.PARTY) return
+        if (!PartyAPI.inParty) return
         commandRegex.find(event.message)?.let {
-            if (!PartyAPI.inParty) return@let
-
             val isLeader = PartyAPI.leader?.name == MC.instance.gameProfile.name
 
             val commandLiteral = it.groupValues[1]
@@ -68,7 +67,9 @@ object PartyCommands : SkyMyceModule() {
             if (now - cooldownTimestamp < PartyCommandsConfig.partyCommandCooldown.seconds) return@let
             cooldownTimestamp = now
 
-            displayDevMessage("leader: ${PartyAPI.leader?.name} ($isLeader)")
+            displayDevMessage("command: $command")
+            displayDevMessage("args: $args")
+
             when (command) {
                 PartyCommandTypes.INVITE -> if (isLeader) sendCommand("party invite ${args[0]}", true)
 
@@ -115,15 +116,14 @@ object PartyCommands : SkyMyceModule() {
                 PartyCommandTypes.PING -> sendMessage("Ping: ${ServerUtils.currentPing}ms")
 
                 PartyCommandTypes.DUNGEONS -> {
-                    val floor = DungeonFloor.getByName(args[0].uppercase())
+                    val floor = DungeonFloor.getByName(args.getOrNull(0) ?: return)
                     val data = DungeonTracker.profitData[floor]
                     if (floor != null && data != null) {
-                        when (args[1].uppercase()) {
-                            "XP" -> {
-                                val xp = NumberUtils.condense(data.totalXp)
-                                when (args[2].uppercase()) {
-                                    "avg" -> sendModMessage("Avg Cata XP: $xp | ${data.classXp.map { xp -> "${xp.key.displayName}: ${xp.value / data.totalTimeHours}" }.joinToString(" | ")}", ChatChannel.PARTY)
-                                    else -> sendModMessage("Total Cata XP: $xp | ${data.classXp.map { xp -> "${xp.key.displayName}: ${xp.value}" }.joinToString(" | ")}", ChatChannel.PARTY)
+                        when (args.getOrNull(1)?.lowercase()) {
+                            "xp" -> {
+                                when (args.getOrNull(2)?.lowercase()) {
+                                    "avg" -> sendModMessage("Avg Cata XP: ${NumberUtils.condense(data.totalXp / data.totalTimeHours)} | ${data.classXp.map { xp -> "${xp.key.displayName}: ${NumberUtils.condense(xp.value / data.totalTimeHours)}" }.joinToString(" | ")}", ChatChannel.PARTY)
+                                    else -> sendModMessage("Total Cata XP: ${NumberUtils.condense(data.totalXp)} | ${data.classXp.map { xp -> "${xp.key.displayName}: ${NumberUtils.condense(xp.value)}" }.joinToString(" | ")}", ChatChannel.PARTY)
                                 }
                             }
                             else -> {
