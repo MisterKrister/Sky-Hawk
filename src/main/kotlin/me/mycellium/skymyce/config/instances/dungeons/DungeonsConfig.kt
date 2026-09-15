@@ -36,6 +36,9 @@ object DungeonsConfig : CategoryKt("Dungeons") {
     val safeRerollThreshold by int(5) {
         name = TranslatableValue.literal("Safe Kismet Reroll Threshold")
         description = TranslatableValue.literal("The kismet threshold for blocking kismets")
+
+        slider = true
+        range = 0..100
     }
 
     val dungeonChestProfit by boolean(true) {

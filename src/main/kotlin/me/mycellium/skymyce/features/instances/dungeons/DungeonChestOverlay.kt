@@ -19,7 +19,9 @@ import java.awt.Color
 
 
 object DungeonChestOverlay : SkyMyceModule() {
-
+    val rerollThreshold
+        get() = DungeonsConfig.safeRerollThreshold * 1_000_000
+    
     data class ChestOverlayItem(val value: Double, val count: Int) {
         val totalValue = value * count
         val valuable = (totalValue >= (DungeonsConfig.valuableItemThreshold * 1_000_000))
@@ -50,7 +52,7 @@ object DungeonChestOverlay : SkyMyceModule() {
         if (MC.instance.hasControlDown()) return
         if (items != null) {
             for ((_, overlay) in items) {
-                if (overlay.totalValue >= (DungeonsConfig.safeRerollThreshold * 1_000_000)) {
+                if (overlay.totalValue >= rerollThreshold) {
                     clickedTimestamp = System.currentTimeMillis()
                     event.cancel()
                 }
@@ -65,13 +67,15 @@ object DungeonChestOverlay : SkyMyceModule() {
 
         val time = (System.currentTimeMillis() - clickedTimestamp) / 500.0
         if (time < 1.0) {
-            event.graphics.fill(
-                event.slot.x,
-                event.slot.y,
-                event.slot.x + 16,
-                event.slot.y + 16,
-                Color(255, 0, 0, 255 - (time * 255).toInt()).rgb
-            )
+            if (overlay.totalValue >= rerollThreshold) {
+                event.graphics.fill(
+                    event.slot.x,
+                    event.slot.y,
+                    event.slot.x + 16,
+                    event.slot.y + 16,
+                    Color(255, 0, 0, 255 - (time * 255).toInt()).rgb
+                )
+            }
         }
 
         if (DungeonsConfig.dungeonChestProfit) {
