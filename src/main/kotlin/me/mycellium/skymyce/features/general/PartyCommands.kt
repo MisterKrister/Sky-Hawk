@@ -137,6 +137,10 @@ object PartyCommands : SkyMyceModule() {
                         }
                     }
                 }
+
+                PartyCommandTypes.PB -> {
+                    PersonalBestCommand.handlePbCommand(argsLiteral)
+                }
             }
         }
     }
@@ -162,7 +166,8 @@ enum class PartyCommandTypes(val aliases: Set<String>) {
     FPS(setOf("fps")),
     TPS(setOf("tps")),
     PING(setOf("ping")),
-    DUNGEONS(setOf("dungeon", "dungeons", "d"));
+    DUNGEONS(setOf("dungeon", "dungeons", "d")),
+    PB(setOf("pb", "personalbest"));
 
     companion object {
         fun fromAlias(alias: String): PartyCommandTypes? = entries.firstOrNull { alias.lowercase() in it.aliases }
