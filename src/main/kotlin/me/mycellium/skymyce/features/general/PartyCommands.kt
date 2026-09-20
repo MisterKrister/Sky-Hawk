@@ -1,5 +1,6 @@
 package me.mycellium.skymyce.features.general
 
+import com.google.gson.JsonObject
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.events.ChatChannel
 import me.mycellium.skymyce.api.events.PlayerMessageEvent
@@ -17,10 +18,15 @@ import me.mycellium.skymyce.utils.Utils.displayModMessage
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
 import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
+import tech.thatgravyboat.skyblockapi.utils.Scheduling
+import tech.thatgravyboat.skyblockapi.utils.http.Http
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import kotlin.math.round
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
+@Suppress("unused")
 object PartyCommands : SkyMyceModule() {
     private val commandRegex = Regex("^!(?<command>\\w+)\\s*(?<arguments>.*)$")
     private var cooldownTimestamp = 0.seconds
@@ -115,6 +121,60 @@ object PartyCommands : SkyMyceModule() {
 
                 PartyCommandTypes.PING -> sendMessage("Ping: ${ServerUtils.currentPing}ms")
 
+                PartyCommandTypes.NETWORTH -> {
+                    val target = argsLiteral.trim().ifBlank { event.player }
+                    val encodedTarget = URLEncoder.encode(target, StandardCharsets.UTF_8)
+                    Scheduling.schedule(0.seconds) {
+                        val response = Http.getResult<JsonObject>("https://api.altpapier.dev/v2/profiles/$encodedTarget").getOrNull()
+                        if (response == null) {
+                            sendModMessage("Could not fetch networth for $target.", ChatChannel.PARTY)
+                            return@schedule
+                        }
+
+                        if (response.get("status")?.asInt != 200) {
+                            val reason = response.get("reason")?.asString ?: "SkyHelper rejected the request"
+                            sendModMessage("Networth lookup failed for $target: $reason", ChatChannel.PARTY)
+                            return@schedule
+                        }
+
+                        val profiles = response.getAsJsonArray("data")
+                        val profile = profiles.firstOrNull { it.asJsonObject.get("selected")?.asBoolean == true }
+                            ?: profiles.firstOrNull()
+                        val networth = profile?.asJsonObject?.getAsJsonObject("networth")
+                        if (networth == null) {
+                            sendModMessage("No networth data found for $target.", ChatChannel.PARTY)
+                            return@schedule
+                        }
+
+                        val highestValueItem = networth.entrySet()
+                            .asSequence()
+                            .mapNotNull { (_, inventory) ->
+                                inventory.asJsonObject.getAsJsonArray("items")
+                            }
+                            .flatMap { it.asSequence() }
+                            .mapNotNull { item ->
+                                val itemObject = item.asJsonObject
+                                val price = itemObject.get("price")?.asDouble ?: return@mapNotNull null
+                                price to (itemObject.get("loreName")?.asString
+                                    ?: itemObject.get("name")?.asString
+                                    ?: "Unknown item")
+                            }
+                            .maxByOrNull { it.first }
+
+                        val totalNetworth = networth.get("networth")?.asDouble
+                        if (totalNetworth == null) {
+                            sendModMessage("No total networth found for $target.", ChatChannel.PARTY)
+                            return@schedule
+                        }
+
+                        val highestItemMessage = highestValueItem?.let { " | Highest: ${it.second} (${NumberUtils.condense(it.first)})" }.orEmpty()
+                        sendModMessage(
+                            "$target's networth: ${NumberUtils.condense(totalNetworth)}$highestItemMessage",
+                            ChatChannel.PARTY
+                        )
+                    }
+                }
+
                 PartyCommandTypes.DUNGEONS -> {
                     val floor = DungeonFloor.getByName(args.getOrNull(0) ?: return)
                     val data = DungeonTracker.profitData[floor]
@@ -162,6 +222,7 @@ enum class PartyCommandTypes(val aliases: Set<String>) {
     FPS(setOf("fps")),
     TPS(setOf("tps")),
     PING(setOf("ping")),
+    NETWORTH(setOf("nw", "networth")),
     DUNGEONS(setOf("dungeon", "dungeons", "d"));
 
     companion object {
