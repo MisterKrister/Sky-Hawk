@@ -18,7 +18,7 @@ import java.io.File
 object DungeonSplits : SkyMyceModule() {
     private val gson = GsonBuilder().setPrettyPrinting().create()
     private val type = object : TypeToken<MutableMap<String, FloorSplits>>() {}.type
-    private val saveFile: File = SkyMyce.configPath.resolve("dungeon_splits.json").toFile()
+    val saveFile: File = SkyMyce.configPath.resolve("dungeon_splits.json").toFile()
 
     private val stored: MutableMap<String, FloorSplits> by lazy {
         if (!saveFile.exists()) mutableMapOf()
@@ -36,6 +36,7 @@ object DungeonSplits : SkyMyceModule() {
     data class RecordedSplit(val name: String, val segmentMillis: Long, val totalMillis: Long)
     data class FloorSplits(
         val bestSegments: MutableMap<String, Long> = mutableMapOf(),
+        var bestRunMillis: Long? = null,
         val runs: MutableList<List<RecordedSplit>> = mutableListOf()
     )
 
@@ -125,6 +126,11 @@ object DungeonSplits : SkyMyceModule() {
             val old = data.bestSegments[it.name]
             if (old == null || it.segmentMillis < old) data.bestSegments[it.name] = it.segmentMillis
         }
+        current.lastOrNull()?.totalMillis?.let { total ->
+            if (data.bestRunMillis == null || total < data.bestRunMillis!!) {
+                data.bestRunMillis = total
+            }
+        }
         data.runs.add(current.toList())
         while (data.runs.size > 50) data.runs.removeAt(0)
         save()
@@ -159,6 +165,7 @@ object DungeonSplits : SkyMyceModule() {
             RecordedSplit(definition.name, segment, total)
         }
     }
+    fun bestRunMillis(): Long? = stored[floor()?.name]?.bestRunMillis
     fun recentRuns(): List<List<RecordedSplit>> = stored[floor()?.name]?.runs?.asReversed() ?: emptyList()
     fun elapsedMillis(): Long = if (runStart == 0L) 0L else System.currentTimeMillis() - runStart
 

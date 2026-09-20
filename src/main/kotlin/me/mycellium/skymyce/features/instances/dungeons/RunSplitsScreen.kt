@@ -60,6 +60,9 @@ class RunSplitsScreen : Screen(MC.instance, MC.font, Component.literal("Run Spli
         }
         val total = best.last().totalMillis
         graphics.text(font, "§fTheoretical PB: §e${DungeonSplits.formatTime(total)}", width / 2 - 170, 95 + best.size * 15, 0xFFFFFFFF.toInt())
+        DungeonSplits.bestRunMillis()?.let {
+            graphics.text(font, "§fPersonal Best: §e${DungeonSplits.formatTime(it)}", width / 2 - 170, 110 + best.size * 15, 0xFFFFFFFF.toInt())
+        }
     }
 
     private fun renderRuns(graphics: GuiGraphicsExtractor) {
