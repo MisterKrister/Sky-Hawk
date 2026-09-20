@@ -5,16 +5,16 @@ import com.google.gson.reflect.TypeToken
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.config.instances.dungeons.DungeonsConfig
-import me.mycellium.skymyce.features.instances.dungeons.DungeonSplits.SplitDefinition
+import net.minecraft.network.protocol.game.ClientboundSystemChatPacket
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonAPI
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
-import tech.thatgravyboat.skyblockapi.api.events.chat.ChatReceivedEvent
-import tech.thatgravyboat.skyblockapi.api.events.dungeon.DungeonStartEvent
+import tech.thatgravyboat.skyblockapi.api.events.level.PacketReceivedEvent
 import tech.thatgravyboat.skyblockapi.api.events.location.IslandChangeEvent
 import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
-import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import java.io.File
 
+@Suppress("unused", "UNUSED_PARAMETER")
 object DungeonSplits : SkyMyceModule() {
     private val gson = GsonBuilder().setPrettyPrinting().create()
     private val type = object : TypeToken<MutableMap<String, FloorSplits>>() {}.type
@@ -66,25 +66,24 @@ object DungeonSplits : SkyMyceModule() {
     )
 
     private val completion = Regex("^\\s*☠ Defeated .+ in 0?[\\dhms ]+\\s*(\\(NEW RECORD!\\))?$")
+    private val dungeonStart = Regex("^\\[NPC] Mort: Here, I found this map when I first entered the dungeon\\.$")
 
     @Subscription
-    fun onDungeonStart(event: DungeonStartEvent) {
-        if (!DungeonsConfig.runSplits) return
-        activeFloor = DungeonAPI.dungeonFloor
-        runStart = System.currentTimeMillis()
-        splitStart = 0L
-        activeSplit = null
-        nextSplit = 0
-        current = mutableListOf()
+    fun onPacket(event: PacketReceivedEvent) {
+        val packet = event.packet as? ClientboundSystemChatPacket ?: return
+        handleMessage(packet.content().string)
     }
 
-    @Subscription
-    fun onChat(event: ChatReceivedEvent.Pre) {
-        if (!DungeonsConfig.runSplits || runStart == 0L) return
-        if (nextSplit >= definitions().size) return
+    private fun handleMessage(message: String) {
+        if (!DungeonsConfig.runSplits) return
+        if (dungeonStart.matches(message)) {
+            startRun()
+            return
+        }
+        if (runStart == 0L || nextSplit >= definitions().size) return
 
         val definition = definitions()[nextSplit]
-        if (!definition.message.matches(event.text)) return
+        if (!definition.message.matches(message)) return
 
         val now = System.currentTimeMillis()
         activeSplit?.let {
@@ -97,6 +96,16 @@ object DungeonSplits : SkyMyceModule() {
             activeSplit = definition.name
             splitStart = now
         }
+    }
+
+    private fun startRun() {
+        activeFloor = DungeonAPI.dungeonFloor
+        if (activeFloor == null) return
+        runStart = System.currentTimeMillis()
+        splitStart = 0L
+        activeSplit = null
+        nextSplit = 0
+        current = mutableListOf()
     }
 
     @Subscription
