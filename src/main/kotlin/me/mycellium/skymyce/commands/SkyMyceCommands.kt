@@ -8,7 +8,6 @@ import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.AuctionAPI
 import me.mycellium.skymyce.features.general.AuctionHouseScreen
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
-import me.mycellium.skymyce.features.instances.dungeons.RunSplitsScreen
 import me.mycellium.skymyce.hud.widget.WidgetEditorScreen
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.Utils.displayMessage
@@ -38,7 +37,6 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             }
             .then(dungeon())
-            .then(splits())
             .then(auction())
             .then(hud())
             .then(modules())
@@ -59,16 +57,6 @@ object SkyMyceCommands : SkyMyceModule() {
             .executes {
                 MC.instance.execute {
                     MC.instance.setScreen(DungeonScreen())
-                }
-                1
-            }
-    }
-
-    fun splits(): LiteralArgumentBuilder<FabricClientCommandSource> {
-        return literal("splits")
-            .executes {
-                MC.instance.execute {
-                    MC.instance.setScreen(RunSplitsScreen())
                 }
                 1
             }

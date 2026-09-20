@@ -1,6 +1,5 @@
 package me.mycellium.skymyce.features.general
 
-import com.google.gson.JsonObject
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.events.ChatChannel
 import me.mycellium.skymyce.api.events.PlayerMessageEvent
@@ -18,10 +17,6 @@ import me.mycellium.skymyce.utils.Utils.displayModMessage
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
 import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
-import tech.thatgravyboat.skyblockapi.utils.Scheduling
-import tech.thatgravyboat.skyblockapi.utils.http.Http
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import kotlin.math.round
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -65,7 +60,7 @@ object PartyCommands : SkyMyceModule() {
             val argsLiteral = it.groupValues[2]
 
             val command = PartyCommandTypes.fromAlias(commandLiteral) ?: return@let
-            val args = argsLiteral.split(" ")
+            val args = argsLiteral.trim().takeIf { it.isNotEmpty() }?.split(Regex("\\s+")) ?: emptyList()
 
             if (command !in PartyCommandsConfig.enabledPartyCommands) return@let
 
@@ -77,13 +72,19 @@ object PartyCommands : SkyMyceModule() {
             displayDevMessage("args: $args")
 
             when (command) {
-                PartyCommandTypes.INVITE -> if (isLeader) sendCommand("party invite ${args[0]}", true)
+                PartyCommandTypes.INVITE -> {
+                    val target = args.firstOrNull() ?: return@let
+                    if (isLeader) sendCommand("party invite $target", true)
+                }
 
-                PartyCommandTypes.KICK -> if (isLeader) sendCommand("party kick ${findPartyMember(args[0])}", true)
+                PartyCommandTypes.KICK -> {
+                    val target = args.firstOrNull() ?: return@let
+                    if (isLeader) sendCommand("party kick ${findPartyMember(target)}", true)
+                }
 
                 PartyCommandTypes.ALLINVITE -> {
                     if (isLeader) {
-                        when (args[0]) {
+                        when (args.firstOrNull()?.lowercase()) {
                             "on", "yes" -> if (!PartyAPI.allInvite) sendCommand("party settings allinvite")
                             "off", "no" -> if (PartyAPI.allInvite) sendCommand("party settings allinvite")
                             else -> sendCommand("party settings allinvite")
@@ -95,11 +96,20 @@ object PartyCommands : SkyMyceModule() {
 
                 PartyCommandTypes.WARP -> if (isLeader) sendCommand("party warp")
 
-                PartyCommandTypes.TRANSFER -> if (isLeader) sendCommand("party transfer ${targetArgument(args[0], event.player)}", true)
+                PartyCommandTypes.TRANSFER -> {
+                    val target = args.firstOrNull() ?: event.player
+                    if (isLeader) sendCommand("party transfer ${targetArgument(target, event.player)}", true)
+                }
 
-                PartyCommandTypes.PROMOTE -> if (isLeader) sendCommand("party promote ${targetArgument(args[0], event.player)}", true)
+                PartyCommandTypes.PROMOTE -> {
+                    val target = args.firstOrNull() ?: event.player
+                    if (isLeader) sendCommand("party promote ${targetArgument(target, event.player)}", true)
+                }
 
-                PartyCommandTypes.DEMOTE -> if (isLeader) sendCommand("party demote ${targetArgument(args[0], event.player)}", true)
+                PartyCommandTypes.DEMOTE -> {
+                    val target = args.firstOrNull() ?: event.player
+                    if (isLeader) sendCommand("party demote ${targetArgument(target, event.player)}", true)
+                }
 
                 PartyCommandTypes.KICKOFFLINE -> if (isLeader) sendCommand("party kickoffline")
 
@@ -121,62 +131,8 @@ object PartyCommands : SkyMyceModule() {
 
                 PartyCommandTypes.PING -> sendMessage("Ping: ${ServerUtils.currentPing}ms")
 
-                PartyCommandTypes.NETWORTH -> {
-                    val target = argsLiteral.trim().ifBlank { event.player }
-                    val encodedTarget = URLEncoder.encode(target, StandardCharsets.UTF_8)
-                    Scheduling.schedule(0.seconds) {
-                        val response = Http.getResult<JsonObject>("https://api.altpapier.dev/v2/profiles/$encodedTarget").getOrNull()
-                        if (response == null) {
-                            sendModMessage("Could not fetch networth for $target.", ChatChannel.PARTY)
-                            return@schedule
-                        }
-
-                        if (response.get("status")?.asInt != 200) {
-                            val reason = response.get("reason")?.asString ?: "SkyHelper rejected the request"
-                            sendModMessage("Networth lookup failed for $target: $reason", ChatChannel.PARTY)
-                            return@schedule
-                        }
-
-                        val profiles = response.getAsJsonArray("data")
-                        val profile = profiles.firstOrNull { it.asJsonObject.get("selected")?.asBoolean == true }
-                            ?: profiles.firstOrNull()
-                        val networth = profile?.asJsonObject?.getAsJsonObject("networth")
-                        if (networth == null) {
-                            sendModMessage("No networth data found for $target.", ChatChannel.PARTY)
-                            return@schedule
-                        }
-
-                        val highestValueItem = networth.entrySet()
-                            .asSequence()
-                            .mapNotNull { (_, inventory) ->
-                                inventory.asJsonObject.getAsJsonArray("items")
-                            }
-                            .flatMap { it.asSequence() }
-                            .mapNotNull { item ->
-                                val itemObject = item.asJsonObject
-                                val price = itemObject.get("price")?.asDouble ?: return@mapNotNull null
-                                price to (itemObject.get("loreName")?.asString
-                                    ?: itemObject.get("name")?.asString
-                                    ?: "Unknown item")
-                            }
-                            .maxByOrNull { it.first }
-
-                        val totalNetworth = networth.get("networth")?.asDouble
-                        if (totalNetworth == null) {
-                            sendModMessage("No total networth found for $target.", ChatChannel.PARTY)
-                            return@schedule
-                        }
-
-                        val highestItemMessage = highestValueItem?.let { " | Highest: ${it.second} (${NumberUtils.condense(it.first)})" }.orEmpty()
-                        sendModMessage(
-                            "$target's networth: ${NumberUtils.condense(totalNetworth)}$highestItemMessage",
-                            ChatChannel.PARTY
-                        )
-                    }
-                }
-
                 PartyCommandTypes.DUNGEONS -> {
-                    val floor = DungeonFloor.getByName(args.getOrNull(0) ?: return)
+                    val floor = DungeonFloor.getByName(args.firstOrNull() ?: return@let)
                     val data = DungeonTracker.profitData[floor]
                     if (floor != null && data != null) {
                         when (args.getOrNull(1)?.lowercase()) {
@@ -197,9 +153,11 @@ object PartyCommands : SkyMyceModule() {
                         }
                     }
                 }
+
+                PartyCommandTypes.PB -> PersonalBestCommand.handlePbCommand(argsLiteral)
+                }
             }
         }
-    }
 
     fun targetArgument(arg: String, default: String) = if (arg.isBlank()) default else findPartyMember(arg)
 
@@ -222,8 +180,8 @@ enum class PartyCommandTypes(val aliases: Set<String>) {
     FPS(setOf("fps")),
     TPS(setOf("tps")),
     PING(setOf("ping")),
-    NETWORTH(setOf("nw", "networth")),
-    DUNGEONS(setOf("dungeon", "dungeons", "d"));
+    DUNGEONS(setOf("dungeon", "dungeons", "d")),
+    PB(setOf("pb", "personalbest"));
 
     companion object {
         fun fromAlias(alias: String): PartyCommandTypes? = entries.firstOrNull { alias.lowercase() in it.aliases }

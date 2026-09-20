@@ -23,4 +23,9 @@ object PartyCommandsConfig : CategoryKt("Party Commands") {
         slider = true
         range = 0.0..10.0
     }
+
+    var hypixelApiKey by string("") {
+        name = TranslatableValue.literal("Hypixel API Key")
+        description = TranslatableValue.literal("Hypixel API key used by the !pb command")
+    }
 }
