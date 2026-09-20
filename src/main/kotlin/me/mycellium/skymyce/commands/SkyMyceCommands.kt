@@ -80,16 +80,6 @@ object SkyMyceCommands : SkyMyceModule() {
                 MC.instance.execute {
                     MC.instance.setScreen(AuctionHouseScreen())
                 }
-
-                fun splits(): LiteralArgumentBuilder<FabricClientCommandSource> {
-                    return literal("splits")
-                        .executes {
-                            MC.instance.execute {
-                                MC.instance.setScreen(RunSplitsScreen())
-                            }
-                            1
-                        }
-                }
                 1
             }
     }
@@ -118,8 +108,9 @@ object SkyMyceCommands : SkyMyceModule() {
     fun troll(): LiteralArgumentBuilder<FabricClientCommandSource> {
         return literal("calc")
             .executes {
-                trueProfit =! trueProfit
-                displayMessage(string = "[SM]: i calculate nothing")
+                trueProfit = !trueProfit
+                displayMessage("[SM] i calculate nothing.")
+                displayMessage(trueProfit.toString())
                 1
             }
     }
