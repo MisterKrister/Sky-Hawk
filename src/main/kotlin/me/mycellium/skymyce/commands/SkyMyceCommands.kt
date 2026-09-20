@@ -8,6 +8,7 @@ import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.AuctionAPI
 import me.mycellium.skymyce.features.general.AuctionHouseScreen
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
+import me.mycellium.skymyce.features.instances.dungeons.RunSplitsScreen
 import me.mycellium.skymyce.hud.widget.WidgetEditorScreen
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.Utils.displayMessage
@@ -37,10 +38,12 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             }
             .then(dungeon())
+            .then(splits())
             .then(auction())
             .then(hud())
             .then(modules())
             .then(test())
+            .then(troll())
     }
 
     fun test(): LiteralArgumentBuilder<FabricClientCommandSource> {
@@ -61,11 +64,31 @@ object SkyMyceCommands : SkyMyceModule() {
             }
     }
 
+    fun splits(): LiteralArgumentBuilder<FabricClientCommandSource> {
+        return literal("splits")
+            .executes {
+                MC.instance.execute {
+                    MC.instance.setScreen(RunSplitsScreen())
+                }
+                1
+            }
+    }
+
     fun auction(): LiteralArgumentBuilder<FabricClientCommandSource> {
         return literal("ah")
             .executes {
                 MC.instance.execute {
                     MC.instance.setScreen(AuctionHouseScreen())
+                }
+
+                fun splits(): LiteralArgumentBuilder<FabricClientCommandSource> {
+                    return literal("splits")
+                        .executes {
+                            MC.instance.execute {
+                                MC.instance.setScreen(RunSplitsScreen())
+                            }
+                            1
+                        }
                 }
                 1
             }
@@ -88,6 +111,15 @@ object SkyMyceCommands : SkyMyceModule() {
                 ModuleManager.modules.forEach  {
                     displayMessage("§${if (it.isEnabled()) "a✔" else "c❌"} ${it.javaClass.simpleName}")
                 }
+                1
+            }
+    }
+    var trueProfit = false
+    fun troll(): LiteralArgumentBuilder<FabricClientCommandSource> {
+        return literal("calc")
+            .executes {
+                trueProfit =! trueProfit
+                displayMessage(string = "[SM]: i calculate nothing")
                 1
             }
     }

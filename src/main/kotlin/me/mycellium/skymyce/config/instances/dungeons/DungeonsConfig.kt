@@ -3,10 +3,23 @@ package me.mycellium.skymyce.config.instances.dungeons
 import com.teamresourceful.resourcefulconfig.api.types.options.TranslatableValue
 import com.teamresourceful.resourcefulconfigkt.api.CategoryKt
 import me.mycellium.skymyce.features.instances.dungeons.DungeonCleanChat
+import me.mycellium.skymyce.features.instances.dungeons.RunSplitsScreen
+import me.mycellium.skymyce.utils.MC
 
 object DungeonsConfig : CategoryKt("Dungeons") {
     init {
         category(DungeonTrackerConfig)
+        button {
+            title = "Run Splits Menu"
+            text = "Open"
+            description = "View theoretical PB segments and recorded dungeon runs (/skymyce splits)"
+
+            onClick {
+                MC.instance.execute {
+                    MC.instance.setScreen(RunSplitsScreen())
+                }
+            }
+        }
     }
 
     val valuableItemThreshold by int(15) {
@@ -21,6 +34,16 @@ object DungeonsConfig : CategoryKt("Dungeons") {
     val dungeonWinScreen by boolean(true) {
         name = TranslatableValue.literal("Dungeon Win Screen")
         description = TranslatableValue.literal("Displays an overlay when a dungeon is ended")
+    }
+
+    val runSplits by boolean(true) {
+        name = TranslatableValue.literal("Run Splits")
+        description = TranslatableValue.literal("Tracks dungeon section times and saves your best splits")
+    }
+
+    val runSplitsHud by boolean(true) {
+        name = TranslatableValue.literal("Run Splits HUD")
+        description = TranslatableValue.literal("Displays current dungeon section times")
     }
 
     val dungeonMessageFilter by select(DungeonCleanChat.DungeonFilter.MISCELLANEOUS) {

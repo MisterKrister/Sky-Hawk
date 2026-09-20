@@ -17,6 +17,8 @@ import me.mycellium.skymyce.features.instances.MissingPlayers
 import me.mycellium.skymyce.features.instances.dungeons.DungeonChestOverlay
 import me.mycellium.skymyce.features.instances.dungeons.DungeonCleanChat
 import me.mycellium.skymyce.features.instances.dungeons.DungeonWinOverlay
+import me.mycellium.skymyce.features.instances.dungeons.DungeonSplits
+import me.mycellium.skymyce.features.instances.dungeons.DungeonSplitsWidget
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTracker
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTrackerWidget
 import me.mycellium.skymyce.features.mining.MiningFeatures
@@ -52,7 +54,8 @@ object SkyMyce : ClientModInitializer {
             MiscApi, AuctionAPI, DungeonApi, ServerUtils, HudRenderer, WidgetManager,
             DevTooltips,
             LoadoutKeybinds, SkyMyceCommands, SkillXpOverlay, AbilityCooldownOverlay, AutoRefill, ClientInfoOverlay, PartyCommands, Waypoints,
-            StashHelper, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
+            StashHelper, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay, DungeonSplits,
+            DungeonSplitsWidget,
             MiningFeatures
         )
 
