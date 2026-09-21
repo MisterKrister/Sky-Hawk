@@ -7,6 +7,7 @@ import me.mycellium.skymyce.api.DungeonApi
 import me.mycellium.skymyce.api.MiscApi
 import me.mycellium.skymyce.commands.SkyMyceCommands
 import me.mycellium.skymyce.config.Config
+import me.mycellium.skymyce.config.instances.dungeons.PartyFinder
 import me.mycellium.skymyce.features.dev.DevTooltips
 import me.mycellium.skymyce.features.general.*
 import me.mycellium.skymyce.features.general.overlays.AbilityCooldownOverlay
@@ -52,7 +53,7 @@ object SkyMyce : ClientModInitializer {
             MiscApi, AuctionAPI, DungeonApi, ServerUtils, HudRenderer, WidgetManager,
             DevTooltips,
             LoadoutKeybinds, SkyMyceCommands, SkillXpOverlay, AbilityCooldownOverlay, AutoRefill, ClientInfoOverlay, PartyCommands, Waypoints,
-            StashHelper, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
+            StashHelper, PartyFinder, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
             MiningFeatures, Plane
         )
 
