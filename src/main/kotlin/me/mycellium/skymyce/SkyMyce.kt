@@ -21,6 +21,7 @@ import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTracker
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTrackerWidget
 import me.mycellium.skymyce.features.mining.MiningFeatures
 import me.mycellium.skymyce.features.troll.CheesePizza
+import me.mycellium.skymyce.features.troll.Plane
 import me.mycellium.skymyce.hud.HudRenderer
 import me.mycellium.skymyce.hud.widget.WidgetManager
 import me.mycellium.skymyce.utils.ServerUtils
@@ -52,7 +53,7 @@ object SkyMyce : ClientModInitializer {
             DevTooltips,
             LoadoutKeybinds, SkyMyceCommands, SkillXpOverlay, AbilityCooldownOverlay, AutoRefill, ClientInfoOverlay, PartyCommands, Waypoints,
             StashHelper, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
-            MiningFeatures
+            MiningFeatures, Plane
         )
 
         ModuleManager.modules.forEach {
