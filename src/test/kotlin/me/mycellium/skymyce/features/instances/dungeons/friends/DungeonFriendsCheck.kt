@@ -43,6 +43,15 @@ fun main() {
     deliveries.add("fourth", "Bob", 30000, { acknowledged++ }, { fallback++ })
     deliveries.clear(failed = true)
     check(fallback == 2) // A connection failure while still playing triggers fallback.
+    var testReceived = false
+    deliveries.add("lfg", "Alice", 40000, { acknowledged++ }, { fallback++ })
+    deliveries.add("connection-test", "Alice", 40000, { testReceived = true }, { error("Test receipt was lost") })
+    deliveries.acknowledge("unrelated", "Alice")
+    check(!testReceived)
+    deliveries.acknowledge("connection-test", "Alice")
+    check(testReceived && acknowledged == 1) // A diagnostic receipt cannot accept an outstanding LFG message.
+    deliveries.tick(45000)
+    check(fallback == 3)
     // Hovering a full-width label's blank area has no text style, even when it has a location tooltip.
     val hoverFix = LabelComponentMixin::class.java.getDeclaredMethod("skymyce\$nonNullHoverStyle", Style::class.java)
         .apply { isAccessible = true }

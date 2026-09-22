@@ -267,6 +267,10 @@ object DungeonFriends : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock || !isFriend(name)) return false
         val knownUuid = FriendsAPI.getFriend(name)?.uuid?.toString()?.replace("-", "")
         if (knownUuid != null && knownUuid != uuid) return false
+        if (text == CONNECTION_TEST) {
+            MC.player.sendSystemMessage(Component.literal("§b[SkyMyce Connect] §fReceived a connection test from $name; replying."))
+            return true
+        }
         val request = DungeonJoinRequest.parse(text)
         if (request != null) {
             if (joining.receiveRequest(name, request, now())) checkJoinStats(name)
@@ -284,6 +288,31 @@ object DungeonFriends : SkyMyceModule() {
             MC.player.sendSystemMessage(message)
         }
         return true
+    }
+
+    fun testConnection(name: String) {
+        fun report(message: String) {
+            MC.instance.player?.sendSystemMessage(Component.literal("§b[SkyMyce Connect] §r$message"))
+        }
+        val player = MC.instance.player ?: return
+        val started = now()
+        val problem = when {
+            !name.matches(Regex("[A-Za-z0-9_]{1,16}")) -> "Enter a valid Minecraft username."
+            !LocationAPI.isOnSkyBlock -> "Join SkyBlock first; the relay connects there."
+            name.equals(player.name.string, true) -> "Choose another player to test the connection."
+            !DungeonFriendRelay.connected -> "${DungeonFriendRelay.status}. Check /skymyce pf > Settings > Player Relay."
+            !isFriend(name) -> "$name is not in your known friends. Add them and refresh /skymyce pf."
+            started < nextAction -> "Please wait a moment before testing again."
+            else -> null
+        }
+        if (problem != null) { report("§e$problem"); return }
+        nextAction = started + 1000
+        if (DungeonFriendRelay.send(name, CONNECTION_TEST, {
+            report("§aConnection to $name confirmed (${now() - started} ms round trip).")
+        }, {
+            report("§cNo relay reply from $name: offline, timed out, or connection lost. Both players need the mod and the same relay room.")
+        })) report("§7Testing connection to $name... Waiting up to 5 seconds for their mod.")
+        else report("§eCould not send the test: ${DungeonFriendRelay.status}. Try again shortly.")
     }
 
     private fun sendJoinAction(command: String) {
@@ -371,6 +400,7 @@ object DungeonFriends : SkyMyceModule() {
 
     fun now(): Long = System.nanoTime() / 1000000
 
+    private const val CONNECTION_TEST = "[SkyMyce Connection Test]"
     private const val PLAYER = "(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16})"
     private val FRIEND_NOTICE = Regex("^Friend > $PLAYER (joined|left)(?:\\.| the (?:server|network)[!.]?)?$")
 }

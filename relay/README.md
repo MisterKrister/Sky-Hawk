@@ -17,6 +17,8 @@ This Cloudflare Worker routes messages between verified Minecraft accounts. Its 
 
 Anyone with a verified Minecraft account can connect. The mod only processes messages from known friends. Everyone normally uses the `friends` room; `?room=testing` is a separate allowed room for testing, not a private room. Rooms isolate delivery but are not secret or membership-restricted. Messages are addressed to one player, not broadcast.
 
+Temporary connection check: both friends install the updated mod and enter SkyBlock, then run `/skymyce connect <ign>` (or `/sm connect <ign>`). The other player sees the incoming test and their mod replies automatically. Success shows the round-trip time; missing receipts fail within five seconds. It works without Available classes, PB data, or a free party slot, and never falls back to Hypixel chat. Local connection problems appear immediately with the current relay status.
+
 ## Local project and future updates
 
 The maintained source is the `relay` folder in the mod repository. A ready-to-run copy is also installed in `C:\Users\krister\skyblock-relay`, where you created the starter. Its original scaffold is backed up in `codex-original-scaffold`.

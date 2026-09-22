@@ -45,6 +45,13 @@ object SkyMyceCommands : SkyMyceModule() {
                 MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
                 1
             })
+            .then(literal("connect").executes {
+                displayMessage("§b[SkyMyce Connect] §fUsage: /skymyce connect <ign>")
+                1
+            }.then(argument("name", StringArgumentType.word()).executes {
+                DungeonFriends.testConnection(StringArgumentType.getString(it, "name"))
+                1
+            }))
             .then(literal("relaymsg").then(argument("name", StringArgumentType.word())
                 .then(argument("message", StringArgumentType.greedyString()).executes {
                     DungeonFriends.relayReply(StringArgumentType.getString(it, "name"), StringArgumentType.getString(it, "message"))

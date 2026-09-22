@@ -37,6 +37,8 @@ Open `/skymyce pf` (or `/sm pf`). Stats use installed **SkyBlocker** or **SkyBlo
 
 The player relay is deployed at `wss://skyblock-relay.skyblock-relay.workers.dev/websocket` and included as the default. See the [relay setup and testing walkthrough](relay/README.md) for installation, Cloudflare maintenance, and connection troubleshooting.
 
+Temporary diagnostic: `/skymyce connect <ign>` (or `/sm connect <ign>`) tests the relay connection to a friend. Both players must be in SkyBlock using the mod and the same relay room. The recipient sees the test and their mod acknowledges automatically; the sender sees the round-trip time or a failure within five seconds. This does not invite, change LFG replies, or fall back to Hypixel chat.
+
 - Friends refresh silently every minute in SkyBlock, including all friend-list pages. Disable background scans under **Instances > Dungeons > Dungeon Friends**. Opening the assistant also scans. Manually requested friend lists remain visible.
 - The centered dark menu uses cyan accents, aligned Catacombs/all five class levels, and the selected floor's **S+ PB**. Click **CATA**, any class heading, or **S+ PB** to sort; click again to reverse. The **Sort** menu also exposes each column for smaller windows. Missing values stay last in either direction. The highest class is highlighted; levels are numbers without bars, including virtual levels above 50.
 - Known stats must meet the floor's Catacombs requirement and include a completion time. Hidden or unavailable values appear as **—**, with the reason on hover. S+ PB sorting puts friends without S+ times last; an ordinary completion still qualifies but is never displayed as an S+ time.
