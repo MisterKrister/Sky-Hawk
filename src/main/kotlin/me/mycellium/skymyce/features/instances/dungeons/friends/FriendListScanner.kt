@@ -1,11 +1,15 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 /** Only suppresses recognizable responses to a scan we actually requested. All times are monotonic milliseconds. */
-class FriendListScanner {
-    val online = linkedMapOf<String, OnlineDungeonFriend>()
+class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
+    val online = cached.orEmpty().associateByTo(linkedMapOf()) { it.name.lowercase() }
+    var hasScanned = cached != null
+        private set
+    var version = 0L
+        private set
     var scanning = false
         private set
-    var status = "Waiting for friend list"
+    var status = if (hasScanned) "${online.size} cached friends online" else "Waiting for friend list"
         private set
     private var page = 1
     private var lastPage = 1
@@ -16,25 +20,35 @@ class FriendListScanner {
     private var headerSeen = false
     private var deadline = 0L
     private var nextCommand = 0L
-    private var nextScan = 0L
+    private var requested = !hasScanned
     private var stopAfterResponse = false
+    private var offlineSeen = false
     private val seen = mutableSetOf<String>()
 
-    fun refresh(now: Long) { if (!scanning) nextScan = minOf(nextScan, maxOf(now, nextCommand)) }
+    fun refresh(now: Long) {
+        if (!scanning) {
+            requested = true
+            nextCommand = maxOf(now, nextCommand)
+        }
+    }
 
     fun tick(now: Long): String? {
         if (waiting && now >= deadline) {
             scanning = false
             waiting = false
-            status = "Friend scan timed out; retrying later"
-            nextScan = now + 60000
+            status = "Friend scan timed out; click Refresh to retry"
         }
         if (!scanning) {
-            if (now < nextScan) return null
+            if (!requested) return null
+            requested = false
+            hasScanned = true
+            version++
             scanning = true
             page = 1
+            lastPage = 1
             completedPages = 0
             stopAfterResponse = false
+            offlineSeen = false
             seen.clear()
         }
         if (waiting || now < nextCommand) return null
@@ -46,11 +60,19 @@ class FriendListScanner {
         return "friend list $page"
     }
 
-    fun manualCommand(now: Long) {
+    fun manualCommand() {
         // The response already in flight still belongs to us; suppress it before yielding to manual output.
         stopAfterResponse = waiting
         if (!waiting) scanning = false
-        nextScan = now + 60000
+        requested = false
+        hasScanned = true
+        version++
+    }
+
+    fun cancel() {
+        scanning = false
+        waiting = false
+        requested = !hasScanned
     }
 
     fun notification(name: String, joined: Boolean) {
@@ -62,6 +84,7 @@ class FriendListScanner {
             online.remove(key)
             seen.remove(key)
         }
+        version++
     }
 
     fun receive(message: String, now: Long): Boolean {
@@ -83,16 +106,20 @@ class FriendListScanner {
             } else if (ERROR.matches(line)) {
                 scanning = false
                 waiting = false
-                nextScan = now + 60000
-                status = "Friend scan delayed by server"
+                status = "Friend scan stopped by server; click Refresh to retry"
             } else {
                 val entry = ENTRY.matchEntire(line)
                 if (entry != null && headerSeen) {
                     val (name, location) = entry.destructured
                     val key = name.lowercase()
-                    seen += key
-                    if (location.startsWith("offline", true) || location.startsWith("currently offline", true)) online.remove(key)
-                    else online[key] = OnlineDungeonFriend(name, location)
+                    if (location.startsWith("offline", true) || location.startsWith("currently offline", true)) {
+                        offlineSeen = true
+                        online.remove(key)
+                    } else if (!offlineSeen) {
+                        seen += key
+                        online[key] = OnlineDungeonFriend(name, location)
+                    }
+                    version++
                 } else if (SEPARATOR.matches(line) && headerSeen) {
                     finishPage(now)
                 }
@@ -110,10 +137,11 @@ class FriendListScanner {
             status = "Background scan paused after manual command"
             return
         }
-        if (page >= lastPage) {
+        // Drain this response's footer, but never request another page after the first offline entry.
+        if (offlineSeen || page >= lastPage) {
             online.keys.retainAll(seen)
+            version++
             scanning = false
-            nextScan = now + 60000
             status = "${online.size} friends online"
         } else {
             page++

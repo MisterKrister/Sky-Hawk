@@ -76,31 +76,38 @@ fun main() {
     check(scanner.tick(1) == null)
     check(!scanner.receive("Party > Alice: hello", 10))
     check(!scanner.receive("Alice is asking for a party", 10))
-    check(scanner.receive("--------------------\nFriends (Page 1 of 2)\nAlice is in Dungeons\nBob is offline\n§6Dave §cis currently offline\n--------------------", 100))
-    check(scanner.online.keys == setOf("alice"))
+    check(scanner.receive("--------------------\nFriends (Page 1 of 8)\nAlice is in Dungeons\n--------------------", 100))
     check(scanner.online["alice"]?.badge == "§cIn Run")
     check(scanner.tick(1299) == null)
     check(scanner.tick(1300) == "friend list 2")
     check(scanner.receive("--------------------", 1310))
-    check(scanner.receive("<< Friends (Page 2 of 2)", 1311))
+    check(scanner.receive("<< Friends (Page 2 of 8)", 1311))
     check(scanner.receive("[MVP+] Carol is in Dungeon Hub", 1312))
-    check(scanner.receive("--------------------", 1313))
+    check(scanner.receive("Bob is offline", 1313))
+    check(scanner.receive("§6Dave §cis currently offline", 1314))
+    check(scanner.tick(2600) == null) // Drain the response without requesting another page.
+    check(scanner.receive("--------------------", 2601))
     check(!scanner.scanning)
     check(scanner.online.keys == setOf("alice", "carol"))
     check(scanner.online["carol"]?.badge == "§aIdle")
+    check(scanner.tick(6200) == null)
     scanner.notification("Alice", false)
     scanner.notification("Dave", true)
     check(scanner.online.keys == setOf("carol", "dave"))
+    check(scanner.tick(9999) == null) // Adding a friend only updates the cache.
     scanner.refresh(10000)
     check(scanner.tick(10000) == "friend list 1")
     scanner.tick(20000)
     check(!scanner.scanning && scanner.online.size == 2) // Partial/failed scans don't erase known friends.
     check(!scanner.receive("--------------------", 20001))
+    check(scanner.tick(20002) == null)
     scanner.refresh(21000)
     scanner.tick(21000)
-    scanner.manualCommand(21001)
+    scanner.manualCommand()
     check(scanner.receive("--------------------\nFriends (Page 1 of 1)\nEve is in Hub\n--------------------", 21002))
     check(!scanner.receive("--------------------\nFriends (Page 1 of 1)\nEve is in Hub\n--------------------", 21003))
+    check(scanner.tick(81000) == null) // Manual commands do not restart background scanning.
+    scanner.refresh(81001)
     check(scanner.tick(81001) == "friend list 1")
     check(scanner.receive("--------------------\nFriends (Page 1 of 1)\nEve is in Hub\n--------------------", 81002))
     check(scanner.online.keys == setOf("eve"))
@@ -108,6 +115,21 @@ fun main() {
     scanner.tick(85000)
     check(scanner.receive("You don't have any friends!", 85001))
     check(!scanner.scanning && scanner.online.isEmpty())
+    check(scanner.tick(89000) == null)
+    scanner.refresh(90000)
+    check(scanner.tick(90000) == "friend list 1")
+    check(scanner.receive("You are sending commands too fast!", 90001))
+    check(!scanner.scanning && scanner.tick(86400004) == null)
+    scanner.cancel()
+    check(scanner.tick(86400005) == null) // Reconnecting cannot schedule a scan either.
+
+    val firstOffline = FriendListScanner(listOf(OnlineDungeonFriend("Stale", "Unknown")))
+    check(firstOffline.tick(0) == null)
+    firstOffline.refresh(0)
+    check(firstOffline.tick(0) == "friend list 1")
+    check(firstOffline.receive("--------------------\nFriends (Page 1 of 8)\n§6Cessna808 §eis in SkyBlock - Dungeon Hub\n§b10inchleftie §cis currently offline\n--------------------", 1))
+    check(firstOffline.online.keys == setOf("cessna808") && !firstOffline.scanning)
+    check(firstOffline.tick(60000) == null && firstOffline.remainingPages == 0)
 
     fun parse(member: String) = DungeonFriendStats.fromProfiles(JsonParser.parseString(
         """{"success":true,"profiles":[{"selected":true,"members":{"abc":$member}}]}"""
@@ -151,6 +173,20 @@ fun main() {
     check(DungeonFriendStatsCache.receiveShared(improved, "Alice", "a".repeat(32), 1000100))
     check(DungeonFriendStatsCache.get("Alice")?.sPlusTimes?.get(F7) == 290000L)
     check(!DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    DungeonFriendStatsCache.clear()
+    check(DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), TANK))
+    check(DungeonFriendStatsCache.get("Alice") == known.copy(selectedClass = TANK))
+    check(DungeonFriendStatsCache.verified("Alice") == null) // Class updates cannot renew an expired PB.
+    val classVersion = DungeonFriendStatsCache.version
+    check(!DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), TANK))
+    check(DungeonFriendStatsCache.version == classVersion)
+    check(!DungeonFriendStatsCache.updateClass("Alice", "b".repeat(32), HEALER))
+    check(DungeonFriendStatsCache.receiveShared(improved, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice")?.selectedClass == TANK) // A late stats result cannot undo the live class.
+    DungeonFriendStatsCache.forgetLiveClass("Alice")
+    check(DungeonFriendStatsCache.receiveShared(improved.deepCopy().apply { addProperty("fetchedAt", 1000075) }, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice")?.selectedClass == ARCHER) // A profile change releases the live override.
     DungeonFriendStatsCache.clear()
     check(sharedDungeonFriend(sharedJson, "Bob", null, 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", "b".repeat(32), 1000100) == null)
@@ -357,6 +393,17 @@ fun main() {
     check(newlyAddedFriend("From Alice: You are now friends with Bob") == null)
     check(newlyAddedFriend("You are now friends with invalid/name") == null)
     check(newlyAddedFriend("You sent a friend request to Alice!") == null)
+    check(dungeonClassChange("You have selected the Berserk Dungeon Class!", "Self") == "Self" to BERSERKER)
+    check(dungeonClassChange("§aYou have selected the Mage Dungeon Class! §8(§7x§r2§8)", "Self") == "Self" to MAGE)
+    check(dungeonClassChange("Party Finder > Cessna808 set their class to Healer Level 49!", "Self") == "Cessna808" to HEALER)
+    check(dungeonClassChange("Party Finder > [MVP+] Alice set their class to Archer Level 44!", "Self") == "Alice" to ARCHER)
+    check(dungeonClassChange("Party > Alice: You have selected the Tank Dungeon Class!", "Self") == null)
+    check(dungeonClassChange("You have selected the Farmer Dungeon Class!", "Self") == null)
+    check(dungeonTitleDetails(F7, listOf(MAGE)) == "to play §aF7§f as §bMage")
+    check(dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER)) == "to play §cM7§f as §aTank§f/§6Berserk§f/§cArcher§f/§dHealer") {
+        dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER))
+    }
+    check(dungeonTitleDetails(null, emptyList()) == "to their party")
 
     val replies = DungeonLfgReplies()
     replies.receive("Alice", "yes", 0)
@@ -377,6 +424,13 @@ fun main() {
     replies.sent("Alice", 400000)
     check(replies.get("Alice")?.status == LfgReplyStatus.WAITING)
     replies.forget("Alice")
+    check(replies.get("Alice") == null)
+    replies.invited("Alice", 500000)
+    check(replies.get("Alice")?.status == LfgReplyStatus.INVITED)
+    replies.prune(560000)
+    check(replies.get("Alice") == null)
+    replies.invited("Alice", 600000)
+    replies.forget("Alice") // Joining the roster clears the pending row marker.
     check(replies.get("Alice") == null)
 
     // Match SkyBlockPv's public getters, including Kotlin's encoded Duration representation.
@@ -399,7 +453,34 @@ fun main() {
 
     val savedDirectory = Files.createTempDirectory("dungeon-friends-check")
     val savedFile = savedDirectory.resolve("stats.json")
+    val savedFriends = savedDirectory.resolve("friends.json")
     try {
+        val friendStore = FriendListStore(savedFriends)
+        check(friendStore.load() == null)
+        check(FriendListScanner(friendStore.load()).tick(0) == "friend list 1")
+        friendStore.save(firstOffline.online.values)
+        val restoredScanner = FriendListScanner(FriendListStore(savedFriends).load())
+        check(restoredScanner.hasScanned && restoredScanner.online == firstOffline.online)
+        check(restoredScanner.tick(0) == null && restoredScanner.tick(86400000) == null)
+        restoredScanner.notification("aryanepstein", true)
+        restoredScanner.notification("Cessna808", false)
+        friendStore.save(restoredScanner.online.values)
+        val updatedScanner = FriendListScanner(friendStore.load())
+        check(updatedScanner.online.keys == setOf("aryanepstein") && updatedScanner.tick(0) == null)
+        updatedScanner.refresh(1)
+        check(updatedScanner.tick(1) == "friend list 1")
+        check(updatedScanner.tick(10001) == null && updatedScanner.tick(86400000) == null) // No timeout retry.
+        updatedScanner.refresh(86400001)
+        check(updatedScanner.tick(86400001) == "friend list 1")
+        updatedScanner.cancel()
+        check(updatedScanner.tick(172800000) == null)
+        friendStore.save(emptyList())
+        val emptyScanner = FriendListScanner(friendStore.load())
+        check(emptyScanner.hasScanned && emptyScanner.online.isEmpty() && emptyScanner.tick(0) == null)
+        check(FriendListScanner(FriendListStore(savedDirectory.resolve("other-account.json")).load()).tick(0) == "friend list 1")
+        Files.writeString(savedFriends, "{bad json")
+        check(runCatching { friendStore.load() }.isFailure)
+        check(Files.readString(savedFriends) == "{bad json")
         val store = DungeonFriendStatsStore(savedFile)
         val saved = mapOf(
             "low" to CachedDungeonFriend(known.copy(catacombs = 40), "a".repeat(32), 1),
@@ -442,6 +523,7 @@ fun main() {
         check(Files.readString(savedFile) == "{bad json")
         DungeonFriendStatsCache.clear()
     } finally {
+        Files.deleteIfExists(savedFriends)
         Files.deleteIfExists(savedFile)
         Files.deleteIfExists(savedDirectory)
     }

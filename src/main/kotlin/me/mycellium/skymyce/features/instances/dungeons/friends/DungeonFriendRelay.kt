@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.MC
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
@@ -62,6 +63,7 @@ object DungeonFriendRelay {
     private var policyDeadline = 0L
     private var nextPolicyRequest = 0L
     private var sentPolicy: DungeonJoinPolicy? = null
+    private var sentClass: DungeonClass? = null
     private var nextPolicyUpdate = 0L
     var sharedStatsAvailable = false
         private set
@@ -283,6 +285,9 @@ object DungeonFriendRelay {
             val floor = tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.valueOf(it.get("floor").asString)
             val limit = it.get("maxPbMillis")?.takeUnless { it.isJsonNull }?.asLong
             check(uuid.matches(Regex("[a-f0-9]{32}")) && floor in FRIEND_FLOORS && (limit == null || limit in 1..59999999))
+            it.get("selectedClass")?.takeUnless { value -> value.isJsonNull }?.asString?.let { clazz ->
+                DungeonFriends.onClassChange(name, uuid, DungeonClass.valueOf(clazz))
+            }
             PartyPolicy(uuid, DungeonJoinPolicy(floor, limit, it.get("open").asBoolean))
         }
         partyPolicies[name] = DungeonFriends.now() + 20000 to policy
@@ -302,12 +307,13 @@ object DungeonFriendRelay {
         packet(mapOf("type" to "party_get", "id" to id, "names" to missing))
     }
 
-    fun publishPolicy(policy: DungeonJoinPolicy) {
+    fun publishPolicy(policy: DungeonJoinPolicy, selectedClass: DungeonClass?) {
         val now = DungeonFriends.now()
-        if (!connected || !policiesAvailable || sentPolicy == policy || now < nextPolicyUpdate) return
+        if (!connected || !policiesAvailable || (sentPolicy == policy && sentClass == selectedClass) || now < nextPolicyUpdate) return
         sentPolicy = policy
+        sentClass = selectedClass
         nextPolicyUpdate = now + 1000
-        packet(mapOf("type" to "party_set", "floor" to policy.floor, "maxPbMillis" to policy.maxPbMillis, "open" to policy.open))
+        packet(mapOf("type" to "party_set", "floor" to policy.floor, "maxPbMillis" to policy.maxPbMillis, "open" to policy.open, "selectedClass" to selectedClass))
     }
 
     fun publishStats(name: String, uuid: String, stats: DungeonFriendStats, fetchedAt: Long, upload: String) {
@@ -335,6 +341,7 @@ object DungeonFriendRelay {
         partyPolicies.clear()
         policyRequest = null
         sentPolicy = null
+        sentClass = null
         nextPolicyRequest = 0L
         nextPolicyUpdate = 0L
         statsRequests.values.forEach { it.second.complete(null) }
