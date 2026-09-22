@@ -34,22 +34,26 @@ npm run deploy
 
 Your current Cloudflare login is already authorized. If it expires, run `npx wrangler login` and approve the browser page, then deploy again. Cloudflare hosts the relay after the command exits. Keep one source copy authoritative when making future changes; edits to one folder do not automatically update the other.
 
-For local development, run `npm run dev` and set the mod's relay URL to `ws://127.0.0.1:8787/websocket?room=testing`. Real mod clients still verify with Mojang; there is no production or development authentication bypass. Restore the hosted address after testing.
+For local development, run `npm run dev` and set the mod's relay URL to `ws://127.0.0.1:8787/websocket?room=testing`. Real mod clients still need Mojang-signed account proofs; there is no production or development authentication bypass. Restore the hosted address after testing.
+
+Protocol 2 replaces the old `hasJoined` check: Minecraft accepted the local session, but returned HTTP 403 when Cloudflare verified it. Both players must install the updated mod. The client obtains its certificate/profile through Minecraft and signs the relay's challenge locally; the relay makes no requests to the blocked Minecraft endpoints. Close codes/reasons now appear in the menu and Minecraft log.
+
+The public trust roots in `src/minecraft-keys.json` came from `https://api.minecraftservices.com/publickeys` on 2026-09-22. If Mojang rotates these keys, refresh them from your PC (only the `playerCertificateKeys` and `profilePropertyKeys` arrays), run the checks, and redeploy. Never accept public trust roots supplied by a connecting player. These are public verification keys, not account secrets.
 
 ## Behavior and limits
 
-- The relay sends a unique challenge. Minecraft's own authentication library proves the logged-in account directly to Mojang. The relay verifies that proof using Mojang's session service and attaches the verified name/UUID to every message. Minecraft access tokens, passwords, and Hypixel API keys never go to the relay.
+- The relay sends a unique challenge. Minecraft supplies a Mojang-signed, UUID-bound account certificate and a signed profile name. The mod signs the challenge with its local account key. The relay verifies the certificate, ownership signature, profile signature, matching UUID/name, certificate expiry, and profile age (at most 24 hours), then attaches the verified identity to messages. Mojang's signatures use its standard SHA-1/RSA format; the challenge uses SHA-256/RSA with a protocol-specific prefix. Minecraft access tokens, private keys, passwords, and Hypixel API keys never go to the relay.
 - Only the addressed mod can acknowledge a delivered message. Forwarding by the server alone does not count as a client receipt. A dropped acknowledgement can still cause an occasional duplicate LFG message across relay and Hypixel; automatic Join actions never retry through chat.
 - Connections retry automatically with backoff up to one minute. Pending messages are not replayed after reconnecting. Leaving SkyBlock cancels pending messages. **Reconnect** in Settings resets the connection; only one connection per account per room is kept.
-- Fixed rooms: `friends` and `testing`. Each room allows 128 connections and at most eight from one IP. New connections are limited to 20 per IP per minute per Cloudflare location. Authentication expires after 30 seconds. Payloads are limited to 2 KiB and text to 256 characters. Each connection can burst 12 messages/receipts, then replenishes one every 2.5 seconds.
+- Fixed rooms: `friends` and `testing`. Each room allows 128 connections and at most eight from one IP. New connections are limited to 20 per IP per minute per Cloudflare location. Authentication expires after 30 seconds and permits one proof of at most 8 KiB. Authenticated payloads are limited to 2 KiB and text to 256 characters. Each connection can burst 12 messages/receipts, then replenishes one every 2.5 seconds.
 - Hibernation preserves authentication, pending receipts, and per-connection limits in socket attachments. Idle ping/pong uses Cloudflare's automatic response without waking application code. The server stores no chat history and emits no message/authentication logs. Cloudflare terminates TLS; this is not end-to-end encrypted messaging.
 - The worker's free-plan quotas still apply. Monitor Workers & Pages → **skyblock-relay** → Metrics in Cloudflare. This setup does not enable billing or upgrade your plan.
 
 ## Verification
 
-`npm run check` generates Cloudflare types and checks TypeScript. `npm test` packages the production Worker and runs real local WebSocket connections in Miniflare. Only the outbound Mojang response is mocked: checks cover authentication rejection, identity stamping, recipient acknowledgements, hibernation/resumption, room isolation, message sizes, and message-rate limits. The mod's Gradle checks also cover receipt timeout/fallback, cancellation, PB checks, and party behavior.
+`npm run check` generates Cloudflare types and checks TypeScript. `npm test` packages the production Worker and runs real local WebSocket connections in Miniflare. Only the public trust roots in the in-memory test bundle are replaced with generated test keys. Real signature verification checks cover valid proofs, forged names/UUIDs, certificate/profile expiry, signature tampering, replay rejection, identity stamping, recipient acknowledgements, hibernation/resumption, room isolation, message sizes, and message-rate limits. The mod's Gradle checks also cover receipt timeout/fallback, cancellation, PB checks, and party behavior.
 
-Live health/unauthenticated rejection can be checked without Minecraft. Successful Mojang verification and two-player GUI behavior require the in-game steps above.
+`npm run smoke` checks live protocol/health and unauthenticated rejection without account credentials. An approved real-account check also passed against the deployed relay: signed certificate/profile verification, heartbeats before and after 35 seconds idle, and a clean close. Two-player GUI behavior requires the in-game steps above.
 
 ## Cloudflare tools in Codex
 

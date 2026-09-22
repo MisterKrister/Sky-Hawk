@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 const endpoint = new URL(process.argv[2] ?? "https://skyblock-relay.skyblock-relay.workers.dev");
 assert.equal(endpoint.protocol, "https:");
-assert.equal((await (await fetch(new URL("/health", endpoint))).json()).service, "SkyMyce relay");
+assert.deepEqual(await (await fetch(new URL("/health", endpoint))).json(), { service: "SkyMyce relay", version: 2 });
 
 async function rejectUnauthenticated(authenticate) {
   const url = new URL("/websocket?room=testing", endpoint);
@@ -13,6 +13,7 @@ async function rejectUnauthenticated(authenticate) {
     socket.addEventListener("message", event => {
       const packet = JSON.parse(event.data);
       assert.equal(packet.type, "challenge");
+      assert.equal(packet.protocol, 2);
       socket.send(JSON.stringify(authenticate
         ? { type: "authenticate", name: "RelayCheck", uuid: "0".repeat(32) }
         : { type: "message", id: "0".repeat(32), to: "Nobody", text: "unauthenticated test" }));

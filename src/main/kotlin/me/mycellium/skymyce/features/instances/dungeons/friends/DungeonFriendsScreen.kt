@@ -34,7 +34,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
-    private lateinit var apiStatus: LabelComponent
+    private lateinit var apiSetup: ButtonComponent
     private lateinit var listStatus: LabelComponent
     private lateinit var relayStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
@@ -85,14 +85,12 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         partyStatus.tooltip(Component.literal(DungeonFriendsSettings.availability.let {
             if (it.enabled) "Available for ${it.floor.name}: ${it.classes.joinToString { clazz -> clazz.displayName }}\nS+ PB at most ${formatDungeonTime(it.maxPbMillis)}"
             else "Auto join is off. Configure Available classes and an S+ PB limit."
-        }))
-        apiStatus.text(Component.literal(when {
+        } + DungeonFriends.joining.status.takeIf { it.isNotEmpty() }?.let { "\n$it" }.orEmpty()))
+        apiSetup.tooltip(Component.literal(when {
             !LocationAPI.onHypixel -> "Join Hypixel to load player stats"
-            DungeonFriends.joining.status.isNotEmpty() -> DungeonFriends.joining.status
             !DungeonFriendStatsCache.canFetch -> "Use SkyBlockPv / SkyBlocker or add an API key"
-            else -> DungeonFriendStatsCache.status.ifEmpty { "Cached stats ready; refresh updates Cata > 40" }
+            else -> DungeonFriendStatsCache.status.ifEmpty { "Configure SkyBlock stats" }
         }))
-        apiStatus.color(Color.ofRgb(if (!DungeonFriendStatsCache.canFetch) 0xE6BD79 else MUTED))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
         relayStatus.text(Component.literal(DungeonFriendRelay.status))
         relayStatus.color(Color.ofRgb(if (DungeonFriendRelay.connected) CYAN else MUTED))
@@ -205,12 +203,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         child(separator())
         child(row().apply {
             gap(8)
-            apiStatus = label("Loading SkyBlock stats...", MUTED)
-            child(apiStatus.horizontalSizing(Sizing.expand()))
-            child(button("API setup", 62) { openApiSettings() })
+            relayStatus = label(DungeonFriendRelay.status, MUTED)
+            child(relayStatus.horizontalSizing(Sizing.expand()))
+            apiSetup = button("API setup", 62) { openApiSettings() }
+            child(apiSetup)
         })
-        relayStatus = label(DungeonFriendRelay.status, MUTED)
-        child(relayStatus.horizontalSizing(Sizing.fill()))
     }
 
     private fun toolbarActions(row: FlowLayout) {

@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { verifyAccount } from "./auth";
 
 type RelayEnv = Env;
 type Session = {
@@ -20,7 +21,7 @@ const encoder = new TextEncoder();
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/health") return Response.json({ service: "SkyMyce relay", version: 1 });
+    if (url.pathname === "/health") return Response.json({ service: "SkyMyce relay", version: 2 });
     if (url.pathname !== "/websocket") return new Response("Not found", { status: 404 });
     if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("WebSocket upgrade required", { status: 426 });
@@ -57,15 +58,15 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     };
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment(session);
-    server.send(JSON.stringify({ type: "challenge", serverId: session.challenge, protocol: 1 }));
+    server.send(JSON.stringify({ type: "challenge", serverId: session.challenge, protocol: 2 }));
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > session.expires) await this.ctx.storage.setAlarm(session.expires);
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
-    if (typeof raw !== "string" || encoder.encode(raw).length > 2048) { ws.close(1009, "Message too large"); return; }
     const session = ws.deserializeAttachment() as Session;
+    if (typeof raw !== "string" || encoder.encode(raw).length > (session.name ? 2048 : 8192)) { ws.close(1009, "Message too large"); return; }
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(raw);
@@ -80,21 +81,9 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       session.checking = true;
       ws.serializeAttachment(session);
       try {
-        // The Minecraft access token is sent ONLY by the client to Mojang, never to this relay.
-        const endpoint = new URL("https://sessionserver.mojang.com/session/minecraft/hasJoined");
-        endpoint.searchParams.set("username", data.name);
-        endpoint.searchParams.set("serverId", session.challenge);
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 10000);
-        let profile: { id?: string; name?: string } | null;
-        try {
-          const response = await fetch(endpoint, { signal: controller.signal, redirect: "manual" });
-          profile = response.status === 200 ? await response.json() : null;
-        } finally { clearTimeout(timer); } // A completed authentication must not keep the object awake.
-        if (profile === null) { ws.close(4003, "Minecraft account verification failed"); return; }
-        if (profile.id !== data.uuid || typeof profile.name !== "string" || !username.test(profile.name) ||
-            profile.name.toLowerCase() !== data.name.toLowerCase() || Date.now() > session.expires) {
-          ws.close(4003, "Minecraft account verification failed"); return;
+        const profile = await verifyAccount(data, session.challenge);
+        if (profile === null || Date.now() > session.expires) {
+          ws.close(4003, "Invalid or expired Minecraft proof; update mod or restart Minecraft"); return;
         }
         if (ws.readyState !== WebSocket.OPEN) return;
         for (const other of this.ctx.getWebSockets()) {
@@ -107,7 +96,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.uuid = profile.id;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 1 }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2 }));
       } catch { ws.close(1013, "Minecraft verification unavailable; retry later"); }
       return;
     }
@@ -158,5 +147,6 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
   }
 
+  webSocketClose(ws: WebSocket): void { ws.close(1000, "Client disconnected"); }
   webSocketError(ws: WebSocket): void { ws.close(1011, "Connection error"); }
 }

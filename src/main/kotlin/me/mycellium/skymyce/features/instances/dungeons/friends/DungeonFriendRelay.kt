@@ -2,6 +2,7 @@ package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.MC
 import java.net.URI
@@ -9,6 +10,8 @@ import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.nio.ByteBuffer
 import java.time.Duration
+import java.security.Signature
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
@@ -87,6 +90,7 @@ object DungeonFriendRelay {
         status = "Connecting to relay..."
         val token = generation
         val sessionService = MC.instance.services().sessionService()
+        val keyManager = MC.instance.profileKeyPairManager
         val listener = object : WebSocket.Listener {
             private val text = StringBuilder()
             override fun onOpen(webSocket: WebSocket) {
@@ -111,24 +115,43 @@ object DungeonFriendRelay {
                                 val json = JsonParser.parseString(message).asJsonObject
                                 when (json.get("type")?.asString) {
                                     "challenge" -> {
-                                        check(!authenticating && !connected && json.get("protocol")?.asInt == 1)
+                                        check(!authenticating && !connected && json.get("protocol")?.asInt == 2)
                                         val serverId = json.get("serverId").asString
                                         check(serverId.matches(Regex("[a-f0-9]{32}")))
                                         authenticating = true
                                         status = "Verifying Minecraft account..."
-                                        CompletableFuture.runAsync {
-                                            // Authlib sends the access token directly to Mojang, never to the relay.
-                                            sessionService.joinServer(user.profileId, user.accessToken, serverId)
-                                        }.whenComplete { _, error -> MC.instance.execute {
+                                        keyManager.prepareKeyPair().thenApplyAsync { optional ->
+                                            val pair = optional.orElseThrow { IllegalStateException("Minecraft account key unavailable") }
+                                            val certificate = pair.publicKey().data()
+                                            check(!certificate.hasExpired())
+                                            val profile = sessionService.fetchProfile(user.profileId, true)?.profile()
+                                                ?: error("Signed Minecraft profile unavailable")
+                                            check(profile.id() == user.profileId && profile.name().equals(user.name, true))
+                                            val textures = sessionService.getPackedTextures(profile)
+                                            check(textures != null && textures.hasSignature())
+                                            // Minecraft manages the private key. Only public, signed proof leaves the client.
+                                            val uuid = user.profileId.toString().replace("-", "")
+                                            val proof = Signature.getInstance("SHA256withRSA").run {
+                                                initSign(pair.privateKey())
+                                                update("SkyMyce relay v2\n$serverId\n$uuid\n${user.name}".toByteArray(Charsets.UTF_8))
+                                                sign()
+                                            }
+                                            val base64 = Base64.getEncoder()
+                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid,
+                                                "expires" to certificate.expiresAt().toEpochMilli(),
+                                                "publicKey" to base64.encodeToString(certificate.key().encoded),
+                                                "keySignature" to base64.encodeToString(certificate.keySignature()),
+                                                "proof" to base64.encodeToString(proof),
+                                                "profile" to textures.value(), "profileSignature" to textures.signature())
+                                        }.whenComplete { proof, error -> MC.instance.execute {
                                             if (token == generation) {
-                                                if (error != null) failed("Minecraft verification failed; retrying")
-                                                else packet(mapOf("type" to "authenticate", "name" to user.name,
-                                                    "uuid" to user.profileId.toString().replace("-", "")))
+                                                if (error != null) failed("Minecraft signed proof unavailable; restart Minecraft and reconnect")
+                                                else packet(proof)
                                             }
                                         } }
                                     }
                                     "ready" -> {
-                                        check(authenticating && json.get("protocol")?.asInt == 1)
+                                        check(authenticating && json.get("protocol")?.asInt == 2)
                                         check(json.get("uuid").asString == user.profileId.toString().replace("-", ""))
                                         check(json.get("name").asString.equals(user.name, true))
                                         connected = true
@@ -166,7 +189,9 @@ object DungeonFriendRelay {
             }
             override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? {
                 MC.instance.execute { if (token == generation) {
-                    failed(if (statusCode == 4001) "Relay account connected elsewhere; use Reconnect" else "Relay disconnected; reconnecting")
+                    val detail = reason.filter { it >= ' ' && it != '\u007f' && it != '§' }.take(120)
+                    failed(if (statusCode == 4001) "Relay account connected elsewhere; use Reconnect"
+                        else "Relay closed ($statusCode): ${detail.ifEmpty { "connection lost" }}")
                     if (statusCode == 4001) nextAttempt = Long.MAX_VALUE
                 } }
                 return null
@@ -209,6 +234,7 @@ object DungeonFriendRelay {
         nextAttempt = DungeonFriends.now() + retryDelay
         retryDelay = (retryDelay * 2).coerceAtMost(60000)
         status = message
+        if (message != "Relay disconnected") SkyMyce.logger.warn("{}", message)
         deliveries.clear(failed = true)
     }
 

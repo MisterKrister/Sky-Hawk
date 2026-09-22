@@ -1,21 +1,38 @@
 import assert from "node:assert/strict";
-import { Miniflare, Response, convertV4MiniflareOptions } from "miniflare";
+import { readFile } from "node:fs/promises";
+import { generateKeyPairSync, sign } from "node:crypto";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 
-// Mock ONLY Mojang's outbound response; production has no authentication bypass.
+// Replace public trust roots only in this in-memory test bundle. Production has no auth bypass.
+const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
+const authority = rsa(), profileAuthority = rsa(), playerKey = rsa();
+const publicDer = pair => pair.publicKey.export({ format: "der", type: "spki" });
+const publicBase64 = pair => publicDer(pair).toString("base64");
+const trusted = JSON.parse(await readFile("src/minecraft-keys.json", "utf8"));
+let script = await readFile(".test-build/index.js", "utf8");
+for (const [original, replacement] of [[trusted.playerCertificateKeys[0].publicKey, publicBase64(authority)],
+  [trusted.profilePropertyKeys[1].publicKey, publicBase64(profileAuthority)]]) {
+  assert.ok(script.includes(original));
+  script = script.replaceAll(original, replacement);
+}
 const identities = new Map([["Alice", "a".repeat(32)], ["Bob", "b".repeat(32)], ["Carol", "c".repeat(32)]]);
-const proofs = new Map();
+function proof(name, challenge, changes = {}) {
+  const id = identities.get(name), expires = changes.expires ?? Date.now() + 3600000;
+  const expiry = Buffer.alloc(8); expiry.writeBigInt64BE(BigInt(expires));
+  const certificate = Buffer.concat([Buffer.from(id, "hex"), expiry, publicDer(playerKey)]);
+  const profile = Buffer.from(JSON.stringify({ profileId: id, profileName: name,
+    timestamp: changes.timestamp ?? Date.now(), textures: {} })).toString("base64");
+  return { type: "authenticate", name: changes.name ?? name, uuid: id, expires, publicKey: publicBase64(playerKey),
+    keySignature: sign("RSA-SHA1", certificate, authority.privateKey).toString("base64"),
+    proof: sign("RSA-SHA256", Buffer.from(`SkyMyce relay v2\n${challenge}\n${id}\n${changes.name ?? name}`), playerKey.privateKey).toString("base64"),
+    profile, profileSignature: sign("RSA-SHA1", Buffer.from(profile), profileAuthority.privateKey).toString("base64") };
+}
 const options = convertV4MiniflareOptions({
   name: "relay-check",
-  modules: true, scriptPath: ".test-build/index.js", compatibilityDate: "2026-09-21",
+  modules: true, script, compatibilityDate: "2026-09-21",
   bindings: { ROOMS: "friends,testing" },
   durableObjects: { RELAY_ROOMS: { className: "RelayRoom", useSQLite: true } },
-  outboundService: async request => {
-    const url = new URL(request.url);
-    assert.equal(url.origin + url.pathname, "https://sessionserver.mojang.com/session/minecraft/hasJoined");
-    const name = url.searchParams.get("username");
-    const valid = proofs.get(url.searchParams.get("serverId")) === name;
-    return valid ? Response.json({ name, id: identities.get(name) }) : new Response(null, { status: 204 });
-  },
+  outboundService: () => { throw new Error("Account verification must not make outbound requests"); },
 });
 options.workers[0].config.env.CONNECT_LIMIT = { type: "rate-limit", namespace: "7112026", simple: { limit: 20, period: 60 } };
 const mf = new Miniflare(options);
@@ -31,8 +48,10 @@ function inbox(ws) {
     waiting.push(data => { clearTimeout(timer); resolve(data); });
   });
 }
-async function connect(name, room = "friends", prove = true) {
-  const response = await mf.dispatchFetch(`http://localhost/websocket?room=${room}`, { headers: { Upgrade: "websocket" } });
+async function connect(name, room = "friends") {
+  const response = await mf.dispatchFetch(`http://localhost/websocket?room=${room}`, {
+    headers: { Upgrade: "websocket", "CF-Connecting-IP": `127.0.0.${sockets.length + 1}` },
+  });
   assert.equal(response.status, 101);
   const ws = response.webSocket;
   sockets.push(ws);
@@ -40,8 +59,9 @@ async function connect(name, room = "friends", prove = true) {
   ws.accept();
   const challenge = await next();
   assert.equal(challenge.type, "challenge");
-  if (prove) proofs.set(challenge.serverId, name);
-  return { ws, next, authenticate() { ws.send(JSON.stringify({ type: "authenticate", name, uuid: identities.get(name) })); } };
+  assert.equal(challenge.protocol, 2);
+  return { ws, next, challenge: challenge.serverId,
+    authenticate(data = proof(name, challenge.serverId)) { ws.send(JSON.stringify(data)); } };
 }
 function closeEvent(ws) { return new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error("Expected connection close")), 3000);
@@ -64,8 +84,21 @@ try {
   alice.ws.send(JSON.stringify({ type: "message", id: "2".repeat(32), to: "Carol", text: "must not cross rooms" }));
   assert.equal((await alice.next()).code, "offline");
   carol.ws.send("ping"); assert.equal(await carol.next(), "pong"); // No leaked message preceded the pong.
-  const fake = await connect("Alice", "testing", false);
-  const rejected = closeEvent(fake.ws); fake.authenticate(); assert.equal((await rejected).code, 4003);
+  for (const mutate of [
+    (data, challenge) => ({ ...data, proof: Buffer.alloc(256).toString("base64") }),
+    data => ({ ...data, uuid: identities.get("Bob") }),
+    () => proof("Alice", alice.challenge), // Valid proof from another socket cannot be replayed.
+    (data, challenge) => proof("Alice", challenge, { name: "Bob" }), // A verified UUID cannot impersonate a name.
+    (data, challenge) => proof("Alice", challenge, { expires: Date.now() - 1 }),
+    (data, challenge) => proof("Alice", challenge, { timestamp: Date.now() - 2 * 86400000 }),
+    data => ({ ...data, keySignature: data.profileSignature }),
+    data => ({ ...data, profileSignature: data.keySignature }),
+  ]) {
+    const fake = await connect("Alice", "testing");
+    const rejected = closeEvent(fake.ws);
+    fake.authenticate(mutate(proof("Alice", fake.challenge), fake.challenge));
+    assert.equal((await rejected).code, 4003);
+  }
   const unauth = await connect("Bob", "testing");
   const blocked = closeEvent(unauth.ws);
   unauth.ws.send(JSON.stringify({ type: "message", id, to: "Carol", text: "not authenticated" }));
@@ -76,7 +109,10 @@ try {
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);
-  console.log("Relay checks passed: account verification, recipient acknowledgement after hibernation, room isolation, limits, and idle ping.");
+  const cleanClose = closeEvent(carol.ws);
+  carol.ws.close(1000, "Diagnostic complete");
+  assert.equal((await cleanClose).code, 1000);
+  console.log("Relay checks passed: signed account proof, name/UUID binding, expiry, replay rejection, hibernation, receipts, isolation, and limits.");
 } finally {
   for (const ws of sockets) { try { ws.close(); } catch {} }
   await mf.dispose();
