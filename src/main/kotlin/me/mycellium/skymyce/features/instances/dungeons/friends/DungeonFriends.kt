@@ -33,6 +33,7 @@ import java.util.UUID
 object DungeonFriends : SkyMyceModule() {
     val replies = DungeonLfgReplies()
     val joining = DungeonFriendJoining()
+    private val partyNotices = DungeonPartyNotices()
     var scanner = FriendListScanner()
         private set
     private var party = DungeonFriendParty()
@@ -40,6 +41,7 @@ object DungeonFriends : SkyMyceModule() {
     private var nextPartyRequest = 0L
     private var nextAction = 0L
     private var sendingScan = false
+    private var sendingPartyAction = false
     private var selectedListing: Pair<PartyListing, Long>? = null
     private var awaitingRoster = false
     private var restoredParty = false
@@ -70,6 +72,7 @@ object DungeonFriends : SkyMyceModule() {
         ClientLifecycleEvents.CLIENT_STOPPING.register { DungeonFriendStatsCache.save(true); DungeonFriendRelay.disconnect() }
         ClientTickEvents.END_CLIENT_TICK.register { tick() }
         ClientSendMessageEvents.ALLOW_COMMAND.register { command ->
+            if (!sendingPartyAction) partyNotices.command(command, automatic = false, now())
             if (!sendingScan && command.matches(Regex("(?i)(?:f|friend) list(?: \\d+)?"))) scanner.manualCommand(now())
             val reply = Regex("(?i)^(?:msg|w|tell|whisper) ([A-Za-z0-9_]{1,16}) (.+)$").matchEntire(command)
             val offer = reply?.groupValues?.get(1)?.lowercase()?.let(receivedOffers::get)
@@ -236,6 +239,7 @@ object DungeonFriends : SkyMyceModule() {
             awaitingRoster = false
             restoredParty = false
             joining.clear()
+            partyNotices.clear()
             partyRevision++
             nextPartyRequest = 0
         }
@@ -261,15 +265,17 @@ object DungeonFriends : SkyMyceModule() {
             nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
         }
         serverPartyInviter(event.component)?.let { inviter ->
-            event.cancel()
-            MC.player.sendSystemMessage(Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
-                .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) })
+            if (joining.expectsInvite(inviter, now())) {
+                event.cancel()
+                MC.player.sendSystemMessage(Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
+                    .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) })
+            }
             if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
                 joining.invited(inviter, now())
                 checkJoinStats(inviter)
             }
         }
-        compactPartyNotice(message, MC.player.name.string)?.let { notice ->
+        partyNotices.compact(message, MC.player.name.string, now())?.let { notice ->
             event.cancel()
             notify(notice)
         }
@@ -338,7 +344,7 @@ object DungeonFriends : SkyMyceModule() {
                 val name = command.substringAfterLast(' ')
                 notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...")
             }
-            sendCommand(command)
+            sendPartyAction(command)
             return true
         }
         val parts = command.split(' ', limit = 3)
@@ -414,8 +420,14 @@ object DungeonFriends : SkyMyceModule() {
         // Recheck at the send boundary, including clicks from rows rendered before the fifth member joined.
         if (!canAct || MC.connection == null || friend.name.lowercase() !in scanner.online || !friend.name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return false
         nextAction = now() + 1000
-        sendCommand(command)
+        sendPartyAction(command)
         return true
+    }
+
+    private fun sendPartyAction(command: String) {
+        partyNotices.command(command, automatic = true, now())
+        sendingPartyAction = true
+        try { sendCommand(command) } finally { sendingPartyAction = false }
     }
 
     @Subscription
@@ -432,6 +444,7 @@ object DungeonFriends : SkyMyceModule() {
         fallbackMessages.clear()
         DungeonFriendRelay.disconnect()
         joining.clear()
+        partyNotices.clear()
         selectedListing = null
         awaitingRoster = false
         restoredParty = false

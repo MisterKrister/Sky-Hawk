@@ -12,6 +12,7 @@ import net.minecraft.network.chat.Style
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass.*
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.*
 import java.nio.file.Files
+import java.util.concurrent.CompletableFuture
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -196,6 +197,65 @@ fun main() {
     check(DungeonFriendStatsCache.status.isEmpty())
     check(DungeonFriendStatsCache.pendingCount == 0)
 
+    // Cache hits complete independently of a slow/missing response at the front of the queue.
+    val cacheTime = System.currentTimeMillis()
+    val sharedReplies = linkedMapOf<String, CompletableFuture<com.google.gson.JsonObject?>>()
+    fun sharedReply(name: String) = JsonParser.parseString(Gson().toJson(mapOf("record" to mapOf(
+        "name" to name, "uuid" to "a".repeat(32), "fetchedAt" to cacheTime, "stats" to known,
+    )))).asJsonObject
+    fun pollCache(time: Long = cacheTime) = DungeonFriendStatsCache.pollShared(time) { name, _ ->
+        CompletableFuture<com.google.gson.JsonObject?>().also { sharedReplies[name] = it }
+    }
+    listOf("Slow", "Alice", "Bob", "Carol").forEach { DungeonFriendStatsCache.request(it) }
+    repeat(4) { pollCache() }
+    check(sharedReplies.keys == setOf("slow", "alice", "bob")) // Bounded prefetch preserves upload grants.
+    sharedReplies.getValue("bob").complete(sharedReply("bob"))
+    pollCache()
+    check(DungeonFriendStatsCache.get("Bob") == known && DungeonFriendStatsCache.get("Slow") == null)
+    check("carol" in sharedReplies && DungeonFriendStatsCache.pendingCount == 3)
+    sharedReplies.getValue("alice").complete(sharedReply("alice"))
+    sharedReplies.getValue("carol").complete(sharedReply("carol"))
+    pollCache()
+    check(DungeonFriendStatsCache.pendingCount == 1)
+    DungeonFriendStatsCache.clear()
+    sharedReplies.getValue("slow").complete(sharedReply("slow"))
+    pollCache()
+    check(DungeonFriendStatsCache.get("Slow") == null) // A cleared session cannot repopulate from late replies.
+    sharedReplies.clear()
+    DungeonFriendStatsCache.request("NewFriend", force = true, bypassShared = true)
+    pollCache()
+    sharedReplies.getValue("newfriend").complete(sharedReply("newfriend"))
+    pollCache()
+    check(DungeonFriendStatsCache.get("NewFriend") == null && DungeonFriendStatsCache.pendingCount == 1)
+    pollCache(cacheTime + 110001)
+    check(!sharedReplies.getValue("newfriend").isDone) // Refresh expired upload grants before provider use.
+    DungeonFriendStatsCache.clear()
+    // Twenty warm records can load without a one-second pause per player; further reads are paced.
+    val burstTime = cacheTime + 200000
+    var reads = 0
+    repeat(21) { DungeonFriendStatsCache.request("Warm$it") }
+    fun pollWarm(time: Long) = DungeonFriendStatsCache.pollShared(time) { name, _ ->
+        reads++
+        CompletableFuture.completedFuture(sharedReply(name))
+    }
+    repeat(25) { pollWarm(burstTime) }
+    check(reads == 20 && DungeonFriendStatsCache.pendingCount == 1)
+    pollWarm(burstTime + 999)
+    check(reads == 20)
+    pollWarm(burstTime + 1000)
+    pollWarm(burstTime + 1000)
+    check(reads == 21 && DungeonFriendStatsCache.pendingCount == 0)
+    DungeonFriendStatsCache.clear()
+    DungeonFriendStatsCache.request("Limited")
+    pollCache(burstTime + 20000)
+    sharedReplies.getValue("limited").complete(JsonParser.parseString("""{"error":"rate_limited"}""").asJsonObject)
+    pollCache(burstTime + 20000)
+    pollCache(burstTime + 20999)
+    check(sharedReplies.getValue("limited").isDone && DungeonFriendStatsCache.pendingCount == 1)
+    pollCache(burstTime + 21000)
+    check(!sharedReplies.getValue("limited").isDone) // Retry the cache instead of turning its limit into API load.
+    DungeonFriendStatsCache.clear()
+
     check(matchesFriendClass(hidden, emptySet(), setOf(TANK)))
     check(matchesFriendClass(known.copy(selectedClass = null), emptySet(), setOf(TANK)))
     check(matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(ARCHER)))
@@ -371,12 +431,39 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(partyInviter("From Alice: Bob has invited you to join their party!") == null)
     check(joinedPartyLeader("You have joined [MVP++] Cessna808's party!") == "Cessna808")
     check(joinedPartyLeader("From Bob: You have joined Alice's party!") == null)
-    check(compactPartyNotice("[MVP+] Alice joined the party.", "Self") == "Alice joined")
-    check(compactPartyNotice("You have joined aryanepstein's party!", "Self") == "Self joined")
-    check(compactPartyNotice("---------------------\nYou have invited [MVP+] Alice to your party! They have 60 seconds to accept.\n---------------------", "Self") == "Alice has been invited")
-    check(compactPartyNotice("[MVP+] Host invited [VIP] Alice to the party! They have 60 seconds to accept.", "Self") == "Alice has been invited")
-    check(compactPartyNotice("From Bob: Alice joined the party.", "Self") == null)
-    check(compactPartyNotice("Alice joined the party.\nUnrelated message", "Self") == null)
+    val notices = DungeonPartyNotices()
+    val invitedAlice = "[MVP+] Self invited [VIP] Alice to the party! They have 60 seconds to accept."
+    check(notices.compact(invitedAlice, "Self", 0) == null)
+    check(notices.compact("[MVP+] Alice joined the party.", "Self", 0) == null)
+    check(notices.compact("You have joined aryanepstein's party!", "Self", 0) == null)
+    notices.command("p Alice", automatic = false, 0)
+    check(notices.compact(invitedAlice, "Self", 1) == null)
+    notices.command("party invite Alice", automatic = true, 2)
+    check(notices.compact(invitedAlice.replace("Self invited", "Other invited"), "Self", 3) == null)
+    check(notices.compact(invitedAlice, "Self", 4) == "Alice has been invited")
+    check(notices.compact("From Bob: Alice joined the party.", "Self", 5) == null)
+    check(notices.compact("Alice joined the party.\nUnrelated message", "Self", 5) == null)
+    check(notices.compact("[MVP+] Alice joined the party.", "Self", 6) == "Alice joined")
+    check(notices.compact("Alice joined the party.", "Self", 7) == null) // Consume the tracked join once.
+    notices.command("p Alice", automatic = true, 8)
+    check(notices.compact("---------------------\nYou have invited [MVP+] Alice to your party! They have 60 seconds to accept.\n---------------------", "Self", 9) == "Alice has been invited")
+    notices.command("p invite ALICE", automatic = false, 10)
+    check(notices.compact(invitedAlice, "Self", 11) == null)
+    check(notices.compact("Alice joined the party.", "Self", 12) == null) // Manual re-invite takes ownership.
+    notices.command("p Alice", automatic = true, 13)
+    check(notices.compact(invitedAlice, "Self", 10013) == null) // An unconfirmed command expires.
+    notices.command("p Alice", automatic = true, 10014)
+    check(notices.compact(invitedAlice, "Self", 10015) != null)
+    check(notices.compact("Alice joined the party.", "Self", 70015) == null)
+    notices.command("party accept aryanepstein", automatic = true, 70016)
+    check(notices.compact("You have joined Other's party!", "Self", 70017) == null)
+    check(notices.compact("You have joined aryanepstein's party!", "Self", 70018) == "Self joined")
+    notices.command("party accept aryanepstein", automatic = true, 70019)
+    notices.command("p accept aryanepstein", automatic = false, 70020)
+    check(notices.compact("You have joined aryanepstein's party!", "Self", 70021) == null)
+    notices.command("p Alice", automatic = true, 70022)
+    notices.clear()
+    check(notices.compact(invitedAlice, "Self", 70023) == null)
 
     val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")
     val lfg = DungeonLfgOffer(request, "Want to join?", 60000)

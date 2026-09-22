@@ -75,18 +75,52 @@ data class DungeonLfgOffer(val request: DungeonJoinRequest, val text: String, va
     }
 }
 
-fun compactPartyNotice(message: String, self: String): String? {
-    val lines = message.replace(Regex("§."), "").lines().map(String::trim)
-        .filter { it.isNotEmpty() && !it.matches(Regex("[-▬─]{5,}")) }
-    if (lines.size != 1) return null // Never hide unrelated lines in a mixed chat packet.
-    val line = lines.single()
-    joinedPartyLeader(line)?.let { return "$self joined" }
-    Regex("^(?:\\[Party] )?$NAME joined the party\\.$").matchEntire(line)?.let { return "${it.groupValues[1]} joined" }
-    Regex("^You (?:have )?invited $NAME to (?:your|the) party!(?: They have 60 seconds to accept\\.)?$")
-        .matchEntire(line)?.let { return "${it.groupValues[1]} has been invited" }
-    Regex("^$NAME invited $NAME to the party!(?: They have 60 seconds to accept\\.)?$")
-        .matchEntire(line)?.let { return "${it.groupValues[2]} has been invited" }
-    return null
+/** Compact only confirmations attributable to a command this mod actually sent. */
+class DungeonPartyNotices {
+    private data class Invite(val expires: Long, val confirmed: Boolean = false)
+    private val invited = mutableMapOf<String, Invite>()
+    private var accepted: Pair<String, Long>? = null
+
+    fun command(command: String, automatic: Boolean, now: Long) {
+        prune(now)
+        val match = Regex("(?i)^(?:p|party) (?:(invite|accept|join) )?([A-Za-z0-9_]{1,16})$").matchEntire(command.trim()) ?: return
+        val name = match.groupValues[2].lowercase()
+        if (match.groupValues[1].lowercase() in setOf("accept", "join")) {
+            accepted = if (automatic) name to now + 10000 else null
+        } else if (automatic) invited[name] = Invite(now + 10000)
+        else invited.remove(name) // A manual re-invite supersedes the mod's earlier attempt.
+    }
+
+    fun compact(message: String, self: String, now: Long): String? {
+        prune(now)
+        val lines = message.replace(Regex("§."), "").lines().map(String::trim)
+            .filter { it.isNotEmpty() && !it.matches(Regex("[-▬─]{5,}")) }
+        if (lines.size != 1) return null // Never hide unrelated lines in a mixed chat packet.
+        val line = lines.single()
+        joinedPartyLeader(line)?.let { leader ->
+            if (accepted?.first.equals(leader, true)) { accepted = null; return "$self joined" }
+            return null
+        }
+        Regex("^(?:\\[Party] )?$NAME joined the party\\.$").matchEntire(line)?.let {
+            val name = it.groupValues[1]
+            return if (invited.remove(name.lowercase())?.confirmed == true) "$name joined" else null
+        }
+        val own = Regex("^You (?:have )?invited $NAME to (?:your|the) party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
+        val named = Regex("^$NAME invited $NAME to the party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
+            ?.takeIf { it.groupValues[1].equals(self, true) }
+        val name = own?.groupValues?.get(1) ?: named?.groupValues?.get(2) ?: return null
+        val pending = invited[name.lowercase()] ?: return null
+        if (pending.confirmed) return null
+        invited[name.lowercase()] = Invite(now + 60000, true)
+        return "$name has been invited"
+    }
+
+    private fun prune(now: Long) {
+        invited.entries.removeIf { it.value.expires <= now }
+        if (accepted?.second?.let { it <= now } == true) accepted = null
+    }
+
+    fun clear() { invited.clear(); accepted = null }
 }
 
 data class JoinPartyContext(

@@ -1,8 +1,8 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.JsonParser
+import com.google.gson.JsonObject
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.misc.PartyCommandsConfig
 import me.mycellium.skymyce.utils.MC
@@ -10,14 +10,18 @@ import tech.thatgravyboat.skyblockapi.utils.Scheduling
 import tech.thatgravyboat.skyblockapi.utils.http.Http
 import java.nio.file.Path
 import java.util.UUID
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.CompletableFuture
 import kotlin.time.Duration.Companion.seconds
 
-/** Queue and cache belong to the client thread; only the single in-flight request runs off-thread. */
+/** Cache lookups run independently of the single, rate-limited provider/API request. */
 object DungeonFriendStatsCache {
     private data class Request(val uuid: UUID?, val force: Boolean, val bypassShared: Boolean)
+    private data class SharedLookup(val response: CompletableFuture<JsonObject?>, val expires: Long)
     private val cache = mutableMapOf<String, CachedDungeonFriend>()
     private val pending = linkedMapOf<String, Request>()
+    private val sharedLookups = mutableMapOf<String, SharedLookup>()
+    private var relayCredits = 20.0 // Leave room below the relay's 30-message burst limit for uploads.
+    private var relayUpdated = 0L
     private var store: DungeonFriendStatsStore? = null
     private var dirty = false
     private var nextSave = 0L
@@ -89,6 +93,7 @@ object DungeonFriendStatsCache {
         save(true)
         generation++
         pending.clear()
+        sharedLookups.clear()
         feedback = ""
     }
 
@@ -96,6 +101,7 @@ object DungeonFriendStatsCache {
         generation++
         cache.clear()
         pending.clear()
+        sharedLookups.clear()
         feedback = ""
         version++
     }
@@ -103,6 +109,40 @@ object DungeonFriendStatsCache {
     /** Retain displayed PBs and the server's retry deadline while requesting fresh stats. */
     fun refresh() {
         cache.replaceAll { _, value -> if ((value.stats.catacombs ?: 0) > 40) value.copy(expires = 0L) else value }
+    }
+
+    /** Runs on the client thread, including while an API request or its retry deadline is pending. */
+    internal fun pollShared(now: Long, lookup: (String, String?) -> CompletableFuture<JsonObject?>?) {
+        relayCredits = minOf(20.0, relayCredits + (now - relayUpdated).coerceAtLeast(0) / 1000.0)
+        relayUpdated = now
+        sharedLookups.entries.removeIf { it.key !in pending || it.value.expires <= now }
+        for ((name, query) in sharedLookups.toMap()) {
+            if (!query.response.isDone) continue
+            val response = runCatching { query.response.getNow(null) }.getOrNull() ?: continue
+            if (response.get("error")?.takeIf { it.isJsonPrimitive }?.asString == "rate_limited") {
+                relayCredits = 0.0
+                sharedLookups.remove(name)
+                continue
+            }
+            val request = pending[name] ?: continue
+            if (request.bypassShared) continue
+            val uuid = request.uuid?.toString()?.replace("-", "") ?: cache[name]?.uuid
+            val record = response.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
+                ?.let { sharedDungeonFriend(it, name, uuid, now) } ?: continue
+            cache[name] = record
+            pending.remove(name)
+            sharedLookups.remove(name)
+            completedCount++
+            dirty = true
+            version++
+        }
+        // At most three prefetched misses plus the active API request: the relay keeps four upload grants.
+        if (sharedLookups.size >= 3 || relayCredits < 1) return
+        val request = pending.entries.firstOrNull { it.key !in sharedLookups } ?: return
+        val uuid = request.value.uuid?.toString()?.replace("-", "") ?: cache[request.key]?.uuid
+        val response = lookup(request.key, uuid) ?: return
+        relayCredits--
+        sharedLookups[request.key] = SharedLookup(response, now + 110000)
     }
 
     fun tick() {
@@ -117,72 +157,67 @@ object DungeonFriendStatsCache {
         if (!canFetch) {
             feedback = "Use SkyBlockPv / SkyBlocker or add an API key"
             pending.clear()
+            sharedLookups.clear()
             return
         }
         val now = System.currentTimeMillis()
+        if (DungeonFriendRelay.sharedStatsAvailable) pollShared(now, DungeonFriendRelay::lookupStats)
+        else sharedLookups.clear()
         if (inFlight != null || now < nextRequest) return
-        val request = pending.entries.firstOrNull() ?: return
+        val request = pending.entries.firstOrNull {
+            !DungeonFriendRelay.sharedStatsAvailable || sharedLookups[it.key]?.response?.isDone == true
+        } ?: return
         pending.remove(request.key)
+        val sharedLookup = sharedLookups.remove(request.key)
         if (!request.value.force && cache[request.key]?.shouldRefresh(now) == false) { completedCount++; return }
         val knownUuid = request.value.uuid?.toString()?.replace("-", "") ?: cache[request.key]?.uuid
         inFlight = request.key
         val token = generation
         feedback = ""
-        val sharedLookup = DungeonFriendRelay.lookupStats(request.key, knownUuid)
         Scheduling.schedule(0.seconds) {
             var resolvedUuid = knownUuid
             var result = DungeonFriendStats(StatsState.UNAVAILABLE)
             var retryAfter = 2000L
             var message = ""
-            var shared: CachedDungeonFriend? = null
             var upload: String? = null
             try {
-                val response = runCatching { sharedLookup?.get(6, TimeUnit.SECONDS) }.getOrNull()
+                val response = runCatching { sharedLookup?.response?.getNow(null) }.getOrNull()
                 upload = response?.get("upload")?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.matches(Regex("[a-f0-9]{32}")) }
-                if (!request.value.bypassShared) shared = response?.get("record")?.takeIf { it.isJsonObject }
-                    ?.asJsonObject?.let { sharedDungeonFriend(it, request.key, knownUuid, System.currentTimeMillis()) }
-                if (shared != null) {
-                    result = shared.stats
-                    resolvedUuid = shared.uuid
-                    retryAfter = 1000
-                } else {
-                    if (resolvedUuid == null) {
-                        resolvedUuid = Http.get("https://api.mojang.com/users/profiles/minecraft/${request.key}") {
-                            val body = asText()
-                            check(isOk) { "Name lookup unavailable" }
-                            JsonParser.parseString(body).asJsonObject.get("id").asString
-                        }
-                        delay(2000)
+                if (resolvedUuid == null) {
+                    resolvedUuid = Http.get("https://api.mojang.com/users/profiles/minecraft/${request.key}") {
+                        val body = asText()
+                        check(isOk) { "Name lookup unavailable" }
+                        JsonParser.parseString(body).asJsonObject.get("id").asString
                     }
-                    require(resolvedUuid!!.matches(Regex("[a-fA-F0-9]{32}")))
-                    val profileUuid = UUID.fromString(resolvedUuid.replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5"))
-                    val provided = DungeonFriendProfileProvider.fetch(request.key, profileUuid)
-                    result = if (provided != null) provided else {
-                        check(key.isNotEmpty()) { "Profile providers unavailable" }
-                        Http.get(
-                            "https://api.hypixel.net/v2/skyblock/profiles",
-                            queries = mapOf("uuid" to resolvedUuid),
-                            headers = mapOf("API-Key" to key),
-                        ) {
-                            fun header(name: String) = headers.entries.firstOrNull { it.key.equals(name, true) }?.value?.firstOrNull()
-                            val reset = header("RateLimit-Reset")?.toLongOrNull()?.coerceIn(1, 3600) ?: 60L
-                            if (header("RateLimit-Remaining")?.toIntOrNull() == 0) retryAfter = maxOf(retryAfter, reset * 1000)
-                            val body = asText() // Consume/close the response even on errors.
-                            when (statusCode) {
-                                429 -> {
-                                    retryAfter = maxOf(reset, header("Retry-After")?.toLongOrNull()?.coerceIn(1, 3600) ?: 60) * 1000
-                                    message = "API rate limit reached; waiting before retrying"
-                                    DungeonFriendStats(StatsState.UNAVAILABLE)
-                                }
-                                401, 403 -> {
-                                    retryAfter = 300000
-                                    message = "API key rejected; update it in API setup"
-                                    DungeonFriendStats(StatsState.UNAVAILABLE)
-                                }
-                                else -> {
-                                    check(isOk)
-                                    DungeonFriendStats.fromProfiles(JsonParser.parseString(body).asJsonObject, resolvedUuid)
-                                }
+                }
+                require(resolvedUuid!!.matches(Regex("[a-fA-F0-9]{32}")))
+                val profileUuid = UUID.fromString(resolvedUuid.replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5"))
+                val provided = DungeonFriendProfileProvider.fetch(request.key, profileUuid)
+                result = if (provided != null) provided else {
+                    check(key.isNotEmpty()) { "Profile providers unavailable" }
+                    Http.get(
+                        "https://api.hypixel.net/v2/skyblock/profiles",
+                        queries = mapOf("uuid" to resolvedUuid),
+                        headers = mapOf("API-Key" to key),
+                    ) {
+                        fun header(name: String) = headers.entries.firstOrNull { it.key.equals(name, true) }?.value?.firstOrNull()
+                        val reset = header("RateLimit-Reset")?.toLongOrNull()?.coerceIn(1, 3600) ?: 60L
+                        if (header("RateLimit-Remaining")?.toIntOrNull() == 0) retryAfter = maxOf(retryAfter, reset * 1000)
+                        val body = asText() // Consume/close the response even on errors.
+                        when (statusCode) {
+                            429 -> {
+                                retryAfter = maxOf(reset, header("Retry-After")?.toLongOrNull()?.coerceIn(1, 3600) ?: 60) * 1000
+                                message = "API rate limit reached; waiting before retrying"
+                                DungeonFriendStats(StatsState.UNAVAILABLE)
+                            }
+                            401, 403 -> {
+                                retryAfter = 300000
+                                message = "API key rejected; update it in API setup"
+                                DungeonFriendStats(StatsState.UNAVAILABLE)
+                            }
+                            else -> {
+                                check(isOk)
+                                DungeonFriendStats.fromProfiles(JsonParser.parseString(body).asJsonObject, resolvedUuid)
                             }
                         }
                     }
@@ -206,10 +241,11 @@ object DungeonFriendStatsCache {
                         val previous = cache[request.key]
                         val failed = fetched.state == StatsState.UNAVAILABLE
                         val value = if (failed) previous?.stats ?: fetched else fetched
-                        cache[request.key] = shared ?: CachedDungeonFriend(value, uuid, time + if (failed) 60000 else 600000,
+                        cache[request.key] = CachedDungeonFriend(value, uuid, time + if (failed) 60000 else 600000,
                             if (failed) previous?.verifiedUntil ?: 0L else time + 600000)
-                        if (!failed && shared == null && uuid != null && upload != null) {
+                        if (!failed && uuid != null && upload != null && sharedLookup != null && time < sharedLookup.expires) {
                             DungeonFriendRelay.publishStats(request.key, uuid, fetched, time, upload)
+                            relayCredits--
                         }
                         dirty = true
                         nextRequest = time + retry
