@@ -147,7 +147,10 @@ object DungeonFriendStatsCache {
             val uuid = request.uuid?.toString()?.replace("-", "") ?: cache[name]?.uuid
             val record = response.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
                 ?.let { sharedDungeonFriend(it, name, uuid, now) } ?: continue
-            if ((cache[name]?.verifiedUntil ?: 0L) < record.verifiedUntil) cache[name] = record
+            val previous = cache[name]
+            // Refresh clears expires. A valid hit must restore it even if the report is unchanged.
+            cache[name] = if (previous != null && previous.verifiedUntil >= record.verifiedUntil)
+                previous.copy(expires = maxOf(previous.expires, previous.verifiedUntil)) else record
             pending.remove(name)
             sharedLookups.remove(name)
             completedCount++

@@ -272,6 +272,34 @@ fun main() {
     check(!sharedReplies.getValue("limited").isDone) // Retry the cache instead of turning its limit into API load.
     DungeonFriendStatsCache.clear()
 
+    // Refresh must finish even when the relay returns the same record, or an older fresh one.
+    for (olderBy in listOf(0L, 1000L)) {
+        val original = sharedReply("Alice").getAsJsonObject("record")
+        check(DungeonFriendStatsCache.receiveShared(original, "Alice", null, cacheTime))
+        DungeonFriendStatsCache.refresh()
+        val response = sharedReply("Alice").apply {
+            getAsJsonObject("record").addProperty("fetchedAt", cacheTime - olderBy)
+            if (olderBy > 0) getAsJsonObject("record").getAsJsonObject("stats").addProperty("catacombs", 41)
+        }
+        var refreshReads = 0
+        val completedBefore = DungeonFriendStatsCache.completedCount
+        val progress = DungeonRefreshProgress()
+        repeat(10) {
+            DungeonFriendStatsCache.request("Alice") // The normal every-tick caller.
+            progress.update(DungeonFriendStatsCache.completedCount, DungeonFriendStatsCache.pendingCount, 0, 0)
+            DungeonFriendStatsCache.pollShared(burstTime + 40000) { _, _ ->
+                refreshReads++
+                CompletableFuture.completedFuture(response)
+            }
+        }
+        check(refreshReads == 1) { "A confirmed cache hit was repeatedly queued after Refresh" }
+        check(DungeonFriendStatsCache.pendingCount == 0)
+        check(DungeonFriendStatsCache.completedCount == completedBefore + 1)
+        check(progress.update(DungeonFriendStatsCache.completedCount, 0, 0, 0) == 100)
+        check(DungeonFriendStatsCache.get("Alice") == known) // Keep a newer local PB/class report.
+        DungeonFriendStatsCache.clear()
+    }
+
     check(matchesFriendClass(hidden, emptySet(), setOf(TANK)))
     check(matchesFriendClass(known.copy(selectedClass = null), emptySet(), setOf(TANK)))
     check(matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(ARCHER)))
