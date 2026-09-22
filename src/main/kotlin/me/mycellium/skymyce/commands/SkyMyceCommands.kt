@@ -22,17 +22,15 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
 object SkyMyceCommands : SkyMyceModule() {
     override fun init() {
         ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
-            val root = dispatcher.register(root())
-            dispatcher.register(
-                literal("sm").redirect(root)
-            )
+            dispatcher.register(root("skymyce"))
+            dispatcher.register(root("sm"))
         }
     }
 
-    fun root(): LiteralArgumentBuilder<FabricClientCommandSource> {
-        return literal("skymyce")
+    fun root(name: String): LiteralArgumentBuilder<FabricClientCommandSource> {
+        return literal(name)
             .executes {
-                MC.instance.schedule {
+                MC.instance.execute {
                     MC.instance.setScreen(
                         ResourcefulConfigScreen.make(SkyMyce.config).build()
                     )
