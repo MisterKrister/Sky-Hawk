@@ -596,11 +596,18 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     client.receiveOffer("Stranger", offer.removePrefix("msg self "), 3001)
     client.receiveOffer("Host", offer.removePrefix("msg self ").replace(request.token, "ffffffffffffffff"), 3001)
     client.invited("Host", 3002)
-    check(client.nextCommand(clientContext, 3003) { known } == "party accept host")
-    check(client.accepted?.second?.second == ARCHER) // Unrelated or stale offers cannot choose the class.
+    check(client.nextCommand(clientContext, 3003) { known } == null) // Stale or unrelated relay offers cannot authorize acceptance.
+    client.receiveOffer("Host", offer.removePrefix("msg self "), 3004)
+    check(client.nextCommand(clientContext, 3005) { known } == null) // The earlier unapproved invite was not queued.
+    client.invited("Host", 3006)
+    check(client.nextCommand(clientContext, 3007) { known } == "party accept host")
+    check(client.accepted?.second?.second == TANK)
     client.clear()
     client.invited("Host", 3000)
-    check(client.nextCommand(clientContext, 3001) { known } == "party accept host") // Availability also accepts manual invitations.
+    check(client.nextCommand(clientContext, 3001) { known } == null) // Available alone must not accept a manual Party invite.
+    client.receiveOffer("Host", offer.removePrefix("msg self "), 3002)
+    client.invited("Host", 3003)
+    check(client.nextCommand(clientContext, 3004) { known } == null) // Even a relay offer needs local Yes/Join consent.
     client.clear()
     client.request("Host", request, 4000)
     client.receiveRequest("Other", request, 4001)
@@ -608,8 +615,12 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     client.prune(64000)
     check(!client.busy(64000) && client.status == "Join request expired")
     client.clear()
+    client.request("Host", request, 0, manual = true)
+    client.receiveOffer("Host", offer.removePrefix("msg self "), 0)
     client.invited("Host", 0)
     check(client.nextCommand(clientContext, 55000) { known } == null)
+    client.invited("Host", 60000)
+    check(client.nextCommand(clientContext, 60001) { known } == null) // Expired consent is not reusable.
     host.prune(62000)
     check(host.classFor("Self") == null)
 
@@ -619,10 +630,11 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val manualContext = clientContext.copy(availability = DungeonAvailability())
     val manualHostContext = manualContext.copy(members = setOf("host"))
     manualClient.request("Host", request, 100, manual = true)
-    check(manualClient.expectsInvite("Host", 101) && !manualClient.expectsInvite("Stranger", 101))
+    check(!manualClient.expectsInvite("Host", 101)) // Wait for the host's matching relay agreement.
     check(manualHost.receiveRequest("Self", request, 101, manual = true))
     val manualOffer = manualHost.nextCommand(manualHostContext, 102) { null }!!
     manualClient.receiveOffer("Host", manualOffer.removePrefix("msg self "), 103)
+    check(manualClient.expectsInvite("Host", 103) && !manualClient.expectsInvite("Stranger", 103))
     check(manualHost.nextCommand(manualHostContext, 104) { null } == null)
     manualHost.acknowledged("Self", request.token)
     check(manualHost.nextCommand(manualHostContext, 105) { null } == "party invite self")
@@ -637,12 +649,16 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val guarded = DungeonFriendJoining()
     guarded.request("Host", request, 0, manual = true)
     guarded.invited("Host", 1)
-    check(guarded.nextCommand(clientContext, 2) { hidden } == "party accept host") // Explicit invitations bypass the Join requirement.
+    check(guarded.nextCommand(clientContext, 2) { hidden } == null) // Yes alone does not approve an unrelated/manual invite.
+    guarded.receiveOffer("Host", offer.removePrefix("msg self "), 3)
+    guarded.invited("Host", 4)
+    check(guarded.nextCommand(clientContext, 5) { hidden } == "party accept host") // Agreed invitations bypass the Join PB requirement.
     val inviting = DungeonFriendJoining()
     inviting.receiveAcceptedReply("Self", request, 0)
     check(inviting.nextCommand(hostContext, 1) { hidden } == "party invite self") // An invited player need not meet the host's Join PB.
     val clickingJoin = DungeonFriendJoining()
     clickingJoin.request("Host", request, 0, manual = true)
+    clickingJoin.receiveOffer("Host", offer.removePrefix("msg self "), 1)
     clickingJoin.invited("Host", 1)
     check(clickingJoin.nextCommand(manualContext, 2) { null } == "party accept host") // Join works with Available off.
 
