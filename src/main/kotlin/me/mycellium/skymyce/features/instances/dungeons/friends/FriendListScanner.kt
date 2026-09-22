@@ -91,7 +91,7 @@ class FriendListScanner {
                     val (name, location) = entry.destructured
                     val key = name.lowercase()
                     seen += key
-                    if (location.startsWith("offline", true)) online.remove(key)
+                    if (location.startsWith("offline", true) || location.startsWith("currently offline", true)) online.remove(key)
                     else online[key] = OnlineDungeonFriend(name, location)
                 } else if (SEPARATOR.matches(line) && headerSeen) {
                     finishPage(now)

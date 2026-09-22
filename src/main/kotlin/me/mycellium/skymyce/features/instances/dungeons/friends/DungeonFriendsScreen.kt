@@ -289,6 +289,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             gap(5)
             surface(Surface.flat(0xFF17212A.toInt()))
             val secondary = DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()].orEmpty()
+                .filter { it != stats?.selectedClass }
             val reply = DungeonFriends.replies.get(friend.name)
             val accepted = reply?.status == LfgReplyStatus.ACCEPTED
             val availability = stats?.state?.takeIf { it != StatsState.AVAILABLE }?.label
