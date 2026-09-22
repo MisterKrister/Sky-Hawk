@@ -222,7 +222,10 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     // ponytail: scan at most 128 sockets per room; add a recipient index if rooms grow.
     const target = this.ctx.getWebSockets().find(other => other !== ws && other.readyState === WebSocket.OPEN &&
       (other.deserializeAttachment() as Session).name?.toLowerCase() === (data.to as string).toLowerCase());
-    if (!target) { ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); return; }
+    if (!target) {
+      console.info({ event: "relay_delivery", id: data.id, outcome: "offline" });
+      ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); return;
+    }
     try {
       if (data.type === "message") {
         const recipient = target.deserializeAttachment() as Session;
@@ -230,7 +233,12 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         target.serializeAttachment(recipient);
       }
       target.send(JSON.stringify({ type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
-    } catch { ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); }
+      // Correlate delivery failures without logging names, private messages, or account proof.
+      console.info({ event: "relay_delivery", id: data.id, outcome: data.type === "ack" ? "acknowledged" : "forwarded" });
+    } catch {
+      console.info({ event: "relay_delivery", id: data.id, outcome: "disconnected" });
+      ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" }));
+    }
   }
 
   private broadcast(sender: WebSocket, packet: object): void {

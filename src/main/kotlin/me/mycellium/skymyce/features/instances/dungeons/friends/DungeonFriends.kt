@@ -46,6 +46,7 @@ object DungeonFriends : SkyMyceModule() {
     private var party = DungeonFriendParty()
     private var previousRoster: Pair<Set<String>, Int>? = null
     private var nextPartyRequest = 0L
+    private var partyRequestAllowedAt = 0L
     private var nextAction = 0L
     private var sendingScan = false
     private var sendingPartyAction = false
@@ -109,8 +110,13 @@ object DungeonFriends : SkyMyceModule() {
     }
 
     override fun tick() {
-        DungeonFriendRelay.tick(LocationAPI.isOnSkyBlock && MC.instance.player != null)
-        if (!LocationAPI.isOnSkyBlock) fallbackMessages.clear()
+        DungeonFriendRelay.tick(LocationAPI.onHypixel && MC.connection != null)
+        if (!LocationAPI.isOnSkyBlock) {
+            fallbackMessages.clear()
+            DungeonFriendRelay.publishPolicy(DungeonJoinPolicy(DungeonFriendsSettings.availability.floor,
+                DungeonFriendsSettings.availability.maxPbMillis, open = false),
+                MC.instance.player?.let { DungeonFriendStatsCache.get(it.name.string)?.selectedClass })
+        }
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
         loadFriends()
         partyBorders.tick(now()) { it.send() }
@@ -120,8 +126,9 @@ object DungeonFriends : SkyMyceModule() {
         receivedOffers.entries.removeIf { it.value.expires <= now() }
         joining.prune(now())
         syncParty()
-        if (now() >= nextPartyRequest) {
+        if (now() >= nextPartyRequest && now() >= partyRequestAllowedAt) {
             val sent = HypixelModAPI.getInstance().sendPacket(ServerboundPartyInfoPacket())
+            partyRequestAllowedAt = now() + 10000
             nextPartyRequest = now() + if (sent) 60000 else 5000
         }
         val active = DungeonFriendsConfig.enabled && LocationAPI.isOnSkyBlock
@@ -348,14 +355,15 @@ object DungeonFriends : SkyMyceModule() {
         (FriendsAPI.getFriend(name) != null || name.lowercase() in scanner.online)
 
     fun onRelayMessage(name: String, uuid: String, text: String): Boolean {
-        if (!LocationAPI.isOnSkyBlock || !isFriend(name)) return false
+        if (!LocationAPI.isOnSkyBlock) return rejectRelay(name, "outside_skyblock")
+        if (!isFriend(name)) return rejectRelay(name, "unknown_friend")
         val knownUuid = FriendsAPI.getFriend(name)?.uuid?.toString()?.replace("-", "")
-        if (knownUuid != null && knownUuid != uuid) return false
+        if (knownUuid != null && knownUuid != uuid) return rejectRelay(name, "friend_identity_mismatch")
         if (text == "[SkyMyce Connection Test]") return false // Ignore diagnostics from older clients.
         val offer = DungeonLfgOffer.parse(text, now())
         val request = DungeonJoinRequest.parse(text)
         if (offer != null) {
-            if (receivedOffers.size >= 16 && name.lowercase() !in receivedOffers) return false
+            if (receivedOffers.size >= 16 && name.lowercase() !in receivedOffers) return rejectRelay(name, "offer_queue_full")
             receivedOffers[name.lowercase()] = offer
             val classes = offer.request.classes.joinToString("/") { it.displayName }
             val message = Component.literal("§b$name §7wants you to join §b${offer.request.floor.name} §7as §f$classes")
@@ -384,6 +392,11 @@ object DungeonFriends : SkyMyceModule() {
             if (lfgReply) partyMessage(name, message) else message.send()
         }
         return true
+    }
+
+    private fun rejectRelay(name: String, reason: String): Boolean {
+        SkyMyce.logger.info("[Dungeon relay] Ignored message from {}: {}", name, reason)
+        return false
     }
 
     private fun partyMessage(name: String, message: Component) {

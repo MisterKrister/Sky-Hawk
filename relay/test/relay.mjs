@@ -129,11 +129,23 @@ try {
   assert.deepEqual((await policies(alice, ["Bob"])).parties.bob,
     { floor: "F7", maxPbMillis: 300000, open: false, uuid: identities.get("Bob") });
   const id = "1".repeat(32);
-  alice.ws.send(JSON.stringify({ type: "message", id, to: "Bob", from: "Forged", text: "LFG F7?" }));
+  const lfg = "[SkyMyce LFG M7 Healer abcdef1234567890] Hey Bob, want to play Healer on M7?";
+  alice.ws.send(JSON.stringify({ type: "message", id, to: "Bob", from: "Forged", text: lfg }));
   const received = await bob.next();
-  assert.deepEqual(received, { type: "message", id, from: "Alice", uuid: identities.get("Alice"), text: "LFG F7?" });
+  assert.deepEqual(received, { type: "message", id, from: "Alice", uuid: identities.get("Alice"), text: lfg });
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   bob.ws.send(JSON.stringify({ type: "ack", to: "Alice", id }));
   assert.deepEqual(await alice.next(), { type: "ack", id, from: "Bob", uuid: identities.get("Bob") });
+  const join = "Invite me for M7 as Healer [SkyMyce Join abcdef1234567890]";
+  bob.ws.send(JSON.stringify({ type: "message", id: "7".repeat(32), to: "aLiCe", text: join }));
+  assert.equal((await alice.next()).text, join);
+  alice.ws.send(JSON.stringify({ type: "ack", id: "7".repeat(32), to: "bOb" }));
+  assert.equal((await bob.next()).type, "ack");
+  const ready = "Inviting you for M7 as Healer [SkyMyce Ready abcdef1234567890]";
+  alice.ws.send(JSON.stringify({ type: "message", id: "8".repeat(32), to: "Bob", text: ready }));
+  assert.equal((await bob.next()).text, ready);
+  bob.ws.send(JSON.stringify({ type: "ack", id: "8".repeat(32), to: "Alice" }));
+  assert.equal((await alice.next()).type, "ack");
   alice.ws.send(JSON.stringify({ type: "message", id: "2".repeat(32), to: "Carol", text: "must not cross rooms" }));
   assert.equal((await alice.next()).code, "offline");
   carol.ws.send("ping"); assert.equal(await carol.next(), "pong"); // No leaked message preceded the pong.

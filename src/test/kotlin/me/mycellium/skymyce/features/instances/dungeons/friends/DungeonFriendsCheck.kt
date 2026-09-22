@@ -62,6 +62,36 @@ fun main() {
     check(testReceived && acknowledged == 1) // A diagnostic receipt cannot accept an outstanding LFG message.
     deliveries.tick(45000)
     check(fallback == 3)
+    var relayReady = false
+    var transmissions = 0
+    val deliveryFailures = mutableListOf<String>()
+    deliveries.add("warming-up", "Alice", 50000, { acknowledged++ }, deliveryFailures::add) {
+        if (!relayReady) false else { transmissions++; true }
+    }
+    deliveries.tick(50000)
+    deliveries.acknowledge("warming-up", "Alice") // An unsent request cannot be acknowledged.
+    deliveries.connectionFailed() // A failed connection attempt must not discard unsent work.
+    deliveries.tick(54999)
+    check(transmissions == 0 && deliveryFailures.isEmpty() && acknowledged == 1)
+    relayReady = true
+    deliveries.tick(54999)
+    deliveries.tick(55000)
+    check(transmissions == 1 && deliveryFailures.isEmpty()) // The receipt timeout starts at transmission.
+    deliveries.acknowledge("warming-up", "Alice")
+    deliveries.tick(60000)
+    check(acknowledged == 2 && deliveryFailures.isEmpty())
+    deliveries.add("never-ready", "Alice", 60000, {}, deliveryFailures::add) { false }
+    deliveries.tick(65000)
+    check(deliveryFailures == listOf("connection_not_ready"))
+    deliveries.add("lost-after-send", "Alice", 65000, {}, deliveryFailures::add) { transmissions++; true }
+    deliveries.tick(65000)
+    deliveries.connectionFailed()
+    deliveries.tick(70000)
+    check(transmissions == 2 && deliveryFailures == listOf("connection_not_ready", "connection_lost"))
+    deliveries.add("cancel-unsent", "Alice", 70000, {}, { error("Leaving Hypixel must cancel without sending /msg") }) { transmissions++; true }
+    deliveries.clear()
+    deliveries.tick(70001)
+    check(transmissions == 2)
     // Hovering a full-width label's blank area has no text style, even when it has a location tooltip.
     val hoverFix = LabelComponentMixin::class.java.getDeclaredMethod("skymyce\$nonNullHoverStyle", Style::class.java)
         .apply { isAccessible = true }

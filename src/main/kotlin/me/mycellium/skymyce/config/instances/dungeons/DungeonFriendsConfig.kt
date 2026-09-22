@@ -20,7 +20,7 @@ import java.nio.file.StandardCopyOption
 object DungeonFriendsConfig : CategoryKt("Dungeon Friends") {
     val enabled by boolean(true) {
         name = TranslatableValue.literal("Scan Dungeon Friends")
-        description = TranslatableValue.literal("Silently refresh online friends every minute while in SkyBlock")
+        description = TranslatableValue.literal("Load friends once, then use cached friends and notifications until you click Refresh")
     }
 
     init {
