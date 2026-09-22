@@ -89,6 +89,44 @@ fun main() {
     val malformed = parse("""{"dungeons":{"dungeon_types":{"catacombs":{"experience":null,"fastest_time":{"7":0,"6":-1,"5":"bad"}}}}}""")
     check(malformed.completionTimes.isEmpty())
 
+    // Each floor and mode has its own S+ PB; never substitute an ordinary completion.
+    fun times(offset: Int) = (1..7).joinToString(",") { "\"$it\":${offset + it * 1000}" }
+    val allFloors = parse("""{"dungeons":{
+        "player_classes":{"healer":{"experience":0},"mage":{"experience":50},
+            "berserker":{"experience":125},"archer":{"experience":235},"tank":{"experience":395}},
+        "dungeon_types":{
+            "catacombs":{"experience":999999999,"fastest_time":{${times(60000)}},"fastest_time_s_plus":{${times(120000)}}},
+            "master_catacombs":{"fastest_time":{${times(180000)}},"fastest_time_s_plus":{${times(240000)}}}
+        }
+    }}""")
+    for (floor in FRIEND_FLOORS) {
+        val master = floor.name.startsWith("M")
+        check(allFloors.sPlusTimes[floor] == (if (master) 240000L else 120000L) + floor.floorNumber * 1000L)
+        check(allFloors.completionTimes[floor] == (if (master) 180000L else 60000L) + floor.floorNumber * 1000L)
+    }
+    check(allFloors.classes == mapOf(HEALER to 0, MAGE to 1, BERSERKER to 2, ARCHER to 3, TANK to 4))
+    check(allFloors.bestClass == TANK)
+    check(known.sPlusTimes[M1] == null && known.completionTimes[M1] == 100000L)
+    val selectedProfile = DungeonFriendStats.fromProfiles(JsonParser.parseString("""{"success":true,"profiles":[
+        {"members":{"abc":{"last_save":999999,"dungeons":{}}}},
+        {"selected":true,"members":{"other":{"dungeons":{}},"abc":{"dungeons":{"dungeon_types":{
+            "catacombs":{"experience":125,"fastest_time_s_plus":{"1":65000}}
+        }}}}}
+    ]}""").asJsonObject, "abc")
+    check(selectedProfile.catacombs == 2 && selectedProfile.sPlusTimes[F1] == 65000L)
+
+    // Repeated list ticks and invalid names must not grow the pending request queue.
+    DungeonFriendStatsCache.clear()
+    DungeonFriendStatsCache.request("Alice")
+    DungeonFriendStatsCache.request("ALICE")
+    DungeonFriendStatsCache.request("Bob")
+    DungeonFriendStatsCache.request("invalid/name")
+    check(DungeonFriendStatsCache.status == "Loading PBs: 2 queued")
+    DungeonFriendStatsCache.refresh()
+    check(DungeonFriendStatsCache.status == "Loading PBs: 2 queued")
+    DungeonFriendStatsCache.clear()
+    check(DungeonFriendStatsCache.status.isEmpty())
+
     check(matchesFriendClass(hidden, emptySet(), setOf(TANK)))
     check(matchesFriendClass(known, setOf(TANK), setOf(TANK)))
     check(!matchesFriendClass(known, emptySet(), setOf(TANK)))

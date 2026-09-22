@@ -16,12 +16,15 @@ object DungeonFriendStatsCache {
     private val cache = mutableMapOf<String, Cached>()
     private val uuids = mutableMapOf<String, String>()
     private val pending = linkedMapOf<String, UUID?>()
-    private var busy = false
+    private var inFlight: String? = null
     private var generation = 0L
     private var nextRequest = 0L
     private var apiKey = ""
-    var status = ""
-        private set
+    private var feedback = ""
+    val status: String get() = feedback.ifEmpty {
+        inFlight?.let { "Loading PBs: $it (${pending.size} queued)" }
+            ?: if (pending.isNotEmpty()) "Loading PBs: ${pending.size} queued" else ""
+    }
     var version = 0L
         private set
 
@@ -31,7 +34,7 @@ object DungeonFriendStatsCache {
     fun request(name: String, uuid: UUID? = null) {
         if (!name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return
         val key = name.lowercase()
-        if ((cache[key]?.expires ?: 0L) > System.currentTimeMillis()) return
+        if (key == inFlight || (cache[key]?.expires ?: 0L) > System.currentTimeMillis()) return
         if (key !in pending) pending[key] = uuid
     }
 
@@ -40,7 +43,13 @@ object DungeonFriendStatsCache {
         cache.clear()
         pending.clear()
         uuids.clear()
+        feedback = ""
         version++
+    }
+
+    /** Retain displayed PBs and the server's retry deadline while requesting fresh stats. */
+    fun refresh() {
+        cache.replaceAll { _, value -> value.copy(expires = 0L) }
     }
 
     fun tick() {
@@ -51,19 +60,19 @@ object DungeonFriendStatsCache {
             nextRequest = 0L
         }
         if (key.isEmpty()) {
-            status = "Set your Hypixel API key under General > Party Commands for stats"
+            feedback = "Add your Hypixel API key to load PBs"
             pending.clear()
             return
         }
         val now = System.currentTimeMillis()
-        if (busy || now < nextRequest) return
+        if (inFlight != null || now < nextRequest) return
         val request = pending.entries.firstOrNull() ?: return
         pending.remove(request.key)
         if ((cache[request.key]?.expires ?: 0L) > now) return
         val knownUuid = request.value?.toString()?.replace("-", "") ?: uuids[request.key]
-        busy = true
+        inFlight = request.key
         val token = generation
-        status = "Loading dungeon stats"
+        feedback = ""
         Scheduling.schedule(0.seconds) {
             var resolvedUuid = knownUuid
             var result = DungeonFriendStats(StatsState.UNAVAILABLE)
@@ -96,7 +105,7 @@ object DungeonFriendStatsCache {
                         }
                         401, 403 -> {
                             retryAfter = 300000
-                            message = "Hypixel API key rejected; check General > Party Commands"
+                            message = "API key rejected; update it in API setup"
                             DungeonFriendStats(StatsState.UNAVAILABLE)
                         }
                         else -> {
@@ -114,9 +123,9 @@ object DungeonFriendStatsCache {
                 val fetched = result
                 val uuid = resolvedUuid
                 val retry = retryAfter
-                val feedback = message
+                val requestFeedback = message
                 MC.instance.execute {
-                    busy = false
+                    inFlight = null
                     if (token == generation) {
                         val time = System.currentTimeMillis()
                         if (uuid != null) uuids[request.key] = uuid
@@ -125,7 +134,7 @@ object DungeonFriendStatsCache {
                         val value = if (fetched.state == StatsState.UNAVAILABLE) previous ?: fetched else fetched
                         cache[request.key] = Cached(value, time + if (fetched.state == StatsState.UNAVAILABLE) 60000 else 600000)
                         nextRequest = time + retry
-                        status = feedback
+                        feedback = requestFeedback
                         version++
                     }
                 }
