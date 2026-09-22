@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+
+const endpoint = new URL(process.argv[2] ?? "https://skyblock-relay.skyblock-relay.workers.dev");
+assert.equal(endpoint.protocol, "https:");
+assert.deepEqual(await (await fetch(new URL("/health", endpoint))).json(), { service: "SkyMyce relay", version: 2 });
+
+async function rejectUnauthenticated(authenticate) {
+  const url = new URL("/websocket?room=testing", endpoint);
+  url.protocol = "wss:";
+  await new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    const timer = setTimeout(() => { socket.close(); reject(new Error("Live relay timed out")); }, 15000);
+    socket.addEventListener("message", event => {
+      const packet = JSON.parse(event.data);
+      assert.equal(packet.type, "challenge");
+      assert.equal(packet.protocol, 2);
+      socket.send(JSON.stringify(authenticate
+        ? { type: "authenticate", name: "RelayCheck", uuid: "0".repeat(32) }
+        : { type: "message", id: "0".repeat(32), to: "Nobody", text: "unauthenticated test" }));
+    });
+    socket.addEventListener("close", event => {
+      clearTimeout(timer);
+      try { assert.equal(event.code, authenticate ? 4003 : 1008); resolve(); } catch (error) { reject(error); }
+    });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Live WebSocket connection failed")); });
+  });
+}
+await rejectUnauthenticated(false);
+await rejectUnauthenticated(true);
+console.log("Live relay passed health, WebSocket upgrade, and unauthenticated-account rejection checks.");

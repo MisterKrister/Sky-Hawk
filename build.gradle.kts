@@ -105,6 +105,18 @@ tasks.jar {
 	}
 }
 
+val dungeonFriendsCheck by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Checks dungeon friend scanning, profile parsing, filters, sorting and messages"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass = "me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsCheckKt"
+}
+
+tasks.check { dependsOn(dungeonFriendsCheck) }
+// Assertions run via dungeonFriendsCheck; this project does not use a test framework.
+tasks.test { failOnNoDiscoveredTests = false }
+
 // configure the maven publication
 publishing {
 	publications {

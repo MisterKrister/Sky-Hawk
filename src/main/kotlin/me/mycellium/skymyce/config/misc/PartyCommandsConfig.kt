@@ -26,6 +26,6 @@ object PartyCommandsConfig : CategoryKt("Party Commands") {
 
     var hypixelApiKey by string("") {
         name = TranslatableValue.literal("Hypixel API Key")
-        description = TranslatableValue.literal("Hypixel API key used by the !pb command")
+        description = TranslatableValue.literal("Optional fallback for dungeon friends and !pb when SkyBlocker / SkyBlockPv cannot provide stats")
     }
 }

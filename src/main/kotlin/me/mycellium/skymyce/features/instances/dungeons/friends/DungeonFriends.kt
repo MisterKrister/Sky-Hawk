@@ -1,0 +1,504 @@
+package me.mycellium.skymyce.features.instances.dungeons.friends
+
+import me.mycellium.skymyce.SkyMyceModule
+import me.mycellium.skymyce.SkyMyce
+import me.mycellium.skymyce.api.events.ChatChannel
+import me.mycellium.skymyce.api.events.PlayerMessageEvent
+import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsConfig
+import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
+import me.mycellium.skymyce.config.instances.dungeons.PartyListing
+import me.mycellium.skymyce.utils.MC
+import me.mycellium.skymyce.utils.PlayerUtils.sendCommand
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents
+import net.hypixel.modapi.HypixelModAPI
+import net.hypixel.modapi.packet.impl.serverbound.ServerboundPartyInfoPacket
+import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.ClickEvent
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonAPI
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
+import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
+import tech.thatgravyboat.skyblockapi.api.events.chat.ChatReceivedEvent
+import tech.thatgravyboat.skyblockapi.api.events.hypixel.PartyInfoEvent
+import tech.thatgravyboat.skyblockapi.api.events.location.ServerDisconnectEvent
+import tech.thatgravyboat.skyblockapi.api.events.profile.ProfileChangeEvent
+import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
+import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
+import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
+import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
+import tech.thatgravyboat.skyblockapi.utils.text.Text.send
+import java.util.UUID
+
+object DungeonFriends : SkyMyceModule() {
+    val replies = DungeonLfgReplies()
+    val joining = DungeonFriendJoining()
+    private val partyNotices = DungeonPartyNotices()
+    private val partyBorders = DungeonPartyBorders()
+    var scanner = FriendListScanner()
+        private set
+    private var party = DungeonFriendParty()
+    private var previousRoster: Pair<Set<String>, Int>? = null
+    private var nextPartyRequest = 0L
+    private var nextAction = 0L
+    private var sendingScan = false
+    private var sendingPartyAction = false
+    private var selectedListing: Pair<PartyListing, Long>? = null
+    private var awaitingRoster = false
+    private var restoredParty = false
+    private var currentLeader: String? = null
+    private val fallbackMessages = ArrayDeque<Triple<String, String, Boolean>>()
+    private val sentOffers = mutableMapOf<String, DungeonLfgOffer>()
+    private val receivedOffers = mutableMapOf<String, DungeonLfgOffer>()
+    private var lastJoinStatus = ""
+    private var nextJoinStatsCheck = 0L
+    var partyFloor: DungeonFloor? = null
+        private set
+    var partyRevision = 0L
+        private set
+    val neededClass: DungeonClass? get() = party.neededClass
+
+    val partySize: Int get() = maxOf(party.size, PartyAPI.size, 1)
+    val partyFull: Boolean get() = partySize >= 5
+    val canAct: Boolean get() = LocationAPI.onHypixel && party.canInvite && !partyFull && now() >= nextAction
+    val openClasses: Set<DungeonClass> get() = party.openClasses
+    val partyStatus: String get() = if (!party.ready) "Checking party size..." else "Party $partySize/5"
+    private val solo get() = party.ready && !PartyAPI.inParty && partySize == 1
+
+    fun joinUnavailable(friend: OnlineDungeonFriend, floor: DungeonFloor): String? {
+        if (!LocationAPI.isOnSkyBlock || !solo) return "You must be solo in SkyBlock to use Join"
+        if (now() < nextAction || joining.busy(now())) return "Waiting for your current party request"
+        if (!DungeonFriendRelay.connected) return "Party requests are currently unavailable"
+        val target = DungeonFriendRelay.partyPolicy(friend.name) ?: return "Waiting for ${friend.name}'s party details; both players need the updated mod"
+        val uuid = FriendsAPI.getFriend(friend.name)?.uuid?.toString()?.replace("-", "")
+        if (uuid != null && uuid != target.uuid) return "Player identity changed; refresh your friends"
+        val policy = target.policy
+        if (!policy.open) return "${friend.name}'s party is not accepting Join requests"
+        if (floor != policy.floor) return "${friend.name} is hosting ${policy.floor.name}"
+        val stats = DungeonFriendStatsCache.verified(MC.player.name.string)
+        if (policy.maxPbMillis != null && stats == null && now() >= nextJoinStatsCheck) {
+            nextJoinStatsCheck = now() + 60000
+            checkJoinStats(MC.player.name.string)
+        }
+        if (!policy.accepts(stats, floor)) return "Your ${floor.name} S+ PB must be ${formatDungeonTime(policy.maxPbMillis)} or faster"
+        return null
+    }
+
+    override fun init() {
+        DungeonFriendsSettings.load()
+        DungeonFriendStatsCache.initialize(SkyMyce.configPath.resolve("dungeon_friend_stats.json"))
+        ClientLifecycleEvents.CLIENT_STOPPING.register { DungeonFriendStatsCache.save(true); DungeonFriendRelay.disconnect() }
+        ClientTickEvents.END_CLIENT_TICK.register { tick() }
+        ClientSendMessageEvents.ALLOW_COMMAND.register { command ->
+            if (!sendingPartyAction) partyNotices.command(command, automatic = false, now())
+            if (!sendingScan && command.matches(Regex("(?i)(?:f|friend) list(?: \\d+)?"))) scanner.manualCommand(now())
+            val reply = Regex("(?i)^(?:msg|w|tell|whisper) ([A-Za-z0-9_]{1,16}) (.+)$").matchEntire(command)
+            val offer = reply?.groupValues?.get(1)?.lowercase()?.let(receivedOffers::get)
+            if (offer != null && offer.expires > now() && classifyLfgReply(reply.groupValues[2]) == LfgReplyStatus.ACCEPTED) {
+                relayReply(reply.groupValues[1], reply.groupValues[2])
+                false
+            } else true
+        }
+    }
+
+    override fun tick() {
+        DungeonFriendRelay.tick(LocationAPI.isOnSkyBlock && MC.instance.player != null)
+        if (!LocationAPI.isOnSkyBlock) fallbackMessages.clear()
+        if (!LocationAPI.onHypixel || MC.instance.player == null) return
+        partyBorders.tick(now()) { it.send() }
+        replies.prune(now())
+        sentOffers.entries.removeIf { it.value.expires <= now() }
+        receivedOffers.entries.removeIf { it.value.expires <= now() }
+        joining.prune(now())
+        syncParty()
+        if (now() >= nextPartyRequest) {
+            val sent = HypixelModAPI.getInstance().sendPacket(ServerboundPartyInfoPacket())
+            nextPartyRequest = now() + if (sent) 60000 else 5000
+        }
+        val active = DungeonFriendsConfig.enabled && LocationAPI.isOnSkyBlock
+        if (active || MC.screen is DungeonFriendsScreen) {
+            scanner.tick(now())?.let { command ->
+                sendingScan = true
+                try { sendCommand(command) } finally { sendingScan = false }
+            }
+            DungeonFriendStatsCache.request(MC.player.name.string, MC.player.uuid)
+            scanner.online.values.forEach { friend ->
+                DungeonFriendStatsCache.request(friend.name, FriendsAPI.getFriend(friend.name)?.uuid)
+            }
+            PartyAPI.members.forEach { member -> member.name?.let { DungeonFriendStatsCache.request(it, member.uuid) } }
+        } else if (scanner.scanning) scanner.manualCommand(now())
+        DungeonFriendStatsCache.tick()
+        if (LocationAPI.isOnSkyBlock && now() >= nextAction && MC.connection != null) {
+            val self = MC.player
+            val canInvite = canAct && (!PartyAPI.inParty || PartyAPI.allInvite || PartyAPI.leader?.uuid == self.uuid ||
+                PartyAPI.leader?.name.equals(self.name.string, true) || PartyAPI.members.any { it.uuid == self.uuid && it.role.name == "MOD" })
+            val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canInvite, partySize,
+                partyFloor ?: DungeonFriendsSettings.availability.floor, openClasses, party.members.toSet())
+            DungeonFriendRelay.publishPolicy(context.policy)
+            joining.nextCommand(context, now(), DungeonFriendStatsCache::verified)?.let {
+                sendJoinAction(it)
+                nextAction = now() + 1000
+            }
+            if (joining.status != lastJoinStatus) {
+                lastJoinStatus = joining.status
+                if (lastJoinStatus.contains("does not meet") || lastJoinStatus.endsWith("expired")) notify(lastJoinStatus, joining.statusPlayer)
+            }
+            if (now() >= nextAction && fallbackMessages.isNotEmpty()) {
+                val (name, text, reply) = fallbackMessages.removeFirst()
+                if (isFriend(name) && (reply || canAct)) {
+                    sendCommand("msg $name $text")
+                    nextAction = now() + 1000
+                }
+            }
+        }
+    }
+
+    private fun syncParty() {
+        val self = MC.player.name.string.lowercase()
+        val names = PartyAPI.members.mapNotNull { member ->
+            member.name ?: FriendsAPI.friends.firstOrNull { it.uuid == member.uuid && member.uuid != null }?.name
+        }.map { it.lowercase() }.toSet() + self
+        val roster = names to PartyAPI.size.coerceAtLeast(1)
+        if (roster != previousRoster) {
+            party.roster(names, roster.second, completeNames = !awaitingRoster && names.size >= roster.second)
+            previousRoster = roster
+        }
+        currentLeader = PartyAPI.leader?.name ?: currentLeader
+        if (!restoredParty && party.ready && names.size >= roster.second && PartyAPI.inParty) {
+            DungeonFriendsSettings.lastParty?.takeIf { it.matches(currentLeader, names, System.currentTimeMillis()) }?.let {
+                party.classes.putAll(it.classes)
+                partyFloor = it.floor
+                partyRevision++
+            }
+            restoredParty = true
+        }
+        for (name in party.members) {
+            replies.forget(name)
+            // Last selected class is a fallback, never a replacement for a class observed in the current party.
+            if (name !in party.classes) (joining.classFor(name) ?: DungeonFriendStatsCache.get(name)?.selectedClass)?.let { party.classes[name] = it }
+        }
+        if (LocationAPI.island == SkyBlockIsland.THE_CATACOMBS) {
+            (DungeonAPI.teammates + listOfNotNull(DungeonAPI.ownPlayer)).forEach { player ->
+                if (player.name.lowercase() in party.members) player.dungeonClass?.let { party.classes[player.name.lowercase()] = it }
+            }
+        }
+        party.advance()
+        saveParty()
+    }
+
+    private fun saveParty() {
+        val leader = currentLeader?.lowercase()?.takeIf { it in party.members } ?: return
+        if (!PartyAPI.inParty || !party.ready || !restoredParty || awaitingRoster || party.members.size !in 2..5) return
+        val saved = SavedDungeonParty(leader, party.members.toSet(), party.classes.filterKeys { it in party.members },
+            partyFloor, System.currentTimeMillis())
+        if (saved.copy(savedAt = 0) != DungeonFriendsSettings.lastParty?.copy(savedAt = 0)) DungeonFriendsSettings.save(savedParty = saved)
+    }
+
+    fun onListingSelected(listing: PartyListing) {
+        selectedListing = listing to now()
+    }
+
+    fun onListings(listings: List<PartyListing>) {
+        if (MC.instance.player == null) return
+        val self = MC.player.name.string
+        // Browsing another party's listing must never change our own composition.
+        val own = listings.firstOrNull { it.memberUsername.any { name -> name.equals(self, true) } } ?: return
+        party.roster(own.memberUsername, own.memberUsername.size, true)
+        party.classes.clear()
+        party.classes.putAll(own.memberClasses.mapKeys { it.key.lowercase() })
+        currentLeader = own.leaderName
+        partyFloor = own.floor
+        restoredParty = true
+        party.advance()
+        saveParty()
+    }
+
+    @Subscription(priority = Subscription.LOW, receiveCancelled = true)
+    fun onPartyInfo(event: PartyInfoEvent) {
+        if (MC.instance.player == null) return
+        if (!event.inParty) {
+            if (party.members.size > 1) partyRevision++
+            party = DungeonFriendParty()
+            currentLeader = null
+            partyFloor = null
+            restoredParty = false
+        }
+        awaitingRoster = false
+        previousRoster = null
+        syncParty()
+        party.roster(party.members.toList(), if (event.inParty) event.members.size else 1, true)
+        syncParty()
+    }
+
+    @Subscription(priority = Subscription.LOW, receiveCancelled = true)
+    fun onChat(event: ChatReceivedEvent.Pre) {
+        if (!LocationAPI.onHypixel || MC.instance.player == null) return
+        val message = event.text
+        val normalized = message.lines().joinToString("\n") { line ->
+            val nickname = Regex("^(\\S+)\\* is ").find(line.trim())?.groupValues?.get(1)
+            val friend = nickname?.let { nick -> FriendsAPI.friends.firstOrNull { it.nickname == nick } }
+            if (friend != null) line.replaceFirst("$nickname*", friend.name) else line
+        }
+        if (scanner.receive(normalized, now())) event.cancel()
+        FRIEND_NOTICE.matchEntire(message)?.let {
+            scanner.notification(it.groupValues[1], it.groupValues[2] == "joined")
+        }
+        message.lines().mapNotNull(::newlyAddedFriend).forEach { name ->
+            scanner.notification(name, true)
+            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true, bypassShared = true)
+            scanner.refresh(now())
+        }
+        if (message.startsWith("You removed ") && message.endsWith(" from your friends list!")) {
+            val name = message.substringAfter("You removed ").substringBefore(" from your friends list!").substringAfterLast(' ')
+            scanner.notification(name, false)
+        }
+        syncParty()
+        if (party.chat(message, MC.player.name.string)) {
+            currentLeader = null
+            partyFloor = null
+            awaitingRoster = false
+            restoredParty = false
+            joining.clear()
+            partyNotices.clear()
+            partyRevision++
+            nextPartyRequest = 0
+        }
+        joinedPartyLeader(message)?.let { leader ->
+            currentLeader = leader
+            awaitingRoster = true
+            restoredParty = true
+            val accepted = joining.accepted?.second
+            val listing = selectedListing?.takeIf { now() - it.second <= 60000 && it.first.leaderName.equals(leader, true) }?.first
+            if (listing != null) {
+                val members = listing.memberUsername.map { it.lowercase() }.toSet() + MC.player.name.string.lowercase()
+                party.roster(members, members.size, false)
+                party.classes.putAll(listing.memberClasses.mapKeys { it.key.lowercase() })
+            }
+            partyFloor = listing?.floor ?: accepted?.first
+            (accepted?.second ?: DungeonFriendStatsCache.get(MC.player.name.string)?.selectedClass)?.let {
+                party.classes[MC.player.name.string.lowercase()] = it
+            }
+            party.advance()
+            selectedListing = null
+            joining.clear()
+            partyRevision++
+            nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
+        }
+        var replacement: Component? = null
+        var noticePlayer = ""
+        serverPartyInviter(event.component)?.let { inviter ->
+            if (joining.expectsInvite(inviter, now())) {
+                noticePlayer = inviter
+                replacement = Component.literal("§b[Party] §fYou have been invited to $inviter's party")
+            }
+            if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
+                joining.invited(inviter, now())
+            }
+        }
+        partyNotices.compact(message, MC.player.name.string, now())?.let { notice ->
+            noticePlayer = partyNotices.player
+            replacement = Component.literal("§b[Party] §f$notice")
+        }
+        if (!event.isCancelled || replacement != null) {
+            val border = partyBorders.filter(event.component, partyNotices.pending(now()), replacement != null, now()) {
+                it.send()
+            }
+            if (border || replacement != null) event.cancel()
+        }
+        replacement?.let { partyMessage(noticePlayer, it) }
+    }
+
+    @Subscription
+    fun onPrivateReply(event: PlayerMessageEvent) {
+        if (!LocationAPI.onHypixel || event.type != ChatChannel.PRIVATE) return
+        replies.receive(event.player, event.message, now())
+        acceptLfgReply(event.player, event.message)
+    }
+
+    private fun isFriend(name: String) = name.matches(Regex("[A-Za-z0-9_]{1,16}")) &&
+        (FriendsAPI.getFriend(name) != null || name.lowercase() in scanner.online)
+
+    fun onRelayMessage(name: String, uuid: String, text: String): Boolean {
+        if (!LocationAPI.isOnSkyBlock || !isFriend(name)) return false
+        val knownUuid = FriendsAPI.getFriend(name)?.uuid?.toString()?.replace("-", "")
+        if (knownUuid != null && knownUuid != uuid) return false
+        if (text == "[SkyMyce Connection Test]") return false // Ignore diagnostics from older clients.
+        val offer = DungeonLfgOffer.parse(text, now())
+        val request = DungeonJoinRequest.parse(text)
+        if (offer != null) {
+            if (receivedOffers.size >= 16 && name.lowercase() !in receivedOffers) return false
+            receivedOffers[name.lowercase()] = offer
+            val classes = offer.request.classes.joinToString("/") { it.displayName }
+            val message = Component.literal("§b$name §7wants you to join §b${offer.request.floor.name} §7as §f$classes")
+                .withStyle { it.withHoverEvent(net.minecraft.network.chat.HoverEvent.ShowText(Component.literal(offer.text))) }
+            message.append(Component.literal("  §a[Yes]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${offer.request.token}")) })
+            message.append(Component.literal("  §c[No]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${offer.request.token}")) })
+            partyMessage(name, message)
+        } else if (request != null) {
+            val manual = sentOffers[name.lowercase()]?.takeIf { it.expires > now() && it.request == request } != null
+            if (joining.receiveRequest(name, request, now(), manual)) {
+                if (manual) replies.receive(name, "yes", now())
+                sentOffers.remove(name.lowercase())
+                notify("$name has requested to join", name)
+                if (!manual) checkJoinStats(name)
+            }
+        } else if (text.startsWith("Inviting you for ") && text.contains("[SkyMyce Ready ")) {
+            joining.receiveOffer(name, text, now())
+        } else {
+            val lfgReply = sentOffers[name.lowercase()]?.expires?.let { it > now() } == true
+            replies.receive(name, text, now())
+            acceptLfgReply(name, text)
+            val message = Component.literal("§b$name §8» §f$text")
+            if (lfgReply) partyMessage(name, message) else message.send()
+        }
+        return true
+    }
+
+    private fun partyMessage(name: String, message: Component) {
+        if (MC.instance.player != null) message.send("skymyce:party:${name.lowercase()}")
+    }
+
+    private fun notify(text: String, name: String) {
+        partyMessage(name, Component.literal("§b[Party] §f$text"))
+    }
+
+    private fun acceptLfgReply(name: String, text: String) {
+        val offer = sentOffers[name.lowercase()]?.takeIf { it.expires > now() } ?: return
+        if (classifyLfgReply(text) == LfgReplyStatus.ACCEPTED && isFriend(name)) {
+            joining.receiveAcceptedReply(name, offer.request, now())
+            sentOffers.remove(name.lowercase())
+        }
+    }
+
+    private fun sendJoinAction(command: String): Boolean {
+        if (!command.startsWith("msg ")) {
+            if (command.startsWith("party invite ")) {
+                val name = command.substringAfterLast(' ')
+                notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...", name)
+            }
+            sendPartyAction(command)
+            return true
+        }
+        val parts = command.split(' ', limit = 3)
+        val name = parts[1]
+        val token = parts[2].substringAfterLast(' ').removeSuffix("]")
+        val failed = { if (joining.failed(name, token)) notify("Could not reach $name", name) }
+        val sent = DungeonFriendRelay.send(name, parts[2], { joining.acknowledged(name, token) }, failed)
+        if (!sent) failed()
+        return sent
+    }
+
+    private fun checkJoinStats(name: String) {
+        if (DungeonFriendStatsCache.verified(name) == null) {
+            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true, priority = true)
+        }
+    }
+
+    fun join(friend: OnlineDungeonFriend, floor: DungeonFloor) {
+        if (joinUnavailable(friend, floor) != null || MC.connection == null || friend.name.lowercase() !in scanner.online) return
+        if (!friend.name.matches(Regex("[A-Za-z0-9_]{1,16}")) || friend.name.equals(MC.player.name.string, true)) return
+        val classes = DungeonFriendsSettings.availability.classes.ifEmpty {
+            DungeonFriendStatsCache.get(MC.player.name.string)?.selectedClass?.let(::setOf) ?: DungeonClass.entries.toSet()
+        }
+        val request = DungeonJoinRequest(floor, classes, UUID.randomUUID().toString().replace("-", "").take(16))
+        if (sendJoinAction(joining.request(friend.name, request, now(), manual = true))) {
+            notify("Requested to join ${friend.name}", friend.name)
+        }
+        nextAction = now() + 1000
+    }
+
+    fun invite(friend: OnlineDungeonFriend) {
+        if (action(friend, "p ${friend.name}")) replies.forget(friend.name)
+    }
+
+    fun message(friend: OnlineDungeonFriend, floor: DungeonFloor, clazz: DungeonClass?) {
+        val text = lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, clazz, floor)
+        if (text.isEmpty() || !canAct || MC.connection == null || friend.name.lowercase() !in scanner.online || !isFriend(friend.name)) return
+        replies.sent(friend.name, now())
+        val classes = clazz?.let(::setOf) ?: DungeonClass.entries.toSet()
+        val offer = DungeonLfgOffer(DungeonJoinRequest(floor, classes, UUID.randomUUID().toString().replace("-", "").take(16)), text, now() + 60000)
+        sentOffers[friend.name.lowercase()] = offer
+        sendLfg(friend.name, text, false, offer.message())
+    }
+
+    fun relayReply(name: String, text: String) {
+        if (!LocationAPI.isOnSkyBlock || !isFriend(name) || now() < nextAction || text.length !in 1..220 || text.any { it < ' ' || it == '§' || it == '\u007f' }) return
+        val offer = receivedOffers[name.lowercase()]?.takeIf { it.expires > now() }
+        val buttonReply = Regex("^(yes|no) ([a-f0-9]{16})$").matchEntire(text)
+        if (buttonReply != null && buttonReply.groupValues[2] != offer?.request?.token) { notify("That request has expired", name); return }
+        val reply = buttonReply?.groupValues?.get(1) ?: text
+        if (offer != null && classifyLfgReply(reply) == LfgReplyStatus.ACCEPTED) {
+            if (!solo) { notify("Leave your current party before joining", name); return }
+            if (joining.busy(now())) { notify("A join request is already pending", name); return }
+            receivedOffers.remove(name.lowercase())
+            if (sendJoinAction(joining.request(name, offer.request, now(), manual = true))) {
+                notify("Waiting for $name's invite...", name)
+            }
+            nextAction = now() + 1000
+            return
+        }
+        receivedOffers.remove(name.lowercase())
+        sendLfg(name, reply, true)
+        if (offer != null) notify("Replied to $name: $reply", name)
+    }
+
+    private fun sendLfg(name: String, text: String, reply: Boolean, relayText: String = text) {
+        nextAction = now() + 1000
+        val fallback = {
+            if (LocationAPI.isOnSkyBlock && fallbackMessages.size < 16) fallbackMessages.addLast(Triple(name, text, reply))
+            Unit
+        }
+        if (!DungeonFriendRelay.send(name, relayText, {}, fallback)) fallback()
+    }
+
+    private fun action(friend: OnlineDungeonFriend, command: String): Boolean {
+        // Recheck at the send boundary, including clicks from rows rendered before the fifth member joined.
+        if (!canAct || MC.connection == null || friend.name.lowercase() !in scanner.online || !friend.name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return false
+        nextAction = now() + 1000
+        sendPartyAction(command)
+        return true
+    }
+
+    private fun sendPartyAction(command: String) {
+        partyNotices.command(command, automatic = true, now())
+        sendingPartyAction = true
+        try { sendCommand(command) } finally { sendingPartyAction = false }
+    }
+
+    @Subscription
+    fun onDisconnect(event: ServerDisconnectEvent) {
+        scanner = FriendListScanner()
+        party = DungeonFriendParty()
+        previousRoster = null
+        nextPartyRequest = 0
+        nextAction = 0
+        replies.clear()
+        sentOffers.clear()
+        receivedOffers.clear()
+        lastJoinStatus = ""
+        nextJoinStatsCheck = 0L
+        fallbackMessages.clear()
+        DungeonFriendRelay.disconnect()
+        joining.clear()
+        partyNotices.clear()
+        partyBorders.clear()
+        selectedListing = null
+        awaitingRoster = false
+        restoredParty = false
+        currentLeader = null
+        partyFloor = null
+        partyRevision++
+        DungeonFriendStatsCache.disconnect()
+    }
+
+    @Subscription
+    fun onProfileChange(event: ProfileChangeEvent) {
+        MC.instance.player?.let { DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true, bypassShared = true) }
+    }
+
+    fun now(): Long = System.nanoTime() / 1000000
+
+    private const val PLAYER = "(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16})"
+    private val FRIEND_NOTICE = Regex("^Friend > $PLAYER (joined|left)(?:\\.| the (?:server|network)[!.]?)?$")
+}

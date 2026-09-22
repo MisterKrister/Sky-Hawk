@@ -1,0 +1,250 @@
+import { DurableObject } from "cloudflare:workers";
+import { verifyAccount } from "./auth";
+import { SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
+
+type RelayEnv = Env;
+type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean };
+type Session = {
+  challenge: string;
+  expires: number;
+  ip: string;
+  name?: string;
+  uuid?: string;
+  liveUpdates?: boolean;
+  checking?: boolean;
+  credits: number;
+  updated: number;
+  seen: string[];
+  inbox: { id: string; from: string; expires: number }[];
+  uploads?: StatsGrant[];
+  cacheCredits?: number;
+  cacheUpdated?: number;
+  party?: JoinPolicy;
+  partyCredits?: number;
+  partyUpdated?: number;
+};
+const username = /^[A-Za-z0-9_]{1,16}$/;
+const uuid = /^[a-f0-9]{32}$/;
+const encoder = new TextEncoder();
+
+export default {
+  async fetch(request, env): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/health") return Response.json({ service: "SkyMyce relay", version: 2 });
+    if (url.pathname !== "/websocket") return new Response("Not found", { status: 404 });
+    if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("WebSocket upgrade required", { status: 426 });
+    }
+    const room = url.searchParams.get("room") ?? "friends";
+    if (!/^[a-z0-9_-]{1,32}$/.test(room) || !env.ROOMS.split(",").includes(room)) {
+      return new Response("Room not allowed", { status: 403 });
+    }
+    // Identity is not verified yet; bound attempts by the Cloudflare-provided IP.
+    if (!(await env.CONNECT_LIMIT.limit({ key: request.headers.get("CF-Connecting-IP") ?? "local" })).success) {
+      return new Response("Too many connection attempts", { status: 429 });
+    }
+    return env.RELAY_ROOMS.getByName(room).fetch(request);
+  },
+} satisfies ExportedHandler<RelayEnv>;
+
+export class RelayRoom extends DurableObject<RelayEnv> {
+  private readonly stats: SharedStats;
+  constructor(ctx: DurableObjectState, env: RelayEnv) {
+    super(ctx, env);
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    this.stats = new SharedStats(ctx.storage.sql);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const sockets = this.ctx.getWebSockets();
+    const ip = request.headers.get("CF-Connecting-IP") ?? "local";
+    if (sockets.length >= 128 || sockets.filter(ws => (ws.deserializeAttachment() as Session).ip === ip).length >= 8) {
+      return new Response("Too many connections", { status: 429 });
+    }
+    const [client, server] = Object.values(new WebSocketPair());
+    const now = Date.now();
+    const session: Session = {
+      challenge: crypto.randomUUID().replaceAll("-", ""), expires: now + 30000, ip,
+      credits: 12, updated: now, seen: [], inbox: [],
+    };
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment(session);
+    server.send(JSON.stringify({ type: "challenge", serverId: session.challenge, protocol: 2 }));
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > session.expires) await this.ctx.storage.setAlarm(session.expires);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
+    const session = ws.deserializeAttachment() as Session;
+    if (typeof raw !== "string" || encoder.encode(raw).length > 8192) { ws.close(1009, "Message too large"); return; }
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(raw);
+      if (!data || Array.isArray(data) || typeof data !== "object") throw new Error();
+    } catch { ws.close(1008, "Invalid JSON message"); return; }
+
+    if (!session.name) {
+      if (session.checking || Date.now() > session.expires || data.type !== "authenticate" ||
+          typeof data.name !== "string" || !username.test(data.name) || typeof data.uuid !== "string" || !uuid.test(data.uuid)) {
+        ws.close(1008, "Authentication required"); return;
+      }
+      session.checking = true;
+      ws.serializeAttachment(session);
+      try {
+        const profile = await verifyAccount(data, session.challenge);
+        if (profile === null || Date.now() > session.expires) {
+          ws.close(4003, "Invalid or expired Minecraft proof; update mod or restart Minecraft"); return;
+        }
+        if (ws.readyState !== WebSocket.OPEN) return;
+        for (const other of this.ctx.getWebSockets()) {
+          const previous = other.deserializeAttachment() as Session;
+          if (other !== ws && (previous.uuid === profile.id || previous.name?.toLowerCase() === profile.name.toLowerCase())) {
+            other.close(4001, "Account connected elsewhere");
+          }
+        }
+        session.name = profile.name;
+        session.uuid = profile.id;
+        session.liveUpdates = data.liveUpdates === true;
+        session.challenge = "";
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, partyPolicies: true, liveUpdates: true }));
+      } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
+      return;
+    }
+
+    if (data.type === "party_set" || data.type === "party_get") {
+      const now = Date.now();
+      session.partyCredits = Math.min(6, (session.partyCredits ?? 6) + (now - (session.partyUpdated ?? now)) / 1000);
+      session.partyUpdated = now;
+      if (session.partyCredits < 1) { ws.send(JSON.stringify({ type: "party_result", id: data.id, error: "rate_limited" })); return; }
+      session.partyCredits--;
+      if (data.type === "party_set") {
+        const limit = data.maxPbMillis ?? null;
+        if (typeof data.floor !== "string" || !/^[FM][1-7]$/.test(data.floor) || typeof data.open !== "boolean" ||
+            (limit !== null && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || limit > 59999999))) {
+          ws.close(1008, "Invalid party policy"); return;
+        }
+        // A policy belongs to the authenticated socket, never to a client-supplied name.
+        const party = { floor: data.floor, maxPbMillis: limit, open: data.open };
+        const changed = JSON.stringify(session.party) !== JSON.stringify(party);
+        session.party = party;
+        ws.serializeAttachment(session);
+        if (changed) this.broadcast(ws, { type: "party_update", name: session.name, uuid: session.uuid, ...party });
+        return;
+      }
+      if (typeof data.id !== "string" || !uuid.test(data.id) || !Array.isArray(data.names) || data.names.length > 32 ||
+          data.names.some(name => typeof name !== "string" || !username.test(name))) {
+        ws.close(1008, "Invalid party lookup"); return;
+      }
+      ws.serializeAttachment(session);
+      const parties: Record<string, (JoinPolicy & { uuid: string }) | null> = Object.create(null);
+      for (const name of data.names as string[]) parties[name.toLowerCase()] = null;
+      for (const other of this.ctx.getWebSockets()) {
+        if (other === ws || other.readyState !== WebSocket.OPEN) continue;
+        const peer = other.deserializeAttachment() as Session;
+        const name = peer.name?.toLowerCase();
+        if (name && Object.hasOwn(parties, name) && peer.party && peer.uuid) parties[name] = { ...peer.party, uuid: peer.uuid };
+      }
+      ws.send(JSON.stringify({ type: "party_result", id: data.id, parties }));
+      return;
+    }
+
+    if (data.type === "stats_get" || data.type === "stats_put") {
+      const now = Date.now();
+      session.cacheCredits = Math.min(30, (session.cacheCredits ?? 30) + (now - (session.cacheUpdated ?? now)) / 1000);
+      session.cacheUpdated = now;
+      if (session.cacheCredits < 1) { ws.send(JSON.stringify({ type: "stats_result", id: data.id, error: "rate_limited" })); return; }
+      session.cacheCredits--;
+      session.uploads = (session.uploads ?? []).filter(it => it.expires > now);
+      ws.serializeAttachment(session);
+      if (typeof data.id !== "string" || !uuid.test(data.id) || typeof data.name !== "string" || !username.test(data.name) ||
+          (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid)))) { ws.close(1008, "Invalid stats request"); return; }
+      if (data.type === "stats_get") {
+        const record = this.stats.get(data.name, data.uuid as string | undefined, now);
+        const ownRefresh = session.liveUpdates && data.name.toLowerCase() === session.name.toLowerCase() && data.uuid === session.uuid;
+        const grant: StatsGrant | undefined = record && !ownRefresh ? undefined : { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
+          token: crypto.randomUUID().replaceAll("-", ""), expires: now + 120_000 };
+        if (grant) session.uploads = [...session.uploads.filter(it => it.name !== grant.name).slice(-3), grant];
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "stats_result", id: data.id, record, upload: grant?.token }));
+      } else {
+        const grant = session.uploads.find(it => it.name === (data.name as string).toLowerCase() && it.token === data.upload && (!it.uuid || it.uuid === data.uuid));
+        const stats = validateStats(data.stats);
+        if (!grant || !stats || typeof data.uuid !== "string" || !Number.isSafeInteger(data.fetchedAt) ||
+            (data.fetchedAt as number) > now + 60_000 || (data.fetchedAt as number) <= now - STATS_TTL) {
+          ws.send(JSON.stringify({ type: "stats_result", id: data.id, error: "invalid_upload" })); return;
+        }
+        session.uploads = session.uploads.filter(it => it !== grant);
+        ws.serializeAttachment(session);
+        const record = { name: data.name, uuid: data.uuid, stats, fetchedAt: Math.min(data.fetchedAt as number, now) };
+        const ownRefresh = session.liveUpdates === true && data.uuid === session.uuid && data.name.toLowerCase() === session.name.toLowerCase();
+        const stored = this.stats.put(record, session.uuid!, now, ownRefresh);
+        ws.send(JSON.stringify({ type: "stats_result", id: data.id, stored }));
+        if (stored) this.broadcast(ws, { type: "stats_update", record });
+      }
+      return;
+    }
+
+    if (encoder.encode(raw).length > 2048) { ws.close(1009, "Message too large"); return; }
+
+    if ((data.type !== "message" && data.type !== "ack") || typeof data.id !== "string" || !/^[a-f0-9]{32}$/.test(data.id) ||
+        typeof data.to !== "string" || !username.test(data.to) || (data.type === "message" && (typeof data.text !== "string" ||
+        data.text.length < 1 || data.text.length > 256 || /[\x00-\x1f\x7f§]/.test(data.text)))) {
+      ws.close(1008, "Invalid relay message"); return;
+    }
+    const now = Date.now();
+    session.credits = Math.min(12, session.credits + (now - session.updated) / 2500);
+    session.updated = now;
+    if (session.credits < 1) { ws.close(1008, "Message rate exceeded"); return; }
+    session.credits--;
+    if (data.type === "ack") {
+      if (!session.inbox.some(it => it.id === data.id && it.from.toLowerCase() === (data.to as string).toLowerCase() && it.expires > now)) {
+        ws.close(1008, "Unsolicited acknowledgement"); return;
+      }
+      session.inbox = session.inbox.filter(it => it.id !== data.id);
+    } else {
+      if (session.seen.includes(data.id)) { ws.close(1008, "Duplicate message"); return; }
+      session.seen = [...session.seen.slice(-7), data.id];
+    }
+    ws.serializeAttachment(session);
+
+    // ponytail: scan at most 128 sockets per room; add a recipient index if rooms grow.
+    const target = this.ctx.getWebSockets().find(other => other !== ws && other.readyState === WebSocket.OPEN &&
+      (other.deserializeAttachment() as Session).name?.toLowerCase() === (data.to as string).toLowerCase());
+    if (!target) { ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); return; }
+    try {
+      if (data.type === "message") {
+        const recipient = target.deserializeAttachment() as Session;
+        recipient.inbox = [...recipient.inbox.filter(it => it.expires > now).slice(-7), { id: data.id, from: session.name, expires: now + 10000 }];
+        target.serializeAttachment(recipient);
+      }
+      target.send(JSON.stringify({ type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
+    } catch { ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); }
+  }
+
+  private broadcast(sender: WebSocket, packet: object): void {
+    const text = JSON.stringify(packet);
+    for (const peer of this.ctx.getWebSockets()) {
+      const session = peer.deserializeAttachment() as Session;
+      // Older clients reject unknown packet types. Opt-in survives hibernation with the socket.
+      if (peer !== sender && peer.readyState === WebSocket.OPEN && session.name && session.liveUpdates) {
+        try { peer.send(text); } catch { /* The recipient disconnected during delivery. */ }
+      }
+    }
+  }
+
+  async alarm(): Promise<void> {
+    let next = Infinity;
+    for (const ws of this.ctx.getWebSockets()) {
+      const session = ws.deserializeAttachment() as Session;
+      if (session.name) continue;
+      if (session.expires <= Date.now()) ws.close(1008, "Authentication timed out");
+      else next = Math.min(next, session.expires);
+    }
+    if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
+  }
+
+  webSocketClose(ws: WebSocket): void { ws.close(1000, "Client disconnected"); }
+  webSocketError(ws: WebSocket): void { console.error({ event: "websocket_error" }); ws.close(1011, "Connection error"); }
+}

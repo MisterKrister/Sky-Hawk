@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "skyblock-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-21",
+  "workers_dev": true,
+  "vars": { "ROOMS": "friends,testing" },
+  "ratelimits": [{ "name": "CONNECT_LIMIT", "namespace_id": "7112026", "simple": { "limit": 20, "period": 60 } }],
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY_ROOMS", "class_name": "RelayRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": true, "head_sampling_rate": 0.1 }
+  }
+}

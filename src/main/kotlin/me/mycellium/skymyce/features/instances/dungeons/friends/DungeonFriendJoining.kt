@@ -1,0 +1,313 @@
+package me.mycellium.skymyce.features.instances.dungeons.friends
+
+import net.minecraft.network.chat.ClickEvent
+import net.minecraft.network.chat.Component
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
+
+data class DungeonAvailability(
+    val floor: DungeonFloor = DungeonFloor.F7,
+    val classes: Set<DungeonClass> = emptySet(),
+    val maxPbMillis: Long? = null,
+) {
+    val enabled get() = classes.isNotEmpty()
+    fun accepts(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean =
+        requestedFloor == floor && maxPbMillis != null && stats?.state == StatsState.AVAILABLE &&
+            stats.eligible(floor) && stats.sPlusTimes[floor]?.let { it > 0 && it <= maxPbMillis } == true
+}
+
+data class DungeonJoinPolicy(val floor: DungeonFloor, val maxPbMillis: Long?, val open: Boolean = true) {
+    fun accepts(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean = open && requestedFloor == floor &&
+        (maxPbMillis == null || DungeonAvailability(floor, maxPbMillis = maxPbMillis).accepts(stats, floor))
+}
+
+fun parsePbLimit(text: String): Long? {
+    val match = Regex("^(\\d{1,3}):([0-5]\\d)(?:\\.(\\d{1,3}))?$").matchEntire(text.trim()) ?: return null
+    val (minutes, seconds, fraction) = match.destructured
+    return (minutes.toLong() * 60000 + seconds.toLong() * 1000 + fraction.padEnd(3, '0').toLong())
+        .takeIf { it > 0 }
+}
+
+private const val NAME = "(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16})"
+fun partyInviter(message: String): String? = Regex("^$NAME has invited you to join (?:their|his|her) party![^\\n]*$")
+    .matchEntire(message.replace(Regex("§."), "").trim())?.groupValues?.get(1)
+fun joinedPartyLeader(message: String): String? = Regex("^You have joined $NAME's? party!$")
+    .matchEntire(message.replace(Regex("§."), "").trim())?.groupValues?.get(1)
+
+fun serverPartyInviter(component: Component): String? {
+    val name = component.string.lines().firstNotNullOfOrNull(::partyInviter) ?: return null
+    fun hasAccept(part: Component): Boolean {
+        val command = (part.style.clickEvent as? ClickEvent.RunCommand)?.command?.trim()?.removePrefix("/")
+        return command?.matches(Regex("(?i)(?:p|party) accept ${Regex.escape(name)}")) == true || part.siblings.any(::hasAccept)
+    }
+    return name.takeIf { hasAccept(component) }
+}
+
+data class SavedDungeonParty(
+    val leader: String,
+    val members: Set<String>,
+    val classes: Map<String, DungeonClass>,
+    val floor: DungeonFloor?,
+    val savedAt: Long,
+) {
+    fun matches(leader: String?, roster: Set<String>, now: Long): Boolean =
+        this.leader.equals(leader, true) && members == roster.map { it.lowercase() }.toSet() &&
+            now >= savedAt && now - savedAt <= 86400000
+}
+
+data class DungeonJoinRequest(val floor: DungeonFloor, val classes: Set<DungeonClass>, val token: String) {
+    fun message() = "Invite me for ${floor.name} as ${classes.sortedBy { it.ordinal }.joinToString("/") { it.displayName }} [SkyMyce Join $token]"
+    companion object {
+        fun parse(text: String): DungeonJoinRequest? {
+            val match = Regex("^Invite me for ([FM][1-7]) as ([A-Za-z/]+) \\[SkyMyce Join ([a-f0-9]{16})]$")
+                .matchEntire(text) ?: return null
+            val classes = match.groupValues[2].split('/').map { parseDungeonClass(it) ?: return null }.toSet()
+            if (classes.isEmpty() || classes.size > 5) return null
+            return DungeonJoinRequest(DungeonFloor.valueOf(match.groupValues[1]), classes, match.groupValues[3])
+        }
+    }
+}
+
+/** The request token binds Yes to the invitation that was actually shown. */
+data class DungeonLfgOffer(val request: DungeonJoinRequest, val text: String, val expires: Long) {
+    fun message(): String = "[SkyMyce LFG ${request.floor.name} ${request.classes.joinToString("/") { it.displayName }} ${request.token}] $text".take(256)
+    companion object {
+        fun parse(text: String, now: Long): DungeonLfgOffer? {
+            val match = Regex("^\\[SkyMyce LFG ([FM][1-7]) ([A-Za-z/]+) ([a-f0-9]{16})] (.+)$").matchEntire(text) ?: return null
+            val request = DungeonJoinRequest.parse("Invite me for ${match.groupValues[1]} as ${match.groupValues[2]} [SkyMyce Join ${match.groupValues[3]}]") ?: return null
+            return DungeonLfgOffer(request, match.groupValues[4], now + 60000)
+        }
+    }
+}
+
+/** Compact only confirmations attributable to a command this mod actually sent. */
+class DungeonPartyNotices {
+    var player: String = ""
+        private set
+    private data class Invite(val expires: Long, val confirmed: Boolean = false)
+    private val invited = mutableMapOf<String, Invite>()
+    private var accepted: Pair<String, Long>? = null
+
+    fun command(command: String, automatic: Boolean, now: Long) {
+        prune(now)
+        val match = Regex("(?i)^(?:p|party) (?:(invite|accept|join) )?([A-Za-z0-9_]{1,16})$").matchEntire(command.trim()) ?: return
+        val name = match.groupValues[2].lowercase()
+        if (match.groupValues[1].lowercase() in setOf("accept", "join")) {
+            accepted = if (automatic) name to now + 10000 else null
+        } else if (automatic) invited[name] = Invite(now + 10000)
+        else invited.remove(name) // A manual re-invite supersedes the mod's earlier attempt.
+    }
+
+    fun compact(message: String, self: String, now: Long): String? {
+        player = ""
+        prune(now)
+        val lines = message.replace(Regex("§."), "").lines().map(String::trim)
+            .filter { it.isNotEmpty() && !it.matches(Regex("[-▬─]{5,}")) }
+        if (lines.size != 1) return null // Never hide unrelated lines in a mixed chat packet.
+        val line = lines.single()
+        joinedPartyLeader(line)?.let { leader ->
+            if (accepted?.first.equals(leader, true)) { accepted = null; player = leader; return "You joined $leader's party" }
+            return null
+        }
+        Regex("^(?:\\[Party] )?$NAME joined the party\\.$").matchEntire(line)?.let {
+            val name = it.groupValues[1]
+            return if (invited.remove(name.lowercase())?.confirmed == true) { player = name; "$name joined" } else null
+        }
+        val own = Regex("^You (?:have )?invited $NAME to (?:your|the) party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
+        val named = Regex("^$NAME invited $NAME to the party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
+            ?.takeIf { it.groupValues[1].equals(self, true) }
+        val name = own?.groupValues?.get(1) ?: named?.groupValues?.get(2) ?: return null
+        val pending = invited[name.lowercase()] ?: return null
+        if (pending.confirmed) return null
+        invited[name.lowercase()] = Invite(now + 60000, true)
+        player = name
+        return "$name has been invited"
+    }
+
+    private fun prune(now: Long) {
+        invited.entries.removeIf { it.value.expires <= now }
+        if (accepted?.second?.let { it <= now } == true) accepted = null
+    }
+
+    fun clear() { invited.clear(); accepted = null }
+
+    fun pending(now: Long): Boolean {
+        prune(now)
+        return invited.isNotEmpty() || accepted != null
+    }
+}
+
+data class JoinPartyContext(
+    val availability: DungeonAvailability,
+    val solo: Boolean,
+    val canInvite: Boolean,
+    val partySize: Int,
+    val floor: DungeonFloor,
+    val missing: Set<DungeonClass>,
+    val members: Set<String>,
+) {
+    val policy get() = DungeonJoinPolicy(floor, availability.maxPbMillis.takeIf { availability.floor == floor }, canInvite && partySize < 5)
+}
+
+/** Hold a possible opening border until the following packet identifies whose notice it surrounds. */
+class DungeonPartyBorders {
+    private var held: Pair<Component, Long>? = null
+    private var trailingUntil = 0L
+    private fun separator(text: String) = text.replace(Regex("§."), "").trim().matches(Regex("[-▬─]{5,}"))
+
+    fun filter(component: Component, pending: Boolean, compacted: Boolean, now: Long, restore: (Component) -> Unit): Boolean {
+        val previous = held
+        held = null
+        previous?.let { if (!compacted || now >= it.second) restore(it.first) }
+        if (separator(component.string)) {
+            if (now < trailingUntil) { trailingUntil = 0; return true }
+            trailingUntil = 0
+            if (pending) { held = component to now + 250; return true }
+            return false
+        }
+        trailingUntil = if (compacted && !separator(component.string.lineSequence().last())) now + 250 else 0
+        return false
+    }
+
+    fun tick(now: Long, restore: (Component) -> Unit) {
+        held?.takeIf { now >= it.second }?.let { held = null; restore(it.first) }
+    }
+
+    fun clear() { held = null; trailingUntil = 0 }
+}
+
+/** Short-lived exchanges only: an offer in private chat is never treated as a server invitation. */
+class DungeonFriendJoining {
+    private data class Request(val data: DungeonJoinRequest, val expires: Long, var offered: DungeonClass? = null,
+        var received: Boolean = false, var invited: Boolean = false, val manual: Boolean = false)
+    private val incoming = linkedMapOf<String, Request>()
+    private val invitations = linkedMapOf<String, Long>()
+    private val recent = mutableMapOf<String, Long>()
+    private var outgoing: Pair<String, Request>? = null
+    private var acceptingUntil = 0L
+    var accepted: Pair<String, Pair<DungeonFloor, DungeonClass>>? = null
+        private set
+    var status = ""
+        private set
+    var statusPlayer = ""
+        private set
+    fun busy(now: Long): Boolean = outgoing != null || now < acceptingUntil
+
+    fun expectsInvite(name: String, now: Long): Boolean = outgoing?.let { it.first.equals(name, true) && it.second.expires > now } == true
+
+    fun request(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): String {
+        outgoing = name.lowercase() to Request(data, now + 60000, manual = manual)
+        statusPlayer = name
+        status = "Join requested from $name"
+        return "msg $name ${data.message()}"
+    }
+
+    fun receiveRequest(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): Boolean {
+        prune(now)
+        val key = name.lowercase()
+        if (key in incoming || (recent[key] ?: 0) > now || incoming.size >= 5) return false
+        incoming[key] = Request(data, now + 60000, manual = manual)
+        recent[key] = now + 60000
+        return true
+    }
+
+    fun receiveAcceptedReply(name: String, data: DungeonJoinRequest, now: Long) {
+        if (receiveRequest(name, data, now, manual = true)) incoming.getValue(name.lowercase()).received = true
+    }
+
+    fun receiveOffer(name: String, message: String, now: Long) {
+        prune(now)
+        val (target, request) = outgoing ?: return
+        if (!target.equals(name, true)) return
+        val match = Regex("^Inviting you for ([FM][1-7]) as ([A-Za-z]+) \\[SkyMyce Ready ([a-f0-9]{16})]$")
+            .matchEntire(message) ?: return
+        val clazz = parseDungeonClass(match.groupValues[2]) ?: return
+        if (match.groupValues[1] == request.data.floor.name && match.groupValues[3] == request.data.token && clazz in request.data.classes) {
+            request.offered = clazz
+        }
+    }
+
+    fun invited(name: String, now: Long) {
+        prune(now)
+        if (invitations.size < 5) invitations.putIfAbsent(name.lowercase(), now + 55000)
+    }
+
+    fun acknowledged(name: String, token: String) {
+        incoming[name.lowercase()]?.takeIf { it.offered != null && it.data.token == token }?.received = true
+    }
+
+    fun failed(name: String, token: String): Boolean {
+        val removed = incoming[name.lowercase()]?.takeIf { it.data.token == token }?.let { incoming.remove(name.lowercase()); true } == true
+        val requested = outgoing?.first.equals(name, true) && outgoing?.second?.data?.token == token
+        if (requested) outgoing = null
+        if (removed || requested) { statusPlayer = name; status = "Could not reach $name" }
+        return removed || requested
+    }
+
+    fun nextCommand(context: JoinPartyContext, now: Long, stats: (String) -> DungeonFriendStats?): String? {
+        prune(now)
+        if (now < acceptingUntil) return null
+        if (context.solo && (context.availability.enabled || outgoing?.second?.manual == true)) {
+            for (name in invitations.keys.toList()) {
+                val request = outgoing?.takeIf { it.first == name }?.second
+                // A directed Join request must not accept a different person's invitation.
+                if (outgoing != null && request == null) continue
+                val floor = request?.data?.floor ?: context.availability.floor
+                val offered = request?.offered
+                val choices = request?.data?.classes ?: context.availability.classes
+                val clazz = if (offered != null) offered.takeIf { request.manual || it in context.availability.classes } ?: continue
+                    else choices.firstOrNull { request?.manual == true || it in context.availability.classes } ?: continue
+                accepted = name to (floor to clazz)
+                acceptingUntil = now + 10000
+                invitations.clear()
+                outgoing = null
+                statusPlayer = name
+                status = "Joining $name as ${clazz.displayName}"
+                return "party accept $name"
+            }
+        }
+        if (outgoing != null || !context.canInvite || context.partySize >= 5) return null
+        incoming.keys.removeAll(context.members)
+        for ((name, request) in incoming) {
+            val floor = request.data.floor
+            if (request.invited || (!request.manual && floor != context.floor)) continue
+            val playerStats = stats(name)
+            if (!request.manual && !context.policy.accepts(playerStats, floor)) {
+                statusPlayer = name
+                status = if (playerStats == null) "Checking $name's S+ PB" else "$name does not meet the ${floor.name} S+ PB limit"
+                continue
+            }
+            val otherReservations = incoming.filter { it.key != name && it.value.offered != null }
+            if (context.partySize + otherReservations.size >= 5) continue
+            val reservedClasses = otherReservations.values.mapNotNull { it.offered }.toSet()
+            val clazz = request.offered ?: request.data.classes.firstOrNull { it in context.missing && it !in reservedClasses } ?: continue
+            if (clazz !in context.missing || clazz in reservedClasses) continue
+            if (request.offered == null) {
+                request.offered = clazz
+                statusPlayer = name
+                status = "Offering ${clazz.displayName} to $name"
+                if (!request.received) return "msg $name Inviting you for ${floor.name} as ${clazz.displayName} [SkyMyce Ready ${request.data.token}]"
+            }
+            if (!request.received) continue
+            request.invited = true
+            statusPlayer = name
+            status = "Invited $name as ${clazz.displayName}"
+            return "party invite $name"
+        }
+        return null
+    }
+
+    fun classFor(name: String): DungeonClass? = incoming[name.lowercase()]?.takeIf { it.invited }?.offered
+
+    fun prune(now: Long) {
+        incoming.entries.removeIf { it.value.expires <= now }
+        invitations.entries.removeIf { it.value <= now }
+        recent.entries.removeIf { it.value <= now }
+        if (outgoing?.second?.expires?.let { it <= now } == true) { statusPlayer = outgoing!!.first; outgoing = null; status = "Join request expired" }
+        if (now >= acceptingUntil) accepted = null
+    }
+
+    fun clear() {
+        incoming.clear(); invitations.clear(); recent.clear(); outgoing = null; accepted = null; acceptingUntil = 0; status = ""; statusPlayer = ""
+    }
+}

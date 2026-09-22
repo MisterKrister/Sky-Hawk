@@ -7,6 +7,7 @@ import me.mycellium.skymyce.features.instances.dungeons.DungeonCleanChat
 object DungeonsConfig : CategoryKt("Dungeons") {
     init {
         category(DungeonTrackerConfig)
+        category(DungeonFriendsConfig)
     }
 
     val valuableItemThreshold by int(15) {

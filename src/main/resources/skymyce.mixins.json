@@ -5,6 +5,9 @@
   "mixins": [
     "AbstractContainerScreenMixin"
   ],
+  "client": [
+    "LabelComponentMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   },
