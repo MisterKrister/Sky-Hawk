@@ -193,7 +193,9 @@ class DungeonFriendJoining {
         private set
     fun busy(now: Long): Boolean = outgoing != null || now < acceptingUntil
 
-    fun expectsInvite(name: String, now: Long): Boolean = outgoing?.let { it.first.equals(name, true) && it.second.expires > now } == true
+    fun expectsInvite(name: String, now: Long): Boolean = outgoing?.let {
+        it.first.equals(name, true) && it.second.expires > now && it.second.offered != null
+    } == true
 
     fun request(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): String {
         outgoing = name.lowercase() to Request(data, now + 60000, manual = manual)
@@ -229,7 +231,8 @@ class DungeonFriendJoining {
 
     fun invited(name: String, now: Long) {
         prune(now)
-        if (invitations.size < 5) invitations.putIfAbsent(name.lowercase(), now + 55000)
+        // Available classes alone never authorize an unsolicited or manual party invitation.
+        if (expectsInvite(name, now)) invitations.putIfAbsent(name.lowercase(), now + 55000)
     }
 
     fun acknowledged(name: String, token: String) {
@@ -249,15 +252,9 @@ class DungeonFriendJoining {
         if (now < acceptingUntil) return null
         if (context.solo && (context.availability.enabled || outgoing?.second?.manual == true)) {
             for (name in invitations.keys.toList()) {
-                val request = outgoing?.takeIf { it.first == name }?.second
-                // A directed Join request must not accept a different person's invitation.
-                if (outgoing != null && request == null) continue
-                val floor = request?.data?.floor ?: context.availability.floor
-                val offered = request?.offered
-                val choices = request?.data?.classes ?: context.availability.classes
-                val clazz = if (offered != null) offered.takeIf { request.manual || it in context.availability.classes } ?: continue
-                    else choices.firstOrNull { request?.manual == true || it in context.availability.classes } ?: continue
-                accepted = name to (floor to clazz)
+                val request = outgoing?.takeIf { it.first == name }?.second ?: continue
+                val clazz = request.offered?.takeIf { request.manual || it in context.availability.classes } ?: continue
+                accepted = name to (request.data.floor to clazz)
                 acceptingUntil = now + 10000
                 invitations.clear()
                 outgoing = null
