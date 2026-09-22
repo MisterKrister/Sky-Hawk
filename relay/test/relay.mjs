@@ -15,7 +15,7 @@ for (const [original, replacement] of [[trusted.playerCertificateKeys[0].publicK
   assert.ok(script.includes(original));
   script = script.replaceAll(original, replacement);
 }
-const identities = new Map([["Alice", "a".repeat(32)], ["Bob", "b".repeat(32)], ["Carol", "c".repeat(32)]]);
+const identities = new Map([["Alice", "a".repeat(32)], ["Bob", "b".repeat(32)], ["Carol", "c".repeat(32)], ["InvalidPolicy", "d".repeat(32)]]);
 function proof(name, challenge, changes = {}) {
   const id = identities.get(name), expires = changes.expires ?? Date.now() + 3600000;
   const expiry = Buffer.alloc(8); expiry.writeBigInt64BE(BigInt(expires));
@@ -100,6 +100,25 @@ try {
   assert.equal((await cache(bob, { ...lookup, uuid: identities.get("Alice") })).record, null);
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   assert.deepEqual((await cache(bob, lookup)).record.stats, stats); // SQLite survives hibernation.
+  async function policies(client, names) {
+    client.ws.send(JSON.stringify({ type: "party_get", id: (cacheId++).toString(16).padStart(32, "0"), names }));
+    const response = await client.next();
+    assert.equal(response.type, "party_result");
+    return response;
+  }
+  bob.ws.send(JSON.stringify({ type: "party_set", name: "Alice", floor: "F7", maxPbMillis: 420000, open: true }));
+  bob.ws.send("ping"); await bob.next();
+  const advertised = await policies(alice, ["BOB", "Offline", "Alice", "__proto__"]);
+  assert.deepEqual(advertised.parties.bob, { floor: "F7", maxPbMillis: 420000, open: true, uuid: identities.get("Bob") });
+  assert.equal(advertised.parties.offline, null);
+  assert.equal(advertised.parties.__proto__, null);
+  assert.equal(advertised.parties.alice, null); // A forged name cannot publish another player's policy.
+  assert.equal((await policies(carol, ["Bob"])).parties.bob, null); // Policies stay in their room.
+  bob.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: 300000, open: false }));
+  bob.ws.send("ping"); await bob.next();
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.deepEqual((await policies(alice, ["Bob"])).parties.bob,
+    { floor: "F7", maxPbMillis: 300000, open: false, uuid: identities.get("Bob") });
   const id = "1".repeat(32);
   alice.ws.send(JSON.stringify({ type: "message", id, to: "Bob", from: "Forged", text: "LFG F7?" }));
   const received = await bob.next();
@@ -131,6 +150,11 @@ try {
   const closed = closeEvent(bob.ws);
   bob.ws.send(JSON.stringify({ type: "message", id: "3".repeat(32), to: "Alice", text: "x".repeat(2050) }));
   assert.equal((await closed).code, 1009);
+  assert.equal((await policies(alice, ["Bob"])).parties.bob, null); // Disconnected hosts are not advertised.
+  const invalidPolicy = await connect("InvalidPolicy", "testing"); invalidPolicy.authenticate(); await invalidPolicy.next();
+  const policyClosed = closeEvent(invalidPolicy.ws);
+  invalidPolicy.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: -1, open: true }));
+  assert.equal((await policyClosed).code, 1008);
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

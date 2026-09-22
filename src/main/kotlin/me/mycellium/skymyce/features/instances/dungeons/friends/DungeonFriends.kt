@@ -34,6 +34,7 @@ object DungeonFriends : SkyMyceModule() {
     val replies = DungeonLfgReplies()
     val joining = DungeonFriendJoining()
     private val partyNotices = DungeonPartyNotices()
+    private val partyBorders = DungeonPartyBorders()
     var scanner = FriendListScanner()
         private set
     private var party = DungeonFriendParty()
@@ -50,6 +51,7 @@ object DungeonFriends : SkyMyceModule() {
     private val sentOffers = mutableMapOf<String, DungeonLfgOffer>()
     private val receivedOffers = mutableMapOf<String, DungeonLfgOffer>()
     private var lastJoinStatus = ""
+    private var nextJoinStatsCheck = 0L
     var partyFloor: DungeonFloor? = null
         private set
     var partyRevision = 0L
@@ -63,8 +65,24 @@ object DungeonFriends : SkyMyceModule() {
     val partyStatus: String get() = if (!party.ready) "Checking party size..." else "Party $partySize/5"
     private val solo get() = party.ready && !PartyAPI.inParty && partySize == 1
 
-    fun canJoin(floor: DungeonFloor): Boolean = LocationAPI.isOnSkyBlock && solo && now() >= nextAction &&
-        DungeonFriendRelay.connected && !joining.busy(now()) && DungeonFriendsSettings.availability.let { it.enabled && it.floor == floor }
+    fun joinUnavailable(friend: OnlineDungeonFriend, floor: DungeonFloor): String? {
+        if (!LocationAPI.isOnSkyBlock || !solo) return "You must be solo in SkyBlock to use Join"
+        if (now() < nextAction || joining.busy(now())) return "Waiting for your current party request"
+        if (!DungeonFriendRelay.connected) return "Party requests are currently unavailable"
+        val target = DungeonFriendRelay.partyPolicy(friend.name) ?: return "Waiting for ${friend.name}'s party details; both players need the updated mod"
+        val uuid = FriendsAPI.getFriend(friend.name)?.uuid?.toString()?.replace("-", "")
+        if (uuid != null && uuid != target.uuid) return "Player identity changed; refresh your friends"
+        val policy = target.policy
+        if (!policy.open) return "${friend.name}'s party is not accepting Join requests"
+        if (floor != policy.floor) return "${friend.name} is hosting ${policy.floor.name}"
+        val stats = DungeonFriendStatsCache.verified(MC.player.name.string)
+        if (policy.maxPbMillis != null && stats == null && now() >= nextJoinStatsCheck) {
+            nextJoinStatsCheck = now() + 60000
+            checkJoinStats(MC.player.name.string)
+        }
+        if (!policy.accepts(stats, floor)) return "Your ${floor.name} S+ PB must be ${formatDungeonTime(policy.maxPbMillis)} or faster"
+        return null
+    }
 
     override fun init() {
         DungeonFriendsSettings.load()
@@ -87,6 +105,7 @@ object DungeonFriends : SkyMyceModule() {
         DungeonFriendRelay.tick(LocationAPI.isOnSkyBlock && MC.instance.player != null)
         if (!LocationAPI.isOnSkyBlock) fallbackMessages.clear()
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
+        partyBorders.tick(now()) { MC.player.sendSystemMessage(it) }
         replies.prune(now())
         sentOffers.entries.removeIf { it.value.expires <= now() }
         receivedOffers.entries.removeIf { it.value.expires <= now() }
@@ -115,6 +134,7 @@ object DungeonFriends : SkyMyceModule() {
                 PartyAPI.leader?.name.equals(self.name.string, true) || PartyAPI.members.any { it.uuid == self.uuid && it.role.name == "MOD" })
             val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canInvite, partySize,
                 partyFloor ?: DungeonFriendsSettings.availability.floor, openClasses, party.members.toSet())
+            DungeonFriendRelay.publishPolicy(context.policy)
             joining.nextCommand(context, now(), DungeonFriendStatsCache::verified)?.let {
                 sendJoinAction(it)
                 nextAction = now() + 1000
@@ -264,21 +284,26 @@ object DungeonFriends : SkyMyceModule() {
             partyRevision++
             nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
         }
+        var replacement: Component? = null
         serverPartyInviter(event.component)?.let { inviter ->
             if (joining.expectsInvite(inviter, now())) {
-                event.cancel()
-                MC.player.sendSystemMessage(Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
-                    .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) })
+                replacement = Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
+                    .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) }
             }
             if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
                 joining.invited(inviter, now())
-                checkJoinStats(inviter)
             }
         }
         partyNotices.compact(message, MC.player.name.string, now())?.let { notice ->
-            event.cancel()
-            notify(notice)
+            replacement = Component.literal("§b[Party] §f$notice")
         }
+        if (!event.isCancelled || replacement != null) {
+            val border = partyBorders.filter(event.component, partyNotices.pending(now()), replacement != null, now()) {
+                MC.player.sendSystemMessage(it)
+            }
+            if (border || replacement != null) event.cancel()
+        }
+        replacement?.let { MC.player.sendSystemMessage(it) }
     }
 
     @Subscription
@@ -313,7 +338,7 @@ object DungeonFriends : SkyMyceModule() {
                 if (manual) replies.receive(name, "yes", now())
                 sentOffers.remove(name.lowercase())
                 notify("$name has requested to join")
-                checkJoinStats(name)
+                if (!manual) checkJoinStats(name)
             }
         } else if (text.startsWith("Inviting you for ") && text.contains("[SkyMyce Ready ")) {
             joining.receiveOffer(name, text, now())
@@ -334,7 +359,6 @@ object DungeonFriends : SkyMyceModule() {
         if (classifyLfgReply(text) == LfgReplyStatus.ACCEPTED && isFriend(name)) {
             joining.receiveAcceptedReply(name, offer.request, now())
             sentOffers.remove(name.lowercase())
-            checkJoinStats(name)
         }
     }
 
@@ -363,12 +387,14 @@ object DungeonFriends : SkyMyceModule() {
     }
 
     fun join(friend: OnlineDungeonFriend, floor: DungeonFloor) {
-        if (!canJoin(floor) || MC.connection == null || friend.name.lowercase() !in scanner.online) return
+        if (joinUnavailable(friend, floor) != null || MC.connection == null || friend.name.lowercase() !in scanner.online) return
         if (!friend.name.matches(Regex("[A-Za-z0-9_]{1,16}")) || friend.name.equals(MC.player.name.string, true)) return
-        val request = DungeonJoinRequest(floor, DungeonFriendsSettings.availability.classes, UUID.randomUUID().toString().replace("-", "").take(16))
-        if (sendJoinAction(joining.request(friend.name, request, now()))) {
+        val classes = DungeonFriendsSettings.availability.classes.ifEmpty {
+            DungeonFriendStatsCache.get(MC.player.name.string)?.selectedClass?.let(::setOf) ?: DungeonClass.entries.toSet()
+        }
+        val request = DungeonJoinRequest(floor, classes, UUID.randomUUID().toString().replace("-", "").take(16))
+        if (sendJoinAction(joining.request(friend.name, request, now(), manual = true))) {
             notify("Requested to join ${friend.name}")
-            checkJoinStats(friend.name)
         }
         nextAction = now() + 1000
     }
@@ -394,10 +420,10 @@ object DungeonFriends : SkyMyceModule() {
         if (buttonReply != null && buttonReply.groupValues[2] != offer?.request?.token) { notify("That request has expired"); return }
         val reply = buttonReply?.groupValues?.get(1) ?: text
         if (offer != null && classifyLfgReply(reply) == LfgReplyStatus.ACCEPTED) {
-            if (!solo || joining.busy(now())) { notify("Leave your current party before joining"); return }
+            if (!solo) { notify("Leave your current party before joining"); return }
+            if (joining.busy(now())) { notify("A join request is already pending"); return }
             receivedOffers.remove(name.lowercase())
             if (sendJoinAction(joining.request(name, offer.request, now(), manual = true))) {
-                checkJoinStats(name)
                 notify("Waiting for $name's invite...")
             }
             nextAction = now() + 1000
@@ -441,10 +467,12 @@ object DungeonFriends : SkyMyceModule() {
         sentOffers.clear()
         receivedOffers.clear()
         lastJoinStatus = ""
+        nextJoinStatsCheck = 0L
         fallbackMessages.clear()
         DungeonFriendRelay.disconnect()
         joining.clear()
         partyNotices.clear()
+        partyBorders.clear()
         selectedListing = null
         awaitingRoster = false
         restoredParty = false

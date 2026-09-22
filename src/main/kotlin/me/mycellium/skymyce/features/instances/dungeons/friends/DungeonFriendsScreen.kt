@@ -1,6 +1,5 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
-import com.teamresourceful.resourcefulconfig.api.client.ResourcefulConfigScreen
 import io.wispforest.owo.ui.base.BaseOwoScreen
 import io.wispforest.owo.ui.component.ButtonComponent
 import io.wispforest.owo.ui.component.DropdownComponent
@@ -10,7 +9,6 @@ import io.wispforest.owo.ui.container.FlowLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
-import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.MC
 import net.minecraft.network.chat.Component
@@ -30,11 +28,9 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var classesDraft = emptySet<DungeonClass>()
     private var availableDraft = emptySet<DungeonClass>()
     private var pbLimitDraft = ""
-    private var relayUrlDraft = ""
     private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
-    private lateinit var apiSetup: ButtonComponent
     private lateinit var listStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
@@ -43,7 +39,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private val refreshProgress = DungeonRefreshProgress()
     private val sortHeaders = mutableMapOf<FriendSort, Pair<ButtonComponent, String>>()
     private val actions = mutableListOf<ButtonComponent>()
-    private val joinActions = mutableListOf<ButtonComponent>()
+    private val joinActions = mutableListOf<Pair<ButtonComponent, OnlineDungeonFriend>>()
     private var renderedState: List<Any?> = emptyList()
     private val panelWidth get() = minOf(700, width - 24)
     private val compact get() = panelWidth < 600
@@ -80,18 +76,18 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             updateResults()
         }
         actions.forEach { it.active(DungeonFriends.canAct) }
-        joinActions.forEach { it.active(DungeonFriends.canJoin(floor)) }
+        DungeonFriendRelay.requestPolicies(DungeonFriends.scanner.online.values.map { it.name })
+        joinActions.forEach { (button, friend) ->
+            val reason = DungeonFriends.joinUnavailable(friend, floor)
+            button.active(reason == null)
+            button.tooltip(Component.literal(reason ?: "Request to join ${friend.name} on ${floor.name}"))
+        }
         partyStatus.text(Component.literal(DungeonFriends.partyStatus + if (DungeonFriends.partyFull) "  Full" else ""))
         partyStatus.color(Color.ofRgb(if (DungeonFriends.partyFull) 0xF18C8C else CYAN))
         partyStatus.tooltip(Component.literal(DungeonFriendsSettings.availability.let {
-            if (it.enabled) "Available for ${it.floor.name}: ${it.classes.joinToString { clazz -> clazz.displayName }}\nS+ PB at most ${formatDungeonTime(it.maxPbMillis)}"
-            else "Auto join is off. Configure Available classes and an S+ PB limit."
+            if (it.enabled) "Available for ${it.floor.name}: ${it.classes.joinToString { clazz -> clazz.displayName }}"
+            else "Auto join is off. Choose Available classes to accept invitations automatically."
         } + DungeonFriends.joining.status.takeIf { it.isNotEmpty() }?.let { "\n$it" }.orEmpty()))
-        apiSetup.tooltip(Component.literal(when {
-            !LocationAPI.onHypixel -> "Join Hypixel to load player stats"
-            !DungeonFriendStatsCache.canFetch -> "Use SkyBlockPv / SkyBlocker or add an API key"
-            else -> DungeonFriendStatsCache.status.ifEmpty { "Configure SkyBlock stats" }
-        }))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
         val remaining = DungeonFriendStatsCache.pendingCount
         val refreshing = LocationAPI.onHypixel && (DungeonFriends.scanner.scanning || remaining > 0)
@@ -102,7 +98,6 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else buildString {
             append(DungeonFriends.scanner.status)
             if (remaining > 0) append("\n$remaining player stats remaining")
-            DungeonFriendStatsCache.status.takeIf { it.isNotEmpty() }?.let { append("\n$it") }
         }))
     }
 
@@ -210,13 +205,6 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             padding(Insets.right(4))
         }
         child(results)
-        child(separator())
-        child(row().apply {
-            gap(8)
-            horizontalAlignment(HorizontalAlignment.RIGHT)
-            apiSetup = button("API setup", 62) { openApiSettings() }
-            child(apiSetup)
-        })
     }
 
     private fun toolbarActions(row: FlowLayout) {
@@ -228,11 +216,6 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         }
         row.child(refreshButton)
         row.child(button("Settings", 54) { openSettings(null) })
-    }
-
-    private fun openApiSettings() {
-        MC.instance.setScreen(ResourcefulConfigScreen.make(SkyMyce.config)
-            .withParent(this).withQuery("Hypixel API Key").build())
     }
 
     private fun wantedClasses(): Set<DungeonClass> = missingClasses ?: DungeonFriends.openClasses
@@ -318,9 +301,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     actions += message
                     child(invite)
                     child(message)
-                    val join = button("Join", 34) { DungeonFriends.join(friend, floor) }.active(DungeonFriends.canJoin(floor))
-                    join.tooltip(Component.literal("Ask ${friend.name} through the relay, then auto join if their S+ PB qualifies.\nRequires a connected relay, Available classes and a PB limit for ${floor.name}; you must be solo in SkyBlock."))
-                    joinActions += join
+                    val join = button("Join", 34) { DungeonFriends.join(friend, floor) }.active(DungeonFriends.joinUnavailable(friend, floor) == null)
+                    joinActions += join to friend
                     child(join)
                     child(button("Edit", 30) { openSettings(friend.name) }.tooltip(Component.literal("Edit secondary classes")))
                 })
@@ -358,7 +340,6 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         classesDraft = DungeonFriendsSettings.secondaryClasses[friend?.lowercase()].orEmpty()
         availableDraft = DungeonFriendsSettings.availability.classes
         pbLimitDraft = DungeonFriendsSettings.availability.maxPbMillis?.let(::formatDungeonTime).orEmpty()
-        relayUrlDraft = DungeonFriendsSettings.relayUrl
         settingsOpen = true
         rebuild()
     }
@@ -376,35 +357,27 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun settingsContent(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(8)
         if (editingFriend == null) {
-            child(label("PLAYER RELAY", CYAN))
-            child(label("Join messages use the relay. LFG tries the relay first, then /msg if the other mod does not acknowledge within 5 seconds. Minecraft verifies your account; no password or API key is sent to the relay.", MUTED)
-                .horizontalSizing(Sizing.fill()))
-            child(UIComponents.textBox(Sizing.fill()).apply {
-                setMaxLength(512)
-                text(relayUrlDraft)
-                setHint(Component.literal("wss://your-relay.workers.dev/websocket"))
-                onChanged().subscribe { relayUrlDraft = it }
-            })
-            child(button("Reconnect", 80) { DungeonFriendRelay.disconnect() }
-                .tooltip(Component.literal("${DungeonFriendRelay.status}\nReconnect using saved relay settings. Save first if you changed the address.")))
-            child(separator())
             child(label("AVAILABLE FOR ${floor.name}", CYAN))
-            child(label("Check the classes you can play. Eligible party invitations will be accepted while you are solo in SkyBlock. Uncheck all to stop auto joining.", MUTED)
-                .horizontalSizing(Sizing.fill()))
-            DungeonClass.entries.forEach { clazz ->
-                child(button("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}", 116) { button ->
-                    availableDraft = if (clazz in availableDraft) availableDraft - clazz else availableDraft + clazz
-                    button.message = Component.literal("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}")
+            DungeonClass.entries.chunked(((panelWidth - 28) / 98).coerceIn(1, 5)).forEach { group ->
+                child(row().apply {
+                    gap(4)
+                    group.forEach { clazz ->
+                        child(button("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}", 94) { button ->
+                            availableDraft = if (clazz in availableDraft) availableDraft - clazz else availableDraft + clazz
+                            button.message = Component.literal("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}")
+                        }.tooltip(Component.literal("Auto-accept invitations as ${clazz.displayName} while solo. Uncheck all to turn off.")))
+                    }
                 })
             }
-            child(label("S+ PB LIMIT (m:ss or m:ss.sss)", CYAN))
-            child(label("Inviters and incoming Join requests must have a recent ${floor.name} S+ PB at or faster than this time. Hidden or unknown PBs never qualify.", MUTED)
-                .horizontalSizing(Sizing.fill()))
-            child(UIComponents.textBox(Sizing.fill()).apply {
-                setMaxLength(10)
-                text(pbLimitDraft)
-                setHint(Component.literal("Example: 5:30.000"))
-                onChanged().subscribe { pbLimitDraft = it }
+            child(row().apply {
+                gap(8)
+                child(label("Join PB limit", CYAN))
+                child(UIComponents.textBox(Sizing.fixed(100)).apply {
+                    setMaxLength(10)
+                    text(pbLimitDraft)
+                    setHint(Component.literal("No limit"))
+                    onChanged().subscribe { pbLimitDraft = it }
+                }.tooltip(Component.literal("Your ${floor.name} requirement for players using Join (m:ss). Leave blank for no limit. Invitations bypass it.")))
             })
             child(separator())
         }
@@ -430,10 +403,6 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 })
             }
         }
-        child(label("PERSONAL BESTS", CYAN))
-        child(label("Uses installed SkyBlocker / SkyBlockPv, with your Hypixel API key as a fallback. Stats are saved between sessions; repeat refreshes only update Cata > 40.", MUTED)
-            .horizontalSizing(Sizing.fill()))
-        child(button("API setup", 80) { openApiSettings() })
         val feedback = label(DungeonFriendsSettings.error.orEmpty(), 0xF18C8C)
         child(feedback.horizontalSizing(Sizing.fill()))
         child(row().apply {
@@ -441,9 +410,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             child(button("Save", 58) {
                 val available = if (editingFriend == null) DungeonAvailability(floor, availableDraft, parsePbLimit(pbLimitDraft))
                     else DungeonFriendsSettings.availability
-                if (editingFriend == null && ((pbLimitDraft.isNotBlank() && available.maxPbMillis == null) ||
-                    (available.classes.isNotEmpty() && !available.enabled))) {
-                    feedback.text(Component.literal("Enter a positive PB limit such as 5:30 before enabling classes."))
+                if (editingFriend == null && pbLimitDraft.isNotBlank() && available.maxPbMillis == null) {
+                    feedback.text(Component.literal("Use a time such as 5:30, or leave the PB limit blank."))
                     return@button
                 }
                 val classes = DungeonFriendsSettings.secondaryClasses.toMutableMap()
@@ -451,15 +419,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     if (classesDraft.isEmpty()) classes.remove(name) else classes[name] = classesDraft
                 }
                 val changedAvailability = available != DungeonFriendsSettings.availability
-                val relay = if (editingFriend == null) relayUrlDraft.trim() else DungeonFriendsSettings.relayUrl
-                if (relay.isNotBlank() && relayUri(relay) == null) {
-                    feedback.text(Component.literal("Use a wss:// address ending in /websocket. Leave blank to disable the relay."))
-                    return@button
-                }
-                val changedRelay = relay != DungeonFriendsSettings.relayUrl
-                if (DungeonFriendsSettings.save(templateDraft, classes, available, relay = relay)) {
+                if (DungeonFriendsSettings.save(templateDraft, classes, available)) {
                     if (changedAvailability) DungeonFriends.joining.clear()
-                    if (changedRelay) { DungeonFriends.joining.clear(); DungeonFriendRelay.disconnect() }
                     settingsOpen = false
                     rebuild()
                 } else feedback.text(Component.literal(DungeonFriendsSettings.error ?: "Use a nonempty message (up to 220 characters)."))

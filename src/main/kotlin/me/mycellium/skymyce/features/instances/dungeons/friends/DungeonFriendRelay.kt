@@ -51,10 +51,18 @@ class RelayDeliveries {
 
 /** Network callbacks enter the Minecraft thread before touching game state or pending deliveries. */
 object DungeonFriendRelay {
+    data class PartyPolicy(val uuid: String, val policy: DungeonJoinPolicy)
     private val gson = Gson()
     private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
     private val deliveries = RelayDeliveries()
     private val statsRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    private val partyPolicies = mutableMapOf<String, Pair<Long, PartyPolicy?>>()
+    private var policiesAvailable = false
+    private var policyRequest: Pair<String, List<String>>? = null
+    private var policyDeadline = 0L
+    private var nextPolicyRequest = 0L
+    private var sentPolicy: DungeonJoinPolicy? = null
+    private var nextPolicyUpdate = 0L
     var sharedStatsAvailable = false
         private set
     private var socket: WebSocket? = null
@@ -83,6 +91,7 @@ object DungeonFriendRelay {
         }
         if (key != identity) { disconnect(); identity = key }
         val now = DungeonFriends.now()
+        if (now >= policyDeadline) policyRequest = null
         deliveries.tick(now)
         statsRequests.filterValues { it.first <= now }.keys.toList().forEach { statsRequests.remove(it)?.second?.complete(null) }
         if ((connecting || socket != null) && now >= deadline) failed("Relay timed out; reconnecting")
@@ -161,6 +170,7 @@ object DungeonFriendRelay {
                                         check(json.get("name").asString.equals(user.name, true))
                                         connected = true
                                         sharedStatsAvailable = json.get("statsCache")?.asBoolean == true
+                                        policiesAvailable = json.get("partyPolicies")?.asBoolean == true
                                         retryDelay = 1000
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
@@ -180,6 +190,30 @@ object DungeonFriendRelay {
                                         }
                                     }
                                     "stats_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
+                                    "party_result" -> {
+                                        check(connected)
+                                        val request = policyRequest
+                                        if (json.get("id") == null && json.has("error")) {
+                                            sentPolicy = null
+                                            nextPolicyUpdate = DungeonFriends.now() + 5000
+                                        }
+                                        if (request != null && json.get("id")?.asString == request.first) {
+                                            policyRequest = null
+                                            val parties = json.get("parties")?.takeIf { it.isJsonObject }?.asJsonObject
+                                            if (parties == null) nextPolicyRequest = DungeonFriends.now() + 5000
+                                            else for (name in request.second) {
+                                                val value = parties.get(name)?.takeIf { it.isJsonObject }?.asJsonObject
+                                                val policy = value?.let {
+                                                    val uuid = it.get("uuid").asString
+                                                    val floor = tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.valueOf(it.get("floor").asString)
+                                                    val limit = it.get("maxPbMillis")?.takeUnless { it.isJsonNull }?.asLong
+                                                    check(uuid.matches(Regex("[a-f0-9]{32}")) && floor in FRIEND_FLOORS && (limit == null || limit in 1..59999999))
+                                                    PartyPolicy(uuid, DungeonJoinPolicy(floor, limit, it.get("open").asBoolean))
+                                                }
+                                                partyPolicies[name] = DungeonFriends.now() + 20000 to policy
+                                            }
+                                        }
+                                    }
                                     "error" -> { check(connected); deliveries.fail(json.get("id").asString) }
                                     else -> error("Unknown relay packet")
                                 }
@@ -231,6 +265,30 @@ object DungeonFriendRelay {
         return future
     }
 
+    fun partyPolicy(name: String): PartyPolicy? = partyPolicies[name.lowercase()]?.takeIf { it.first > DungeonFriends.now() }?.second
+
+    fun requestPolicies(names: List<String>) {
+        val now = DungeonFriends.now()
+        if (!policiesAvailable || !connected || policyRequest != null || now < nextPolicyRequest) return
+        val missing = names.map { it.lowercase() }.distinct().filter {
+            it.matches(Regex("[a-z0-9_]{1,16}")) && (partyPolicies[it]?.first ?: 0L) <= now
+        }.take(32)
+        if (missing.isEmpty()) return
+        val id = UUID.randomUUID().toString().replace("-", "")
+        policyRequest = id to missing
+        policyDeadline = now + 5000
+        nextPolicyRequest = now + 1000
+        packet(mapOf("type" to "party_get", "id" to id, "names" to missing))
+    }
+
+    fun publishPolicy(policy: DungeonJoinPolicy) {
+        val now = DungeonFriends.now()
+        if (!connected || !policiesAvailable || sentPolicy == policy || now < nextPolicyUpdate) return
+        sentPolicy = policy
+        nextPolicyUpdate = now + 1000
+        packet(mapOf("type" to "party_set", "floor" to policy.floor, "maxPbMillis" to policy.maxPbMillis, "open" to policy.open))
+    }
+
     fun publishStats(name: String, uuid: String, stats: DungeonFriendStats, fetchedAt: Long, upload: String) {
         if (!sharedStatsAvailable) return
         packet(mapOf("type" to "stats_put", "id" to UUID.randomUUID().toString().replace("-", ""), "name" to name,
@@ -252,6 +310,12 @@ object DungeonFriendRelay {
         socket = null
         connected = false
         sharedStatsAvailable = false
+        policiesAvailable = false
+        partyPolicies.clear()
+        policyRequest = null
+        sentPolicy = null
+        nextPolicyRequest = 0L
+        nextPolicyUpdate = 0L
         statsRequests.values.forEach { it.second.complete(null) }
         statsRequests.clear()
         connecting = false

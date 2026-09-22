@@ -418,7 +418,13 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(!available.accepts(known.copy(sPlusTimes = emptyMap()), F7))
     check(!available.accepts(known.copy(sPlusTimes = mapOf(F7 to 420001)), F7))
     check(!available.accepts(known.copy(catacombs = 23), F7))
-    check(!available.copy(classes = emptySet()).enabled && !available.copy(maxPbMillis = null).enabled)
+    check(!available.copy(classes = emptySet()).enabled && available.copy(maxPbMillis = null).enabled)
+    val policy = DungeonJoinPolicy(F7, 420000)
+    check(policy.accepts(known, F7))
+    check(!policy.accepts(known.copy(sPlusTimes = mapOf(F7 to 420001)), F7))
+    check(!policy.accepts(null, F7) && !policy.accepts(hidden, F7) && !policy.accepts(known, M7))
+    check(policy.copy(maxPbMillis = null).accepts(null, F7))
+    check(!policy.copy(open = false).accepts(known, F7))
     check(Gson().fromJson(Gson().toJson(available), DungeonAvailability::class.java) == available)
 
     val inviteText = "---------------------\n[MVP++] Cessna808 has invited you to join their party!\nYou have 60 seconds to accept. Click here to join!\n---------------------"
@@ -465,6 +471,24 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     notices.clear()
     check(notices.compact(invitedAlice, "Self", 70023) == null)
 
+    val borders = DungeonPartyBorders()
+    val restoredBorders = mutableListOf<Component>()
+    val border = Component.literal("§9-----------------------------------------------------")
+    check(!borders.filter(border, false, false, 0, restoredBorders::add)) // Normal party chat stays untouched.
+    check(borders.filter(border, true, false, 1, restoredBorders::add))
+    check(!borders.filter(Component.literal(invitedAlice), true, true, 2, restoredBorders::add))
+    check(borders.filter(border, true, false, 3, restoredBorders::add))
+    check(restoredBorders.isEmpty()) // The opening and closing borders around a mod notice are both removed.
+    check(borders.filter(border, true, false, 4, restoredBorders::add))
+    check(!borders.filter(Component.literal("Party Members (2)"), true, false, 5, restoredBorders::add))
+    check(restoredBorders.single() === border) // Unrelated content restores the original component, including its style.
+    check(borders.filter(border, true, false, 6, restoredBorders::add))
+    borders.tick(256, restoredBorders::add)
+    check(restoredBorders.size == 2) // A lone border is never lost.
+    check(!borders.filter(Component.literal("-----\nYou have joined Host's party!\n-----"), true, true, 300, restoredBorders::add))
+    check(!borders.filter(border, false, false, 301, restoredBorders::add)) // A bundled closing border needs no extra suppression.
+    borders.clear()
+
     val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")
     val lfg = DungeonLfgOffer(request, "Want to join?", 60000)
     check(DungeonLfgOffer.parse(lfg.message(), 0) == lfg)
@@ -508,9 +532,7 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     client.invited("Host", 1800)
     check(client.nextCommand(clientContext.copy(solo = false), 1900) { known } == null)
     check(client.nextCommand(clientContext.copy(availability = available.copy(classes = emptySet())), 1900) { known } == null)
-    check(client.nextCommand(clientContext, 1900) { hidden } == null)
-    check(client.nextCommand(clientContext, 1900) { null } == null)
-    check(client.nextCommand(clientContext, 2000) { known } == "party accept host")
+    check(client.nextCommand(clientContext, 2000) { hidden } == "party accept host") // Receiving an invitation never gates on the inviter's PB.
     check(client.accepted == "host" to (F7 to TANK))
     check(client.nextCommand(clientContext, 2001) { known } == null)
     client.clear()
@@ -559,7 +581,14 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val guarded = DungeonFriendJoining()
     guarded.request("Host", request, 0, manual = true)
     guarded.invited("Host", 1)
-    check(guarded.nextCommand(clientContext, 2) { hidden } == null) // Explicit Yes still honors a configured PB limit.
+    check(guarded.nextCommand(clientContext, 2) { hidden } == "party accept host") // Explicit invitations bypass the Join requirement.
+    val inviting = DungeonFriendJoining()
+    inviting.receiveAcceptedReply("Self", request, 0)
+    check(inviting.nextCommand(hostContext, 1) { hidden } == "party invite self") // An invited player need not meet the host's Join PB.
+    val clickingJoin = DungeonFriendJoining()
+    clickingJoin.request("Host", request, 0, manual = true)
+    clickingJoin.invited("Host", 1)
+    check(clickingJoin.nextCommand(manualContext, 2) { null } == "party accept host") // Join works with Available off.
 
     val listing = partyListingFromLore(10, null, listOf("§7Dungeon: §bMaster Mode", "§7Floor: §bFloor VII", "Members:",
         "§b[MVP+] Leader: Mage (50)", "Alice: Berserk (49)", "Bob: Healer (48)", "Note: quick runs", "Empty"))!!

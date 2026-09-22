@@ -10,10 +10,15 @@ data class DungeonAvailability(
     val classes: Set<DungeonClass> = emptySet(),
     val maxPbMillis: Long? = null,
 ) {
-    val enabled get() = classes.isNotEmpty() && maxPbMillis != null && maxPbMillis > 0
+    val enabled get() = classes.isNotEmpty()
     fun accepts(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean =
         requestedFloor == floor && maxPbMillis != null && stats?.state == StatsState.AVAILABLE &&
             stats.eligible(floor) && stats.sPlusTimes[floor]?.let { it > 0 && it <= maxPbMillis } == true
+}
+
+data class DungeonJoinPolicy(val floor: DungeonFloor, val maxPbMillis: Long?, val open: Boolean = true) {
+    fun accepts(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean = open && requestedFloor == floor &&
+        (maxPbMillis == null || DungeonAvailability(floor, maxPbMillis = maxPbMillis).accepts(stats, floor))
 }
 
 fun parsePbLimit(text: String): Long? {
@@ -121,6 +126,11 @@ class DungeonPartyNotices {
     }
 
     fun clear() { invited.clear(); accepted = null }
+
+    fun pending(now: Long): Boolean {
+        prune(now)
+        return invited.isNotEmpty() || accepted != null
+    }
 }
 
 data class JoinPartyContext(
@@ -131,7 +141,35 @@ data class JoinPartyContext(
     val floor: DungeonFloor,
     val missing: Set<DungeonClass>,
     val members: Set<String>,
-)
+) {
+    val policy get() = DungeonJoinPolicy(floor, availability.maxPbMillis.takeIf { availability.floor == floor }, canInvite && partySize < 5)
+}
+
+/** Hold a possible opening border until the following packet identifies whose notice it surrounds. */
+class DungeonPartyBorders {
+    private var held: Pair<Component, Long>? = null
+    private var trailingUntil = 0L
+    private fun separator(text: String) = text.replace(Regex("§."), "").trim().matches(Regex("[-▬─]{5,}"))
+
+    fun filter(component: Component, pending: Boolean, compacted: Boolean, now: Long, restore: (Component) -> Unit): Boolean {
+        held?.let { if (!compacted || now >= it.second) restore(it.first) }
+        held = null
+        if (separator(component.string)) {
+            if (now < trailingUntil) { trailingUntil = 0; return true }
+            trailingUntil = 0
+            if (pending) { held = component to now + 250; return true }
+            return false
+        }
+        trailingUntil = if (compacted && !separator(component.string.lineSequence().last())) now + 250 else 0
+        return false
+    }
+
+    fun tick(now: Long, restore: (Component) -> Unit) {
+        held?.takeIf { now >= it.second }?.let { held = null; restore(it.first) }
+    }
+
+    fun clear() { held = null; trailingUntil = 0 }
+}
 
 /** Short-lived exchanges only: an offer in private chat is never treated as a server invitation. */
 class DungeonFriendJoining {
@@ -211,12 +249,6 @@ class DungeonFriendJoining {
                 val choices = request?.data?.classes ?: context.availability.classes
                 val clazz = if (offered != null) offered.takeIf { request.manual || it in context.availability.classes } ?: continue
                     else choices.firstOrNull { request?.manual == true || it in context.availability.classes } ?: continue
-                val inviterStats = stats(name)
-                val needsPb = request?.manual != true || (context.availability.floor == floor && context.availability.maxPbMillis != null)
-                if (needsPb && !context.availability.accepts(inviterStats, floor)) {
-                    status = if (inviterStats == null) "Checking $name's S+ PB" else "$name does not meet the ${floor.name} S+ PB limit"
-                    continue
-                }
                 accepted = name to (floor to clazz)
                 acceptingUntil = now + 10000
                 invitations.clear()
@@ -229,10 +261,9 @@ class DungeonFriendJoining {
         incoming.keys.removeAll(context.members)
         for ((name, request) in incoming) {
             val floor = request.data.floor
-            val needsPb = !request.manual || (context.availability.floor == floor && context.availability.maxPbMillis != null)
             if (request.invited || (!request.manual && floor != context.floor)) continue
             val playerStats = stats(name)
-            if (needsPb && !context.availability.accepts(playerStats, floor)) {
+            if (!request.manual && !context.policy.accepts(playerStats, floor)) {
                 status = if (playerStats == null) "Checking $name's S+ PB" else "$name does not meet the ${floor.name} S+ PB limit"
                 continue
             }

@@ -3,6 +3,7 @@ import { verifyAccount } from "./auth";
 import { SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
 
 type RelayEnv = Env;
+type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean };
 type Session = {
   challenge: string;
   expires: number;
@@ -17,6 +18,9 @@ type Session = {
   uploads?: StatsGrant[];
   cacheCredits?: number;
   cacheUpdated?: number;
+  party?: JoinPolicy;
+  partyCredits?: number;
+  partyUpdated?: number;
 };
 const username = /^[A-Za-z0-9_]{1,16}$/;
 const uuid = /^[a-f0-9]{32}$/;
@@ -102,8 +106,42 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.uuid = profile.id;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, partyPolicies: true }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
+      return;
+    }
+
+    if (data.type === "party_set" || data.type === "party_get") {
+      const now = Date.now();
+      session.partyCredits = Math.min(6, (session.partyCredits ?? 6) + (now - (session.partyUpdated ?? now)) / 1000);
+      session.partyUpdated = now;
+      if (session.partyCredits < 1) { ws.send(JSON.stringify({ type: "party_result", id: data.id, error: "rate_limited" })); return; }
+      session.partyCredits--;
+      if (data.type === "party_set") {
+        const limit = data.maxPbMillis ?? null;
+        if (typeof data.floor !== "string" || !/^[FM][1-7]$/.test(data.floor) || typeof data.open !== "boolean" ||
+            (limit !== null && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || limit > 59999999))) {
+          ws.close(1008, "Invalid party policy"); return;
+        }
+        // A policy belongs to the authenticated socket, never to a client-supplied name.
+        session.party = { floor: data.floor, maxPbMillis: limit, open: data.open };
+        ws.serializeAttachment(session);
+        return;
+      }
+      if (typeof data.id !== "string" || !uuid.test(data.id) || !Array.isArray(data.names) || data.names.length > 32 ||
+          data.names.some(name => typeof name !== "string" || !username.test(name))) {
+        ws.close(1008, "Invalid party lookup"); return;
+      }
+      ws.serializeAttachment(session);
+      const parties: Record<string, (JoinPolicy & { uuid: string }) | null> = Object.create(null);
+      for (const name of data.names as string[]) parties[name.toLowerCase()] = null;
+      for (const other of this.ctx.getWebSockets()) {
+        if (other === ws || other.readyState !== WebSocket.OPEN) continue;
+        const peer = other.deserializeAttachment() as Session;
+        const name = peer.name?.toLowerCase();
+        if (name && Object.hasOwn(parties, name) && peer.party && peer.uuid) parties[name] = { ...peer.party, uuid: peer.uuid };
+      }
+      ws.send(JSON.stringify({ type: "party_result", id: data.id, parties }));
       return;
     }
 

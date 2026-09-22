@@ -100,7 +100,7 @@ object DungeonFriendsSettings {
         load()
         if (error != null) return false
         if (template.isBlank() || template.any { it < ' ' || it == '§' } || template.length > 220) return false
-        if (available.floor !in FRIEND_FLOORS || (available.classes.isNotEmpty() && !available.enabled)) return false
+        if (available.floor !in FRIEND_FLOORS) return false
         if (available.maxPbMillis != null && available.maxPbMillis !in 1..59999999) return false
         if (relay.isNotBlank() && relayUri(relay) == null) return false
         try {
