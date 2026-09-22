@@ -19,8 +19,8 @@ import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 
 class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
-    private var floor = DungeonFloor.F1
-    private var floorChosen = false
+    private var floor = DungeonFriends.partyFloor ?: DungeonFloor.F1
+    private var floorChosen = DungeonFriends.partyFloor != null
     private var sort = FriendSort.CATACOMBS
     private var ascending = false
     private var missingClasses: Set<DungeonClass>? = null
@@ -28,6 +28,9 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var editingFriend: String? = null
     private var templateDraft = DungeonFriendsSettings.messageTemplate
     private var classesDraft = emptySet<DungeonClass>()
+    private var availableDraft = emptySet<DungeonClass>()
+    private var pbLimitDraft = ""
+    private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
     private lateinit var apiStatus: LabelComponent
@@ -37,9 +40,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private lateinit var sortButton: ButtonComponent
     private val sortHeaders = mutableMapOf<FriendSort, Pair<ButtonComponent, String>>()
     private val actions = mutableListOf<ButtonComponent>()
+    private val joinActions = mutableListOf<ButtonComponent>()
     private var renderedState: List<Any?> = emptyList()
-    private val panelWidth get() = minOf(660, width - 24)
-    private val compact get() = panelWidth < 560
+    private val panelWidth get() = minOf(700, width - 24)
+    private val compact get() = panelWidth < 600
 
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
@@ -54,6 +58,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     override fun tick() {
         super.tick()
         if (settingsOpen || !::results.isInitialized) return
+        if (seenPartyRevision != DungeonFriends.partyRevision) {
+            seenPartyRevision = DungeonFriends.partyRevision
+            missingClasses = null
+            DungeonFriends.partyFloor?.let { floor = it; floorChosen = true }
+        }
         if (!floorChosen) {
             MC.instance.player?.let { player ->
                 DungeonFriendStatsCache.get(player.name.string)?.highestFloor?.let { floor = it }
@@ -68,10 +77,16 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             updateResults()
         }
         actions.forEach { it.active(DungeonFriends.canAct) }
+        joinActions.forEach { it.active(DungeonFriends.canJoin(floor)) }
         partyStatus.text(Component.literal(DungeonFriends.partyStatus + if (DungeonFriends.partyFull) "  Full" else ""))
         partyStatus.color(Color.ofRgb(if (DungeonFriends.partyFull) 0xF18C8C else CYAN))
+        partyStatus.tooltip(Component.literal(DungeonFriendsSettings.availability.let {
+            if (it.enabled) "Available for ${it.floor.name}: ${it.classes.joinToString { clazz -> clazz.displayName }}\nS+ PB at most ${formatDungeonTime(it.maxPbMillis)}"
+            else "Auto join is off. Configure Available classes and an S+ PB limit."
+        }))
         apiStatus.text(Component.literal(when {
             !LocationAPI.onHypixel -> "Join Hypixel to load player stats"
+            DungeonFriends.joining.status.isNotEmpty() -> DungeonFriends.joining.status
             !DungeonFriendStatsCache.canFetch -> "Use SkyBlockPv / SkyBlocker or add an API key"
             else -> DungeonFriendStatsCache.status.ifEmpty { "Cached stats ready; refresh updates Cata > 40" }
         }))
@@ -171,7 +186,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     child(sortHeader(heading, 42, FriendSort.entries.first { it.dungeonClass == clazz }))
                 }
                 child(sortHeader("S+ PB", 70, FriendSort.PB))
-                child(label("ACTIONS", MUTED).horizontalSizing(Sizing.fixed(100)))
+                child(label("ACTIONS", MUTED).horizontalSizing(Sizing.fixed(140)))
             }
             padding(Insets.horizontal(6))
             // Match the list's scrollbar gutter so headers align with row values.
@@ -193,6 +208,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     }
 
     private fun toolbarActions(row: FlowLayout) {
+        row.child(button(if (DungeonFriendsSettings.availability.enabled) "§aAvailable" else "Available", 76) { openSettings(null) })
         row.child(button("Refresh", 50) {
             DungeonFriends.scanner.refresh(DungeonFriends.now())
             DungeonFriendStatsCache.refresh()
@@ -244,6 +260,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         }.sortedWith(friendComparator(stats, floor, sort, ascending))
         listStatus.text(Component.literal("FRIENDS  ${friends.size}/${DungeonFriends.scanner.online.size}"))
         actions.clear()
+        joinActions.clear()
         results.child(UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
             gap(3)
             if (friends.isEmpty()) child(label("No matching friends. Try another floor or clear Missing.", MUTED)
@@ -273,7 +290,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 child(identity)
                 if (!compact) statColumns(this, stats, false)
                 child(row().apply {
-                    horizontalSizing(Sizing.fixed(100))
+                    horizontalSizing(Sizing.fixed(140))
                     horizontalAlignment(HorizontalAlignment.RIGHT)
                     gap(3)
                     val invite = button("/p", 24) { DungeonFriends.invite(friend) }.active(DungeonFriends.canAct)
@@ -285,6 +302,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     actions += message
                     child(invite)
                     child(message)
+                    val join = button("Join", 34) { DungeonFriends.join(friend, floor) }.active(DungeonFriends.canJoin(floor))
+                    join.tooltip(Component.literal("Ask ${friend.name} for an invite, then auto join if their S+ PB qualifies.\nRequires Available classes and a PB limit for ${floor.name}; you must be solo in SkyBlock."))
+                    joinActions += join
+                    child(join)
                     child(button("Edit", 30) { openSettings(friend.name) }.tooltip(Component.literal("Edit secondary classes")))
                 })
             })
@@ -319,6 +340,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         editingFriend = friend
         templateDraft = DungeonFriendsSettings.messageTemplate
         classesDraft = DungeonFriendsSettings.secondaryClasses[friend?.lowercase()].orEmpty()
+        availableDraft = DungeonFriendsSettings.availability.classes
+        pbLimitDraft = DungeonFriendsSettings.availability.maxPbMillis?.let(::formatDungeonTime).orEmpty()
         settingsOpen = true
         rebuild()
     }
@@ -335,6 +358,27 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     private fun settingsContent(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(8)
+        if (editingFriend == null) {
+            child(label("AVAILABLE FOR ${floor.name}", CYAN))
+            child(label("Check the classes you can play. Eligible party invitations will be accepted while you are solo in SkyBlock. Uncheck all to stop auto joining.", MUTED)
+                .horizontalSizing(Sizing.fill()))
+            DungeonClass.entries.forEach { clazz ->
+                child(button("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}", 116) { button ->
+                    availableDraft = if (clazz in availableDraft) availableDraft - clazz else availableDraft + clazz
+                    button.message = Component.literal("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}")
+                })
+            }
+            child(label("S+ PB LIMIT (m:ss or m:ss.sss)", CYAN))
+            child(label("Inviters and incoming Join requests must have a verified ${floor.name} S+ PB at or faster than this time. Hidden or unknown PBs never qualify.", MUTED)
+                .horizontalSizing(Sizing.fill()))
+            child(UIComponents.textBox(Sizing.fill()).apply {
+                setMaxLength(10)
+                text(pbLimitDraft)
+                setHint(Component.literal("Example: 5:30.000"))
+                onChanged().subscribe { pbLimitDraft = it }
+            })
+            child(separator())
+        }
         child(label("MESSAGE TEMPLATE", CYAN))
         child(label("Use {name}, {class} and {floor}.", MUTED).horizontalSizing(Sizing.fill()))
         child(UIComponents.textBox(Sizing.fill()).apply {
@@ -366,11 +410,20 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         child(row().apply {
             gap(6)
             child(button("Save", 58) {
+                val available = if (editingFriend == null) DungeonAvailability(floor, availableDraft, parsePbLimit(pbLimitDraft))
+                    else DungeonFriendsSettings.availability
+                if (editingFriend == null && ((pbLimitDraft.isNotBlank() && available.maxPbMillis == null) ||
+                    (available.classes.isNotEmpty() && !available.enabled))) {
+                    feedback.text(Component.literal("Enter a positive PB limit such as 5:30 before enabling classes."))
+                    return@button
+                }
                 val classes = DungeonFriendsSettings.secondaryClasses.toMutableMap()
                 editingFriend?.lowercase()?.let { name ->
                     if (classesDraft.isEmpty()) classes.remove(name) else classes[name] = classesDraft
                 }
-                if (DungeonFriendsSettings.save(templateDraft, classes)) {
+                val changedAvailability = available != DungeonFriendsSettings.availability
+                if (DungeonFriendsSettings.save(templateDraft, classes, available)) {
+                    if (changedAvailability) DungeonFriends.joining.clear()
                     settingsOpen = false
                     rebuild()
                 } else feedback.text(Component.literal(DungeonFriendsSettings.error ?: "Use a nonempty message (up to 220 characters)."))

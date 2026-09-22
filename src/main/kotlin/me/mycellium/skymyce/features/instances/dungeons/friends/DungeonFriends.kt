@@ -26,9 +26,11 @@ import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
 import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
 import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
+import java.util.UUID
 
 object DungeonFriends : SkyMyceModule() {
     val replies = DungeonLfgReplies()
+    val joining = DungeonFriendJoining()
     var scanner = FriendListScanner()
         private set
     private var party = DungeonFriendParty()
@@ -36,6 +38,14 @@ object DungeonFriends : SkyMyceModule() {
     private var nextPartyRequest = 0L
     private var nextAction = 0L
     private var sendingScan = false
+    private var selectedListing: Pair<PartyListing, Long>? = null
+    private var awaitingRoster = false
+    private var restoredParty = false
+    private var currentLeader: String? = null
+    var partyFloor: DungeonFloor? = null
+        private set
+    var partyRevision = 0L
+        private set
     val neededClass: DungeonClass? get() = party.neededClass
 
     val partySize: Int get() = maxOf(party.size, PartyAPI.size, 1)
@@ -43,6 +53,10 @@ object DungeonFriends : SkyMyceModule() {
     val canAct: Boolean get() = LocationAPI.onHypixel && party.canInvite && !partyFull && now() >= nextAction
     val openClasses: Set<DungeonClass> get() = party.openClasses
     val partyStatus: String get() = if (!party.ready) "Checking party size..." else "Party $partySize/5"
+    private val solo get() = party.ready && !PartyAPI.inParty && partySize == 1
+
+    fun canJoin(floor: DungeonFloor): Boolean = LocationAPI.isOnSkyBlock && solo && now() >= nextAction &&
+        !joining.busy(now()) && DungeonFriendsSettings.availability.let { it.enabled && it.floor == floor }
 
     override fun init() {
         DungeonFriendsSettings.load()
@@ -58,6 +72,7 @@ object DungeonFriends : SkyMyceModule() {
     override fun tick() {
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
         replies.prune(now())
+        joining.prune(now())
         syncParty()
         if (now() >= nextPartyRequest) {
             val sent = HypixelModAPI.getInstance().sendPacket(ServerboundPartyInfoPacket())
@@ -76,6 +91,17 @@ object DungeonFriends : SkyMyceModule() {
             PartyAPI.members.forEach { member -> member.name?.let { DungeonFriendStatsCache.request(it, member.uuid) } }
         } else if (scanner.scanning) scanner.manualCommand(now())
         DungeonFriendStatsCache.tick()
+        if (LocationAPI.isOnSkyBlock && now() >= nextAction && MC.connection != null) {
+            val self = MC.player
+            val canInvite = canAct && (!PartyAPI.inParty || PartyAPI.allInvite || PartyAPI.leader?.uuid == self.uuid ||
+                PartyAPI.leader?.name.equals(self.name.string, true) || PartyAPI.members.any { it.uuid == self.uuid && it.role.name == "MOD" })
+            val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canInvite, partySize,
+                partyFloor ?: DungeonFriendsSettings.availability.floor, openClasses, party.members.toSet())
+            joining.nextCommand(context, now(), DungeonFriendStatsCache::verified)?.let {
+                sendCommand(it)
+                nextAction = now() + 1000
+            }
+        }
     }
 
     private fun syncParty() {
@@ -85,13 +111,22 @@ object DungeonFriends : SkyMyceModule() {
         }.map { it.lowercase() }.toSet() + self
         val roster = names to PartyAPI.size.coerceAtLeast(1)
         if (roster != previousRoster) {
-            party.roster(names, roster.second)
+            party.roster(names, roster.second, completeNames = !awaitingRoster && names.size >= roster.second)
             previousRoster = roster
+        }
+        currentLeader = PartyAPI.leader?.name ?: currentLeader
+        if (!restoredParty && party.ready && names.size >= roster.second && PartyAPI.inParty) {
+            DungeonFriendsSettings.lastParty?.takeIf { it.matches(currentLeader, names, System.currentTimeMillis()) }?.let {
+                party.classes.putAll(it.classes)
+                partyFloor = it.floor
+                partyRevision++
+            }
+            restoredParty = true
         }
         for (name in party.members) {
             replies.forget(name)
             // Last selected class is a fallback, never a replacement for a class observed in the current party.
-            if (name !in party.classes) DungeonFriendStatsCache.get(name)?.selectedClass?.let { party.classes[name] = it }
+            if (name !in party.classes) (joining.classFor(name) ?: DungeonFriendStatsCache.get(name)?.selectedClass)?.let { party.classes[name] = it }
         }
         if (LocationAPI.island == SkyBlockIsland.THE_CATACOMBS) {
             (DungeonAPI.teammates + listOfNotNull(DungeonAPI.ownPlayer)).forEach { player ->
@@ -99,6 +134,19 @@ object DungeonFriends : SkyMyceModule() {
             }
         }
         party.advance()
+        saveParty()
+    }
+
+    private fun saveParty() {
+        val leader = currentLeader?.lowercase()?.takeIf { it in party.members } ?: return
+        if (!PartyAPI.inParty || !party.ready || !restoredParty || awaitingRoster || party.members.size !in 2..5) return
+        val saved = SavedDungeonParty(leader, party.members.toSet(), party.classes.filterKeys { it in party.members },
+            partyFloor, System.currentTimeMillis())
+        if (saved.copy(savedAt = 0) != DungeonFriendsSettings.lastParty?.copy(savedAt = 0)) DungeonFriendsSettings.save(savedParty = saved)
+    }
+
+    fun onListingSelected(listing: PartyListing) {
+        selectedListing = listing to now()
     }
 
     fun onListings(listings: List<PartyListing>) {
@@ -109,16 +157,28 @@ object DungeonFriends : SkyMyceModule() {
         party.roster(own.memberUsername, own.memberUsername.size, true)
         party.classes.clear()
         party.classes.putAll(own.memberClasses.mapKeys { it.key.lowercase() })
+        currentLeader = own.leaderName
+        partyFloor = own.floor
+        restoredParty = true
         party.advance()
+        saveParty()
     }
 
     @Subscription(priority = Subscription.LOW, receiveCancelled = true)
     fun onPartyInfo(event: PartyInfoEvent) {
         if (MC.instance.player == null) return
-        if (!event.inParty) party = DungeonFriendParty()
+        if (!event.inParty) {
+            if (party.members.size > 1) partyRevision++
+            party = DungeonFriendParty()
+            currentLeader = null
+            partyFloor = null
+            restoredParty = false
+        }
+        awaitingRoster = false
         previousRoster = null
         syncParty()
         party.roster(party.members.toList(), if (event.inParty) event.members.size else 1, true)
+        syncParty()
     }
 
     @Subscription(priority = Subscription.LOW, receiveCancelled = true)
@@ -144,15 +204,68 @@ object DungeonFriends : SkyMyceModule() {
             scanner.notification(name, false)
         }
         syncParty()
-        party.chat(message, MC.player.name.string)
-        if (message.startsWith("You have joined ") && message.endsWith(" party!")) {
+        if (party.chat(message, MC.player.name.string)) {
+            currentLeader = null
+            partyFloor = null
+            awaitingRoster = false
+            restoredParty = false
+            joining.clear()
+            partyRevision++
+            nextPartyRequest = 0
+        }
+        joinedPartyLeader(message)?.let { leader ->
+            currentLeader = leader
+            awaitingRoster = true
+            restoredParty = true
+            val accepted = joining.accepted?.second
+            val listing = selectedListing?.takeIf { now() - it.second <= 60000 && it.first.leaderName.equals(leader, true) }?.first
+            if (listing != null) {
+                val members = listing.memberUsername.map { it.lowercase() }.toSet() + MC.player.name.string.lowercase()
+                party.roster(members, members.size, false)
+                party.classes.putAll(listing.memberClasses.mapKeys { it.key.lowercase() })
+            }
+            partyFloor = listing?.floor ?: accepted?.first
+            (accepted?.second ?: DungeonFriendStatsCache.get(MC.player.name.string)?.selectedClass)?.let {
+                party.classes[MC.player.name.string.lowercase()] = it
+            }
+            party.advance()
+            selectedListing = null
+            joining.clear()
+            partyRevision++
             nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
+        }
+        serverPartyInviter(event.component)?.let { inviter ->
+            if (LocationAPI.isOnSkyBlock && DungeonFriendsSettings.availability.enabled && solo) {
+                joining.invited(inviter, now())
+                checkJoinStats(inviter)
+            }
         }
     }
 
     @Subscription
     fun onPrivateReply(event: PlayerMessageEvent) {
-        if (LocationAPI.onHypixel && event.type == ChatChannel.PRIVATE) replies.receive(event.player, event.message, now())
+        if (!LocationAPI.onHypixel || event.type != ChatChannel.PRIVATE) return
+        replies.receive(event.player, event.message, now())
+        if (!LocationAPI.isOnSkyBlock) return
+        joining.receiveOffer(event.player, event.message, now())
+        val request = DungeonJoinRequest.parse(event.message) ?: return
+        if (FriendsAPI.getFriend(event.player) == null && event.player.lowercase() !in scanner.online) return
+        if (joining.receiveRequest(event.player, request, now())) checkJoinStats(event.player)
+    }
+
+    private fun checkJoinStats(name: String) {
+        if (DungeonFriendStatsCache.verified(name) == null) {
+            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true, priority = true)
+        }
+    }
+
+    fun join(friend: OnlineDungeonFriend, floor: DungeonFloor) {
+        if (!canJoin(floor) || MC.connection == null || friend.name.lowercase() !in scanner.online) return
+        if (!friend.name.matches(Regex("[A-Za-z0-9_]{1,16}")) || friend.name.equals(MC.player.name.string, true)) return
+        val request = DungeonJoinRequest(floor, DungeonFriendsSettings.availability.classes, UUID.randomUUID().toString().replace("-", "").take(16))
+        sendCommand(joining.request(friend.name, request, now()))
+        nextAction = now() + 1000
+        checkJoinStats(friend.name)
     }
 
     fun invite(friend: OnlineDungeonFriend) {
@@ -180,6 +293,13 @@ object DungeonFriends : SkyMyceModule() {
         nextPartyRequest = 0
         nextAction = 0
         replies.clear()
+        joining.clear()
+        selectedListing = null
+        awaitingRoster = false
+        restoredParty = false
+        currentLeader = null
+        partyFloor = null
+        partyRevision++
         DungeonFriendStatsCache.disconnect()
     }
 

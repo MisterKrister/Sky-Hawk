@@ -219,8 +219,8 @@ class DungeonFriendParty {
     val canInvite: Boolean get() = ready && !full
     val openClasses: Set<DungeonClass> get() = DungeonClass.entries.filter { it !in classes.values }.toSet()
 
-    fun roster(names: Collection<String>, count: Int, confirmed: Boolean = ready) {
-        val normalized = names.map { it.lowercase() }.toSet()
+    fun roster(names: Collection<String>, count: Int, confirmed: Boolean = ready, completeNames: Boolean = true) {
+        val normalized = names.map { it.lowercase() }.toSet() + if (completeNames) emptySet() else members
         members.clear()
         classes.keys.retainAll(normalized)
         members.addAll(normalized)
@@ -231,8 +231,9 @@ class DungeonFriendParty {
 
     fun advance() { neededClass = nextMissingClass(neededClass, classes.values) }
 
-    fun chat(message: String, self: String) {
-        if (LEAVE.containsMatchIn(message)) {
+    fun chat(message: String, self: String): Boolean {
+        val leftParty = LEAVE.matches(message)
+        if (leftParty) {
             members.clear()
             classes.clear()
             roster(listOf(self), 1, true)
@@ -256,6 +257,7 @@ class DungeonFriendParty {
             classes.remove(name)
         }
         advance()
+        return leftParty
     }
 
     companion object {

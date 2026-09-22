@@ -6,6 +6,9 @@ import com.teamresourceful.resourcefulconfig.api.types.options.TranslatableValue
 import com.teamresourceful.resourcefulconfigkt.api.CategoryKt
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
+import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonAvailability
+import me.mycellium.skymyce.features.instances.dungeons.friends.SavedDungeonParty
+import me.mycellium.skymyce.features.instances.dungeons.friends.FRIEND_FLOORS
 import me.mycellium.skymyce.features.instances.dungeons.friends.parseDungeonClass
 import me.mycellium.skymyce.utils.MC
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
@@ -37,6 +40,10 @@ object DungeonFriendsSettings {
         private set
     var secondaryClasses: Map<String, Set<DungeonClass>> = emptyMap()
         private set
+    var availability = DungeonAvailability()
+        private set
+    var lastParty: SavedDungeonParty? = null
+        private set
     var error: String? = null
         private set
     private var loaded = false
@@ -53,24 +60,48 @@ object DungeonFriendsSettings {
                 require(name.matches(Regex("[A-Za-z0-9_]{1,16}")))
                 name.lowercase() to value.asJsonArray.map { parseDungeonClass(it.asString) ?: error("Invalid class") }.toSet()
             }.orEmpty()
+            val available = json.get("availability")?.takeUnless { it.isJsonNull }
+                ?.let { gson.fromJson(it, DungeonAvailability::class.java) } ?: DungeonAvailability()
+            require(available.floor in FRIEND_FLOORS && available.classes.all { it in DungeonClass.entries })
+            require(available.maxPbMillis == null || available.maxPbMillis in 1..59999999)
+            val savedParty = json.get("lastParty")?.takeUnless { it.isJsonNull }
+                ?.let { gson.fromJson(it, SavedDungeonParty::class.java) }
+            savedParty?.let { saved ->
+                require(saved.leader.matches(Regex("[A-Za-z0-9_]{1,16}")))
+                require(saved.members.size in 1..5 && saved.members.all { it.matches(Regex("[a-z0-9_]{1,16}")) })
+                require(saved.leader.lowercase() in saved.members)
+                require(saved.classes.keys.all { it in saved.members } && saved.classes.values.all { it in DungeonClass.entries })
+                require(saved.floor == null || saved.floor in FRIEND_FLOORS)
+                require(saved.savedAt >= 0)
+            }
             messageTemplate = template
             secondaryClasses = secondary
+            availability = available
+            lastParty = savedParty
         } catch (_: Exception) {
             error = "Could not read dungeon_friends.json. Repair or rename it before saving."
             SkyMyce.logger.warn("Could not read dungeon friend preferences; original file preserved")
         }
     }
 
-    fun save(template: String = messageTemplate, classes: Map<String, Set<DungeonClass>> = secondaryClasses): Boolean {
+    fun save(
+        template: String = messageTemplate,
+        classes: Map<String, Set<DungeonClass>> = secondaryClasses,
+        available: DungeonAvailability = availability,
+        savedParty: SavedDungeonParty? = lastParty,
+    ): Boolean {
         load()
         if (error != null) return false
         if (template.isBlank() || template.any { it < ' ' || it == '§' } || template.length > 220) return false
+        if (available.floor !in FRIEND_FLOORS || (available.classes.isNotEmpty() && !available.enabled)) return false
+        if (available.maxPbMillis != null && available.maxPbMillis !in 1..59999999) return false
         try {
             Files.createDirectories(file.parent)
             val temporary = Files.createTempFile(file.parent, "dungeon_friends", ".tmp")
             try {
                 Files.newBufferedWriter(temporary).use { writer ->
-                    gson.toJson(mapOf("messageTemplate" to template, "secondaryClasses" to classes), writer)
+                    gson.toJson(mapOf("messageTemplate" to template, "secondaryClasses" to classes,
+                        "availability" to available, "lastParty" to savedParty), writer)
                 }
                 try {
                     Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
@@ -82,6 +113,8 @@ object DungeonFriendsSettings {
             }
             messageTemplate = template
             secondaryClasses = classes
+            availability = available
+            lastParty = savedParty
             return true
         } catch (_: Exception) {
             SkyMyce.logger.warn("Could not save dungeon friend preferences")

@@ -34,9 +34,11 @@ object DungeonFriendStatsCache {
 
     val stats: Map<String, DungeonFriendStats> get() = cache.mapValues { it.value.stats }
     fun get(name: String): DungeonFriendStats? = cache[name.lowercase()]?.stats
+    fun verified(name: String): DungeonFriendStats? = cache[name.lowercase()]
+        ?.takeIf { it.verifiedUntil > System.currentTimeMillis() }?.stats
     val canFetch: Boolean get() = DungeonFriendProfileProvider.available || PartyCommandsConfig.hypixelApiKey.isNotBlank()
 
-    fun request(name: String, uuid: UUID? = null, force: Boolean = false) {
+    fun request(name: String, uuid: UUID? = null, force: Boolean = false, priority: Boolean = false) {
         if (!name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return
         val key = name.lowercase()
         val existing = cache[key]
@@ -44,7 +46,14 @@ object DungeonFriendStatsCache {
         if (changedPlayer) { cache.remove(key); dirty = true; version++ }
         if (key == inFlight || (!force && !changedPlayer && existing?.shouldRefresh(System.currentTimeMillis()) == false)) return
         val queued = pending[key]
-        pending[key] = Request(uuid ?: queued?.uuid, force || changedPlayer || queued?.force == true)
+        val request = Request(uuid ?: queued?.uuid, force || changedPlayer || queued?.force == true)
+        if (priority) {
+            pending.remove(key)
+            val rest = pending.toMap()
+            pending.clear()
+            pending[key] = request
+            pending.putAll(rest)
+        } else pending[key] = request
     }
 
     fun initialize(file: Path) {
@@ -176,9 +185,11 @@ object DungeonFriendStatsCache {
                     if (token == generation) {
                         val time = System.currentTimeMillis()
                         // A failed refresh must not erase previously verified eligibility.
-                        val previous = cache[request.key]?.stats
-                        val value = if (fetched.state == StatsState.UNAVAILABLE) previous ?: fetched else fetched
-                        cache[request.key] = CachedDungeonFriend(value, uuid, time + if (fetched.state == StatsState.UNAVAILABLE) 60000 else 600000)
+                        val previous = cache[request.key]
+                        val failed = fetched.state == StatsState.UNAVAILABLE
+                        val value = if (failed) previous?.stats ?: fetched else fetched
+                        cache[request.key] = CachedDungeonFriend(value, uuid, time + if (failed) 60000 else 600000,
+                            if (failed) previous?.verifiedUntil ?: 0L else time + 600000)
                         dirty = true
                         nextRequest = time + retry
                         feedback = requestFeedback

@@ -8,7 +8,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
-data class CachedDungeonFriend(val stats: DungeonFriendStats, val uuid: String?, val expires: Long) {
+data class CachedDungeonFriend(val stats: DungeonFriendStats, val uuid: String?, val expires: Long, val verifiedUntil: Long = expires) {
     // Failed first lookups may retry; successfully checked low/hidden profiles stay cached across sessions.
     fun shouldRefresh(now: Long): Boolean = now >= expires &&
         (stats.state == StatsState.UNAVAILABLE || (stats.catacombs ?: 0) > 40)
@@ -27,6 +27,7 @@ class DungeonFriendStatsStore(private val file: Path) {
             val value = gson.fromJson(json, CachedDungeonFriend::class.java)
             require(value.uuid == null || value.uuid.matches(Regex("[a-fA-F0-9]{32}")))
             require(value.expires >= 0)
+            require(value.verifiedUntil >= 0)
             val stats = requireNotNull(value.stats)
             require(stats.state in StatsState.entries)
             require(stats.catacombs == null || stats.catacombs >= 0)

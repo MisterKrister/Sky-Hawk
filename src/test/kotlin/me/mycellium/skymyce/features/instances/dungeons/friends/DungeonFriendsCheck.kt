@@ -1,7 +1,11 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.JsonParser
+import com.google.gson.Gson
 import me.mycellium.mixin.LabelComponentMixin
+import me.mycellium.skymyce.config.instances.dungeons.partyListingFromLore
+import me.mycellium.skymyce.config.instances.dungeons.partyListingFloor
+import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.HoverEvent
 import net.minecraft.network.chat.Style
@@ -113,6 +117,7 @@ fun main() {
     check(parse("""{"dungeons":{"player_classes":{"berserk":{"experience":235},"berserker":{"experience":50}}}}""").classes[BERSERKER] == 3)
     check(dungeonLevel(769809640.0) == 51 && dungeonLevel(569809640.0) == 50)
     check(known.sPlusTimes[M1] == null && known.completionTimes[M1] == 100000L)
+    checkJoining(known, hidden)
     val selectedProfile = DungeonFriendStats.fromProfiles(JsonParser.parseString("""{"success":true,"profiles":[
         {"members":{"abc":{"last_save":999999,"dungeons":{}}}},
         {"selected":true,"members":{"other":{"dungeons":{}},"abc":{"dungeons":{"dungeon_types":{
@@ -238,6 +243,11 @@ fun main() {
         check(CachedDungeonFriend(DungeonFriendStats(StatsState.UNAVAILABLE), null, 1).shouldRefresh(1000))
         store.save(saved)
         check(DungeonFriendStatsStore(savedFile).load() == saved)
+        val oldCache = JsonParser.parseString(Files.readString(savedFile)).asJsonObject
+        oldCache.getAsJsonObject("players").entrySet().forEach { it.value.asJsonObject.remove("verifiedUntil") }
+        Files.writeString(savedFile, oldCache.toString())
+        check(DungeonFriendStatsStore(savedFile).load().values.all { it.verifiedUntil == 0L })
+        store.save(saved)
         DungeonFriendStatsCache.clear()
         DungeonFriendStatsCache.initialize(savedFile)
         DungeonFriendStatsCache.request("low")
@@ -251,6 +261,7 @@ fun main() {
         DungeonFriendStatsCache.clear()
         DungeonFriendStatsCache.initialize(savedFile)
         check(DungeonFriendStatsCache.get("high")?.sPlusTimes == known.sPlusTimes)
+        check(DungeonFriendStatsCache.verified("high") == null) // Displayed old PBs cannot authorize automatic actions.
         DungeonFriendStatsCache.request("low", force = true) // New-friend notification explicitly checks a re-added friend.
         check(DungeonFriendStatsCache.status == "Loading PBs: 1 queued")
         store.save(mapOf("invalid" to CachedDungeonFriend(known, "bad-uuid", 1)))
@@ -269,3 +280,109 @@ fun main() {
 data class ViewerFloor(val completions: Long, val fastestTime: Duration, val fastestTimeSplus: Duration)
 data class ViewerType(val experience: Long, val floors: Map<String, ViewerFloor>)
 data class ViewerDungeons(val dungeonTypes: Map<String, ViewerType>, val classExperience: Map<String, Long>, val selectedClass: String)
+
+private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) {
+    check(parsePbLimit("5:30") == 330000L && parsePbLimit("0:00.001") == 1L)
+    check(parsePbLimit(" 7:00.1 ") == 420100L && parsePbLimit("999:59.999") == 59999999L)
+    listOf("", "0:00", "1:60", "-1:00", "5", "5:3", "5:00.0000", "1:00\n/p Bob").forEach { check(parsePbLimit(it) == null) }
+    val available = DungeonAvailability(F7, setOf(ARCHER, TANK), 420000)
+    check(available.enabled && available.accepts(known, F7))
+    check(!available.accepts(known, M7) && !available.accepts(hidden, F7) && !available.accepts(null, F7))
+    check(!available.accepts(known.copy(sPlusTimes = emptyMap()), F7))
+    check(!available.accepts(known.copy(sPlusTimes = mapOf(F7 to 420001)), F7))
+    check(!available.accepts(known.copy(catacombs = 23), F7))
+    check(!available.copy(classes = emptySet()).enabled && !available.copy(maxPbMillis = null).enabled)
+    check(Gson().fromJson(Gson().toJson(available), DungeonAvailability::class.java) == available)
+
+    val inviteText = "---------------------\n[MVP++] Cessna808 has invited you to join their party!\nYou have 60 seconds to accept. Click here to join!\n---------------------"
+    fun invite(command: String) = Component.literal(inviteText).append(Component.literal("Accept")
+        .withStyle(Style.EMPTY.withClickEvent(ClickEvent.RunCommand(command))))
+    check(serverPartyInviter(invite("/party accept Cessna808")) == "Cessna808")
+    check(serverPartyInviter(invite("/p accept Cessna808")) == "Cessna808")
+    check(serverPartyInviter(invite("/party accept SomeoneElse")) == null)
+    check(serverPartyInviter(Component.literal(inviteText)) == null)
+    check(partyInviter("From Alice: Bob has invited you to join their party!") == null)
+    check(joinedPartyLeader("You have joined [MVP++] Cessna808's party!") == "Cessna808")
+    check(joinedPartyLeader("From Bob: You have joined Alice's party!") == null)
+
+    val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")
+    check(DungeonJoinRequest.parse(request.message()) == request)
+    check(DungeonJoinRequest.parse(request.message().replace("F7", "M8")) == null)
+    check(DungeonJoinRequest.parse(request.message().replace("Archer", "Unknown")) == null)
+    check(DungeonJoinRequest.parse(request.message() + "\n/p Alice") == null)
+    val client = DungeonFriendJoining()
+    val host = DungeonFriendJoining()
+    val clientContext = JoinPartyContext(available, true, true, 1, F7, setOf(HEALER, ARCHER, TANK), setOf("self"))
+    val hostContext = clientContext.copy(solo = false, partySize = 4, missing = setOf(TANK), members = setOf("host", "bob", "carol", "dave"))
+    check(client.request("Host", request, 100) == "msg Host ${request.message()}")
+    check(host.receiveRequest("Self", request, 200))
+    check(!host.receiveRequest("SELF", request, 300))
+    check(host.nextCommand(hostContext, 300) { null } == null)
+    check(host.nextCommand(hostContext, 300) { hidden } == null)
+    check(host.nextCommand(hostContext, 300) { known.copy(sPlusTimes = mapOf(F7 to 420001)) } == null)
+    check(host.nextCommand(hostContext.copy(partySize = 5), 300) { known } == null)
+    check(host.nextCommand(hostContext.copy(canInvite = false), 300) { known } == null)
+    check(host.nextCommand(hostContext.copy(floor = M7), 300) { known } == null)
+    val offer = host.nextCommand(hostContext, 400) { known }!!
+    check(offer == "msg self Inviting you for F7 as Tank [SkyMyce Ready ${request.token}]")
+    client.receiveOffer("Host", offer.removePrefix("msg self "), 500)
+    check(client.nextCommand(clientContext, 600) { known } == null) // A private offer is not a server invitation.
+    check(host.nextCommand(hostContext.copy(missing = emptySet()), 600) { known } == null)
+    check(host.nextCommand(hostContext, 1500) { known } == "party invite self")
+    check(host.nextCommand(hostContext, 1600) { known } == null)
+    check(host.classFor("SELF") == TANK)
+    check(host.receiveRequest("Other", request, 1600))
+    check(host.nextCommand(hostContext, 1700) { known } == null) // Reserve both the last slot and offered class.
+    check(host.nextCommand(hostContext.copy(partySize = 3), 1700) { known } == null) // A free seat cannot reuse a reserved class.
+    client.invited("Stranger", 1700)
+    check(client.nextCommand(clientContext, 1800) { known } == null)
+    client.invited("Host", 1800)
+    check(client.nextCommand(clientContext.copy(solo = false), 1900) { known } == null)
+    check(client.nextCommand(clientContext.copy(availability = available.copy(classes = emptySet())), 1900) { known } == null)
+    check(client.nextCommand(clientContext, 1900) { hidden } == null)
+    check(client.nextCommand(clientContext, 1900) { null } == null)
+    check(client.nextCommand(clientContext, 2000) { known } == "party accept host")
+    check(client.accepted == "host" to (F7 to TANK))
+    check(client.nextCommand(clientContext, 2001) { known } == null)
+    client.clear()
+    client.request("Host", request, 3000)
+    client.receiveOffer("Stranger", offer.removePrefix("msg self "), 3001)
+    client.receiveOffer("Host", offer.removePrefix("msg self ").replace(request.token, "ffffffffffffffff"), 3001)
+    client.invited("Host", 3002)
+    check(client.nextCommand(clientContext, 3003) { known } == "party accept host")
+    check(client.accepted?.second?.second == ARCHER) // Unrelated or stale offers cannot choose the class.
+    client.clear()
+    client.invited("Host", 3000)
+    check(client.nextCommand(clientContext, 3001) { known } == "party accept host") // Availability also accepts manual invitations.
+    client.clear()
+    client.request("Host", request, 4000)
+    client.receiveRequest("Other", request, 4001)
+    check(client.nextCommand(clientContext, 4002) { known } == null) // Do not host while waiting to join.
+    client.prune(64000)
+    check(!client.busy(64000) && client.status == "Join request expired")
+    client.clear()
+    client.invited("Host", 0)
+    check(client.nextCommand(clientContext, 55000) { known } == null)
+    host.prune(62000)
+    check(host.classFor("Self") == null)
+
+    val listing = partyListingFromLore(10, null, listOf("§7Dungeon: §bMaster Mode", "§7Floor: §bFloor VII", "Members:",
+        "§b[MVP+] Leader: Mage (50)", "Alice: Berserk (49)", "Bob: Healer (48)", "Note: quick runs", "Empty"))!!
+    check(listing.floor == M7 && listing.leaderName == "Leader")
+    check(listing.memberClasses == mapOf("Leader" to MAGE, "Alice" to BERSERKER, "Bob" to HEALER))
+    check(partyListingFloor(listOf("Dungeon: The Catacombs", "Floor: Floor IV")) == F4)
+    check(partyListingFloor(listOf("Floor: Entrance")) == null)
+    val party = DungeonFriendParty()
+    party.roster(listing.memberUsername + "Self", 4, true)
+    party.classes.putAll(listing.memberClasses.mapKeys { it.key.lowercase() } + ("self" to ARCHER))
+    party.roster(listOf("Self", "Leader"), 4, completeNames = false)
+    check(party.openClasses == setOf(TANK) && party.members.size == 4)
+    val saved = SavedDungeonParty("leader", party.members.toSet(), party.classes.toMap(), M7, 1000)
+    val restored = Gson().fromJson(Gson().toJson(saved), SavedDungeonParty::class.java)
+    check(saved == restored && restored.matches("Leader", setOf("Leader", "Self", "Alice", "Bob"), 1001))
+    check(!restored.matches("Other", party.members, 1001) && !restored.matches("Leader", setOf("Self", "Leader"), 1001))
+    check(!restored.matches("Leader", party.members, 86401001) && !restored.matches("Leader", party.members, 999))
+    party.roster(listOf("Self", "Leader", "Bob"), 3)
+    check(party.openClasses == setOf(BERSERKER, TANK))
+    check(party.chat("You left the party.", "Self") && party.classes.isEmpty())
+}
