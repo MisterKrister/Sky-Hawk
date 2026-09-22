@@ -8,6 +8,7 @@ import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.AuctionAPI
 import me.mycellium.skymyce.features.general.AuctionHouseScreen
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
+import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
 import me.mycellium.skymyce.hud.widget.WidgetEditorScreen
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.Utils.displayMessage
@@ -37,6 +38,10 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             }
             .then(dungeon())
+            .then(literal("friends").executes {
+                MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
+                1
+            })
             .then(auction())
             .then(hud())
             .then(modules())

@@ -2,7 +2,9 @@ package me.mycellium.skymyce.config.instances.dungeons
 
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.utils.Utils.displayDevMessage
-import me.mycellium.skymyce.utils.Utils.displayMessage
+import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
+import me.mycellium.skymyce.features.instances.dungeons.friends.parseDungeonClass
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import net.minecraft.core.component.DataComponents
 import net.minecraft.world.item.ItemStack
 import net.minecraft.world.item.Items
@@ -10,14 +12,15 @@ import tech.thatgravyboat.skyblockapi.api.events.base.Subscription
 import tech.thatgravyboat.skyblockapi.api.events.screen.ContainerInitializedEvent
 import java.util.UUID
 
-private val MEMBER_LINE_REGEX = Regex("^([A-Za-z0-9_]{1,16}):\\s*.+\\s+\\(\\d+\\)$")
+private val MEMBER_LINE_REGEX = Regex("^(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16}):\\s*(\\w+)\\s+\\(\\d+\\)$")
 
 data class PartyListing(
     val slotIndex: Int,
     val leaderName: String,
     val leaderUuid: UUID?,
     val memberUsername: List<String>,
-    val note: String?
+    val note: String?,
+    val memberClasses: Map<String, DungeonClass> = emptyMap(),
 )
 
 object PartyFinder : SkyMyceModule() {
@@ -29,7 +32,7 @@ object PartyFinder : SkyMyceModule() {
             displayDevMessage("[PartyFinder] Detected container: title='$title', slots=${event.containerSlots.size}")
             val listings = parsePartyListings(event)
             displayDevMessage("[PartyFinder] Parsed ${listings.size} listing(s): $listings")
-            displayMessage("Found party listings: $listings")
+            DungeonFriends.onListings(listings)
         }
     }
 }
@@ -66,6 +69,7 @@ private fun parsePartyItem(slotIndex: Int, item: ItemStack): PartyListing? {
 
     var leaderName: String? = null
     val members = mutableListOf<String>()
+    val classes = mutableMapOf<String, DungeonClass>()
     var note: String? = null
     var inMembersSection = false
 
@@ -88,6 +92,7 @@ private fun parsePartyItem(slotIndex: Int, item: ItemStack): PartyListing? {
                 if (memberMatch != null) {
                     val memberName = memberMatch.groupValues[1]
                     members.add(memberName)
+                    parseDungeonClass(memberMatch.groupValues[2])?.let { classes[memberName] = it }
                     leaderName = leaderName ?: memberName
                     displayDevMessage("[PartyFinder] Slot $slotIndex: detected member='$memberName'")
                 }
@@ -101,7 +106,7 @@ private fun parsePartyItem(slotIndex: Int, item: ItemStack): PartyListing? {
         return null
     }
 
-    val listing = PartyListing(slotIndex, resolvedLeaderName, leaderUuid, members, note)
+    val listing = PartyListing(slotIndex, resolvedLeaderName, leaderUuid, members, note, classes)
     displayDevMessage("[PartyFinder] Slot $slotIndex: detected listing=$listing")
     return listing
 }
