@@ -28,6 +28,7 @@ import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 import tech.thatgravyboat.skyblockapi.api.location.SkyBlockIsland
 import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
 import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
+import tech.thatgravyboat.skyblockapi.utils.text.Text.send
 import java.util.UUID
 
 object DungeonFriends : SkyMyceModule() {
@@ -105,7 +106,7 @@ object DungeonFriends : SkyMyceModule() {
         DungeonFriendRelay.tick(LocationAPI.isOnSkyBlock && MC.instance.player != null)
         if (!LocationAPI.isOnSkyBlock) fallbackMessages.clear()
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
-        partyBorders.tick(now()) { MC.player.sendSystemMessage(it) }
+        partyBorders.tick(now()) { it.send() }
         replies.prune(now())
         sentOffers.entries.removeIf { it.value.expires <= now() }
         receivedOffers.entries.removeIf { it.value.expires <= now() }
@@ -141,7 +142,7 @@ object DungeonFriends : SkyMyceModule() {
             }
             if (joining.status != lastJoinStatus) {
                 lastJoinStatus = joining.status
-                if (lastJoinStatus.contains("does not meet") || lastJoinStatus.endsWith("expired")) notify(lastJoinStatus)
+                if (lastJoinStatus.contains("does not meet") || lastJoinStatus.endsWith("expired")) notify(lastJoinStatus, joining.statusPlayer)
             }
             if (now() >= nextAction && fallbackMessages.isNotEmpty()) {
                 val (name, text, reply) = fallbackMessages.removeFirst()
@@ -285,25 +286,27 @@ object DungeonFriends : SkyMyceModule() {
             nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
         }
         var replacement: Component? = null
+        var noticePlayer = ""
         serverPartyInviter(event.component)?.let { inviter ->
             if (joining.expectsInvite(inviter, now())) {
-                replacement = Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
-                    .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) }
+                noticePlayer = inviter
+                replacement = Component.literal("§b[Party] §fYou have been invited to $inviter's party")
             }
             if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
                 joining.invited(inviter, now())
             }
         }
         partyNotices.compact(message, MC.player.name.string, now())?.let { notice ->
+            noticePlayer = partyNotices.player
             replacement = Component.literal("§b[Party] §f$notice")
         }
         if (!event.isCancelled || replacement != null) {
             val border = partyBorders.filter(event.component, partyNotices.pending(now()), replacement != null, now()) {
-                MC.player.sendSystemMessage(it)
+                it.send()
             }
             if (border || replacement != null) event.cancel()
         }
-        replacement?.let { MC.player.sendSystemMessage(it) }
+        replacement?.let { partyMessage(noticePlayer, it) }
     }
 
     @Subscription
@@ -331,27 +334,33 @@ object DungeonFriends : SkyMyceModule() {
                 .withStyle { it.withHoverEvent(net.minecraft.network.chat.HoverEvent.ShowText(Component.literal(offer.text))) }
             message.append(Component.literal("  §a[Yes]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${offer.request.token}")) })
             message.append(Component.literal("  §c[No]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${offer.request.token}")) })
-            MC.player.sendSystemMessage(message)
+            partyMessage(name, message)
         } else if (request != null) {
             val manual = sentOffers[name.lowercase()]?.takeIf { it.expires > now() && it.request == request } != null
             if (joining.receiveRequest(name, request, now(), manual)) {
                 if (manual) replies.receive(name, "yes", now())
                 sentOffers.remove(name.lowercase())
-                notify("$name has requested to join")
+                notify("$name has requested to join", name)
                 if (!manual) checkJoinStats(name)
             }
         } else if (text.startsWith("Inviting you for ") && text.contains("[SkyMyce Ready ")) {
             joining.receiveOffer(name, text, now())
         } else {
+            val lfgReply = sentOffers[name.lowercase()]?.expires?.let { it > now() } == true
             replies.receive(name, text, now())
             acceptLfgReply(name, text)
-            MC.player.sendSystemMessage(Component.literal("§b$name §8» §f$text"))
+            val message = Component.literal("§b$name §8» §f$text")
+            if (lfgReply) partyMessage(name, message) else message.send()
         }
         return true
     }
 
-    private fun notify(text: String) {
-        MC.instance.player?.sendSystemMessage(Component.literal("§b[Party] §f$text"))
+    private fun partyMessage(name: String, message: Component) {
+        if (MC.instance.player != null) message.send("skymyce:party:${name.lowercase()}")
+    }
+
+    private fun notify(text: String, name: String) {
+        partyMessage(name, Component.literal("§b[Party] §f$text"))
     }
 
     private fun acceptLfgReply(name: String, text: String) {
@@ -366,7 +375,7 @@ object DungeonFriends : SkyMyceModule() {
         if (!command.startsWith("msg ")) {
             if (command.startsWith("party invite ")) {
                 val name = command.substringAfterLast(' ')
-                notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...")
+                notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...", name)
             }
             sendPartyAction(command)
             return true
@@ -374,7 +383,7 @@ object DungeonFriends : SkyMyceModule() {
         val parts = command.split(' ', limit = 3)
         val name = parts[1]
         val token = parts[2].substringAfterLast(' ').removeSuffix("]")
-        val failed = { if (joining.failed(name, token)) notify("Could not reach $name") }
+        val failed = { if (joining.failed(name, token)) notify("Could not reach $name", name) }
         val sent = DungeonFriendRelay.send(name, parts[2], { joining.acknowledged(name, token) }, failed)
         if (!sent) failed()
         return sent
@@ -394,7 +403,7 @@ object DungeonFriends : SkyMyceModule() {
         }
         val request = DungeonJoinRequest(floor, classes, UUID.randomUUID().toString().replace("-", "").take(16))
         if (sendJoinAction(joining.request(friend.name, request, now(), manual = true))) {
-            notify("Requested to join ${friend.name}")
+            notify("Requested to join ${friend.name}", friend.name)
         }
         nextAction = now() + 1000
     }
@@ -417,20 +426,21 @@ object DungeonFriends : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock || !isFriend(name) || now() < nextAction || text.length !in 1..220 || text.any { it < ' ' || it == '§' || it == '\u007f' }) return
         val offer = receivedOffers[name.lowercase()]?.takeIf { it.expires > now() }
         val buttonReply = Regex("^(yes|no) ([a-f0-9]{16})$").matchEntire(text)
-        if (buttonReply != null && buttonReply.groupValues[2] != offer?.request?.token) { notify("That request has expired"); return }
+        if (buttonReply != null && buttonReply.groupValues[2] != offer?.request?.token) { notify("That request has expired", name); return }
         val reply = buttonReply?.groupValues?.get(1) ?: text
         if (offer != null && classifyLfgReply(reply) == LfgReplyStatus.ACCEPTED) {
-            if (!solo) { notify("Leave your current party before joining"); return }
-            if (joining.busy(now())) { notify("A join request is already pending"); return }
+            if (!solo) { notify("Leave your current party before joining", name); return }
+            if (joining.busy(now())) { notify("A join request is already pending", name); return }
             receivedOffers.remove(name.lowercase())
             if (sendJoinAction(joining.request(name, offer.request, now(), manual = true))) {
-                notify("Waiting for $name's invite...")
+                notify("Waiting for $name's invite...", name)
             }
             nextAction = now() + 1000
             return
         }
         receivedOffers.remove(name.lowercase())
         sendLfg(name, reply, true)
+        if (offer != null) notify("Replied to $name: $reply", name)
     }
 
     private fun sendLfg(name: String, text: String, reply: Boolean, relayText: String = text) {

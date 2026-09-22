@@ -10,6 +10,7 @@ type Session = {
   ip: string;
   name?: string;
   uuid?: string;
+  liveUpdates?: boolean;
   checking?: boolean;
   credits: number;
   updated: number;
@@ -104,9 +105,10 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         }
         session.name = profile.name;
         session.uuid = profile.id;
+        session.liveUpdates = data.liveUpdates === true;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, partyPolicies: true }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, partyPolicies: true, liveUpdates: true }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
       return;
     }
@@ -124,8 +126,11 @@ export class RelayRoom extends DurableObject<RelayEnv> {
           ws.close(1008, "Invalid party policy"); return;
         }
         // A policy belongs to the authenticated socket, never to a client-supplied name.
-        session.party = { floor: data.floor, maxPbMillis: limit, open: data.open };
+        const party = { floor: data.floor, maxPbMillis: limit, open: data.open };
+        const changed = JSON.stringify(session.party) !== JSON.stringify(party);
+        session.party = party;
         ws.serializeAttachment(session);
+        if (changed) this.broadcast(ws, { type: "party_update", name: session.name, uuid: session.uuid, ...party });
         return;
       }
       if (typeof data.id !== "string" || !uuid.test(data.id) || !Array.isArray(data.names) || data.names.length > 32 ||
@@ -157,7 +162,8 @@ export class RelayRoom extends DurableObject<RelayEnv> {
           (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid)))) { ws.close(1008, "Invalid stats request"); return; }
       if (data.type === "stats_get") {
         const record = this.stats.get(data.name, data.uuid as string | undefined, now);
-        const grant: StatsGrant | undefined = record ? undefined : { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
+        const ownRefresh = session.liveUpdates && data.name.toLowerCase() === session.name.toLowerCase() && data.uuid === session.uuid;
+        const grant: StatsGrant | undefined = record && !ownRefresh ? undefined : { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
           token: crypto.randomUUID().replaceAll("-", ""), expires: now + 120_000 };
         if (grant) session.uploads = [...session.uploads.filter(it => it.name !== grant.name).slice(-3), grant];
         ws.serializeAttachment(session);
@@ -171,8 +177,11 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         }
         session.uploads = session.uploads.filter(it => it !== grant);
         ws.serializeAttachment(session);
-        const stored = this.stats.put({ name: data.name, uuid: data.uuid, stats, fetchedAt: Math.min(data.fetchedAt as number, now) }, session.uuid!, now);
+        const record = { name: data.name, uuid: data.uuid, stats, fetchedAt: Math.min(data.fetchedAt as number, now) };
+        const ownRefresh = session.liveUpdates === true && data.uuid === session.uuid && data.name.toLowerCase() === session.name.toLowerCase();
+        const stored = this.stats.put(record, session.uuid!, now, ownRefresh);
         ws.send(JSON.stringify({ type: "stats_result", id: data.id, stored }));
+        if (stored) this.broadcast(ws, { type: "stats_update", record });
       }
       return;
     }
@@ -212,6 +221,17 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       }
       target.send(JSON.stringify({ type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
     } catch { ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); }
+  }
+
+  private broadcast(sender: WebSocket, packet: object): void {
+    const text = JSON.stringify(packet);
+    for (const peer of this.ctx.getWebSockets()) {
+      const session = peer.deserializeAttachment() as Session;
+      // Older clients reject unknown packet types. Opt-in survives hibernation with the socket.
+      if (peer !== sender && peer.readyState === WebSocket.OPEN && session.name && session.liveUpdates) {
+        try { peer.send(text); } catch { /* The recipient disconnected during delivery. */ }
+      }
+    }
   }
 
   async alarm(): Promise<void> {

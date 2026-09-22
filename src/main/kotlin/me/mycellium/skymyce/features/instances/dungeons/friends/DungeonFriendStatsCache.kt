@@ -111,6 +111,24 @@ object DungeonFriendStatsCache {
         cache.replaceAll { _, value -> if ((value.stats.catacombs ?: 0) > 40) value.copy(expires = 0L) else value }
     }
 
+    /** Live relay reports update eligibility and visible rows without another refresh or API lookup. */
+    internal fun receiveShared(json: JsonObject, name: String, uuid: String?, now: Long): Boolean {
+        val key = name.lowercase()
+        if (!key.matches(Regex("[a-z0-9_]{1,16}"))) return false
+        val previous = cache[key]
+        val record = sharedDungeonFriend(json, name, uuid ?: previous?.uuid, now) ?: return false
+        if (previous != null && previous.verifiedUntil >= record.verifiedUntil) return false
+        cache[key] = record
+        if (pending[key]?.bypassShared == false) {
+            pending.remove(key)
+            sharedLookups.remove(key)
+            completedCount++
+        }
+        dirty = true
+        version++
+        return true
+    }
+
     /** Runs on the client thread, including while an API request or its retry deadline is pending. */
     internal fun pollShared(now: Long, lookup: (String, String?) -> CompletableFuture<JsonObject?>?) {
         relayCredits = minOf(20.0, relayCredits + (now - relayUpdated).coerceAtLeast(0) / 1000.0)
@@ -129,7 +147,7 @@ object DungeonFriendStatsCache {
             val uuid = request.uuid?.toString()?.replace("-", "") ?: cache[name]?.uuid
             val record = response.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
                 ?.let { sharedDungeonFriend(it, name, uuid, now) } ?: continue
-            cache[name] = record
+            if ((cache[name]?.verifiedUntil ?: 0L) < record.verifiedUntil) cache[name] = record
             pending.remove(name)
             sharedLookups.remove(name)
             completedCount++
@@ -241,10 +259,12 @@ object DungeonFriendStatsCache {
                         val previous = cache[request.key]
                         val failed = fetched.state == StatsState.UNAVAILABLE
                         val value = if (failed) previous?.stats ?: fetched else fetched
-                        cache[request.key] = CachedDungeonFriend(value, uuid, time + if (failed) 60000 else 600000,
-                            if (failed) previous?.verifiedUntil ?: 0L else time + 600000)
-                        if (!failed && uuid != null && upload != null && sharedLookup != null && time < sharedLookup.expires) {
-                            DungeonFriendRelay.publishStats(request.key, uuid, fetched, time, upload)
+                        // A push fetched after this request began wins over its slower response.
+                        val newer = (previous?.verifiedUntil ?: 0L) > now + 600000
+                        if (!newer) cache[request.key] = CachedDungeonFriend(value, uuid, time + if (failed) 60000 else 600000,
+                            if (failed) previous?.verifiedUntil ?: 0L else now + 600000)
+                        if (!newer && !failed && uuid != null && upload != null && sharedLookup != null && time < sharedLookup.expires) {
+                            DungeonFriendRelay.publishStats(request.key, uuid, fetched, now, upload)
                             relayCredits--
                         }
                         dirty = true

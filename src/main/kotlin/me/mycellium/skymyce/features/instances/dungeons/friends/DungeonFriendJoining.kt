@@ -82,6 +82,8 @@ data class DungeonLfgOffer(val request: DungeonJoinRequest, val text: String, va
 
 /** Compact only confirmations attributable to a command this mod actually sent. */
 class DungeonPartyNotices {
+    var player: String = ""
+        private set
     private data class Invite(val expires: Long, val confirmed: Boolean = false)
     private val invited = mutableMapOf<String, Invite>()
     private var accepted: Pair<String, Long>? = null
@@ -97,18 +99,19 @@ class DungeonPartyNotices {
     }
 
     fun compact(message: String, self: String, now: Long): String? {
+        player = ""
         prune(now)
         val lines = message.replace(Regex("§."), "").lines().map(String::trim)
             .filter { it.isNotEmpty() && !it.matches(Regex("[-▬─]{5,}")) }
         if (lines.size != 1) return null // Never hide unrelated lines in a mixed chat packet.
         val line = lines.single()
         joinedPartyLeader(line)?.let { leader ->
-            if (accepted?.first.equals(leader, true)) { accepted = null; return "$self joined" }
+            if (accepted?.first.equals(leader, true)) { accepted = null; player = leader; return "You joined $leader's party" }
             return null
         }
         Regex("^(?:\\[Party] )?$NAME joined the party\\.$").matchEntire(line)?.let {
             val name = it.groupValues[1]
-            return if (invited.remove(name.lowercase())?.confirmed == true) "$name joined" else null
+            return if (invited.remove(name.lowercase())?.confirmed == true) { player = name; "$name joined" } else null
         }
         val own = Regex("^You (?:have )?invited $NAME to (?:your|the) party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
         val named = Regex("^$NAME invited $NAME to the party!(?: They have 60 seconds to accept\\.)?$").matchEntire(line)
@@ -117,6 +120,7 @@ class DungeonPartyNotices {
         val pending = invited[name.lowercase()] ?: return null
         if (pending.confirmed) return null
         invited[name.lowercase()] = Invite(now + 60000, true)
+        player = name
         return "$name has been invited"
     }
 
@@ -152,8 +156,9 @@ class DungeonPartyBorders {
     private fun separator(text: String) = text.replace(Regex("§."), "").trim().matches(Regex("[-▬─]{5,}"))
 
     fun filter(component: Component, pending: Boolean, compacted: Boolean, now: Long, restore: (Component) -> Unit): Boolean {
-        held?.let { if (!compacted || now >= it.second) restore(it.first) }
+        val previous = held
         held = null
+        previous?.let { if (!compacted || now >= it.second) restore(it.first) }
         if (separator(component.string)) {
             if (now < trailingUntil) { trailingUntil = 0; return true }
             trailingUntil = 0
@@ -184,12 +189,15 @@ class DungeonFriendJoining {
         private set
     var status = ""
         private set
+    var statusPlayer = ""
+        private set
     fun busy(now: Long): Boolean = outgoing != null || now < acceptingUntil
 
     fun expectsInvite(name: String, now: Long): Boolean = outgoing?.let { it.first.equals(name, true) && it.second.expires > now } == true
 
     fun request(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): String {
         outgoing = name.lowercase() to Request(data, now + 60000, manual = manual)
+        statusPlayer = name
         status = "Join requested from $name"
         return "msg $name ${data.message()}"
     }
@@ -232,7 +240,7 @@ class DungeonFriendJoining {
         val removed = incoming[name.lowercase()]?.takeIf { it.data.token == token }?.let { incoming.remove(name.lowercase()); true } == true
         val requested = outgoing?.first.equals(name, true) && outgoing?.second?.data?.token == token
         if (requested) outgoing = null
-        if (removed || requested) status = "Could not reach $name"
+        if (removed || requested) { statusPlayer = name; status = "Could not reach $name" }
         return removed || requested
     }
 
@@ -253,6 +261,7 @@ class DungeonFriendJoining {
                 acceptingUntil = now + 10000
                 invitations.clear()
                 outgoing = null
+                statusPlayer = name
                 status = "Joining $name as ${clazz.displayName}"
                 return "party accept $name"
             }
@@ -264,6 +273,7 @@ class DungeonFriendJoining {
             if (request.invited || (!request.manual && floor != context.floor)) continue
             val playerStats = stats(name)
             if (!request.manual && !context.policy.accepts(playerStats, floor)) {
+                statusPlayer = name
                 status = if (playerStats == null) "Checking $name's S+ PB" else "$name does not meet the ${floor.name} S+ PB limit"
                 continue
             }
@@ -274,11 +284,13 @@ class DungeonFriendJoining {
             if (clazz !in context.missing || clazz in reservedClasses) continue
             if (request.offered == null) {
                 request.offered = clazz
+                statusPlayer = name
                 status = "Offering ${clazz.displayName} to $name"
                 if (!request.received) return "msg $name Inviting you for ${floor.name} as ${clazz.displayName} [SkyMyce Ready ${request.data.token}]"
             }
             if (!request.received) continue
             request.invited = true
+            statusPlayer = name
             status = "Invited $name as ${clazz.displayName}"
             return "party invite $name"
         }
@@ -291,11 +303,11 @@ class DungeonFriendJoining {
         incoming.entries.removeIf { it.value.expires <= now }
         invitations.entries.removeIf { it.value <= now }
         recent.entries.removeIf { it.value <= now }
-        if (outgoing?.second?.expires?.let { it <= now } == true) { outgoing = null; status = "Join request expired" }
+        if (outgoing?.second?.expires?.let { it <= now } == true) { statusPlayer = outgoing!!.first; outgoing = null; status = "Join request expired" }
         if (now >= acceptingUntil) accepted = null
     }
 
     fun clear() {
-        incoming.clear(); invitations.clear(); recent.clear(); outgoing = null; accepted = null; acceptingUntil = 0; status = ""
+        incoming.clear(); invitations.clear(); recent.clear(); outgoing = null; accepted = null; acceptingUntil = 0; status = ""; statusPlayer = ""
     }
 }

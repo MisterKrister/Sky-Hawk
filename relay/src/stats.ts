@@ -49,12 +49,12 @@ export class SharedStats {
     return { uuid: row.uuid, name: row.name, stats: JSON.parse(row.stats), fetchedAt: row.fetched_at };
   }
 
-  put(record: CachedStats, publisher: string, now: number): boolean {
-    // A racing upload must not replace fresh data or extend its expiry.
-    const existing = this.sql.exec<{ fetched_at: number }>(
-      "SELECT fetched_at FROM player_stats WHERE (uuid = ? OR name = ?) AND fetched_at > ?", record.uuid, record.name, now - STATS_TTL,
+  put(record: CachedStats, publisher: string, now: number, ownRefresh = false): boolean {
+    // Only a verified player's newer self-report may replace their fresh record.
+    const existing = this.sql.exec<{ uuid: string; fetched_at: number }>(
+      "SELECT uuid, fetched_at FROM player_stats WHERE (uuid = ? OR name = ?) AND fetched_at > ?", record.uuid, record.name, now - STATS_TTL,
     ).toArray();
-    if (existing.length) return false;
+    if (existing.some(row => !ownRefresh || publisher !== record.uuid || row.uuid !== record.uuid || row.fetched_at >= record.fetchedAt)) return false;
     this.sql.exec("DELETE FROM player_stats WHERE uuid = ? OR name = ?", record.uuid, record.name);
     // ponytail: bounded room cache; shard by UUID if the 128-player room limit is raised.
     if (this.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM player_stats").one().total >= 10_000) {

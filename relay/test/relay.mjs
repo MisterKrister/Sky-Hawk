@@ -71,9 +71,10 @@ try {
   assert.equal((await mf.dispatchFetch("http://localhost/health")).status, 200);
   assert.equal((await mf.dispatchFetch("http://localhost/websocket")).status, 426);
   assert.equal((await mf.dispatchFetch("http://localhost/websocket?room=unlisted", { headers: { Upgrade: "websocket" } })).status, 403);
-  const alice = await connect("Alice"); alice.authenticate(); assert.equal((await alice.next()).type, "ready");
+  const alice = await connect("Alice"); alice.authenticate({ ...proof("Alice", alice.challenge), liveUpdates: true });
+  assert.equal((await alice.next()).liveUpdates, true);
   const bob = await connect("Bob"); bob.authenticate(); assert.equal((await bob.next()).type, "ready");
-  const carol = await connect("Carol", "testing"); carol.authenticate(); await carol.next();
+  const carol = await connect("Carol", "testing"); carol.authenticate({ ...proof("Carol", carol.challenge), liveUpdates: true }); await carol.next();
   let cacheId = 100;
   async function cache(client, data) {
     client.ws.send(JSON.stringify({ id: (cacheId++).toString(16).padStart(32, "0"), ...data }));
@@ -108,6 +109,10 @@ try {
   }
   bob.ws.send(JSON.stringify({ type: "party_set", name: "Alice", floor: "F7", maxPbMillis: 420000, open: true }));
   bob.ws.send("ping"); await bob.next();
+  assert.deepEqual(await alice.next(), { type: "party_update", name: "Bob", uuid: identities.get("Bob"), floor: "F7", maxPbMillis: 420000, open: true });
+  alice.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: 400000, open: true }));
+  alice.ws.send("ping"); assert.equal(await alice.next(), "pong");
+  bob.ws.send("ping"); assert.equal(await bob.next(), "pong"); // Old clients receive no unsupported push packets.
   const advertised = await policies(alice, ["BOB", "Offline", "Alice", "__proto__"]);
   assert.deepEqual(advertised.parties.bob, { floor: "F7", maxPbMillis: 420000, open: true, uuid: identities.get("Bob") });
   assert.equal(advertised.parties.offline, null);
@@ -116,6 +121,10 @@ try {
   assert.equal((await policies(carol, ["Bob"])).parties.bob, null); // Policies stay in their room.
   bob.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: 300000, open: false }));
   bob.ws.send("ping"); await bob.next();
+  assert.equal((await alice.next()).maxPbMillis, 300000); // Changed requirements arrive without a lookup.
+  bob.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: 300000, open: false }));
+  bob.ws.send("ping"); await bob.next();
+  alice.ws.send("ping"); assert.equal(await alice.next(), "pong"); // Unchanged requirements do not fan out.
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   assert.deepEqual((await policies(alice, ["Bob"])).parties.bob,
     { floor: "F7", maxPbMillis: 300000, open: false, uuid: identities.get("Bob") });
@@ -151,6 +160,22 @@ try {
   bob.ws.send(JSON.stringify({ type: "message", id: "3".repeat(32), to: "Alice", text: "x".repeat(2050) }));
   assert.equal((await closed).code, 1009);
   assert.equal((await policies(alice, ["Bob"])).parties.bob, null); // Disconnected hosts are not advertised.
+  const modernBob = await connect("Bob");
+  modernBob.authenticate({ ...proof("Bob", modernBob.challenge), liveUpdates: true }); await modernBob.next();
+  const selfRefresh = await cache(modernBob, lookup);
+  assert.deepEqual(selfRefresh.record.stats, stats); assert.match(selfRefresh.upload, /^[a-f0-9]{32}$/);
+  const improved = { ...entry, stats: { ...stats, sPlusTimes: { F7: 290000 } }, fetchedAt: Date.now(), upload: selfRefresh.upload };
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.equal((await cache(modernBob, improved)).stored, true);
+  const liveStats = await alice.next();
+  assert.equal(liveStats.type, "stats_update"); assert.deepEqual(liveStats.record.stats, improved.stats);
+  assert.equal(liveStats.record.uuid, identities.get("Bob"));
+  const anotherLookup = await cache(alice, lookup);
+  assert.equal(anotherLookup.upload, undefined); // A peer cannot overwrite somebody else's fresh PB.
+  const oldRefresh = await cache(modernBob, lookup);
+  assert.equal((await cache(modernBob, { ...entry, upload: oldRefresh.upload })).stored, false);
+  alice.ws.send("ping"); assert.equal(await alice.next(), "pong"); // Stale uploads produce no update.
+  carol.ws.send("ping"); assert.equal(await carol.next(), "pong"); // Neither stats nor policy pushes cross rooms.
   const invalidPolicy = await connect("InvalidPolicy", "testing"); invalidPolicy.authenticate(); await invalidPolicy.next();
   const policyClosed = closeEvent(invalidPolicy.ws);
   invalidPolicy.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: -1, open: true }));

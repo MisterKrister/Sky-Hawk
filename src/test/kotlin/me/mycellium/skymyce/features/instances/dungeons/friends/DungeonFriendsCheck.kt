@@ -136,6 +136,22 @@ fun main() {
         "stats" to known, "fetchedAt" to 1000000L))).asJsonObject
     val cloudStats = sharedDungeonFriend(sharedJson, "ALICE", "a".repeat(32), 1000100)!!
     check(cloudStats.stats == known && cloudStats.verifiedUntil == 1600000L)
+    DungeonFriendStatsCache.clear()
+    DungeonFriendStatsCache.request("Alice")
+    check(DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice") == known && DungeonFriendStatsCache.pendingCount == 0)
+    val liveVersion = DungeonFriendStatsCache.version
+    check(!DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.version == liveVersion) // Duplicate/stale broadcasts cannot renew freshness.
+    check(!DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "b".repeat(32), 1000100))
+    val improved = sharedJson.deepCopy().apply {
+        addProperty("fetchedAt", 1000050)
+        getAsJsonObject("stats").getAsJsonObject("sPlusTimes").addProperty("F7", 290000)
+    }
+    check(DungeonFriendStatsCache.receiveShared(improved, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice")?.sPlusTimes?.get(F7) == 290000L)
+    check(!DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    DungeonFriendStatsCache.clear()
     check(sharedDungeonFriend(sharedJson, "Bob", null, 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", "b".repeat(32), 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", null, 1600000) == null)
@@ -447,9 +463,11 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     notices.command("party invite Alice", automatic = true, 2)
     check(notices.compact(invitedAlice.replace("Self invited", "Other invited"), "Self", 3) == null)
     check(notices.compact(invitedAlice, "Self", 4) == "Alice has been invited")
+    check(notices.player == "Alice")
     check(notices.compact("From Bob: Alice joined the party.", "Self", 5) == null)
     check(notices.compact("Alice joined the party.\nUnrelated message", "Self", 5) == null)
     check(notices.compact("[MVP+] Alice joined the party.", "Self", 6) == "Alice joined")
+    check(notices.player == "Alice") // Both phases replace the same player's message.
     check(notices.compact("Alice joined the party.", "Self", 7) == null) // Consume the tracked join once.
     notices.command("p Alice", automatic = true, 8)
     check(notices.compact("---------------------\nYou have invited [MVP+] Alice to your party! They have 60 seconds to accept.\n---------------------", "Self", 9) == "Alice has been invited")
@@ -463,7 +481,8 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(notices.compact("Alice joined the party.", "Self", 70015) == null)
     notices.command("party accept aryanepstein", automatic = true, 70016)
     check(notices.compact("You have joined Other's party!", "Self", 70017) == null)
-    check(notices.compact("You have joined aryanepstein's party!", "Self", 70018) == "Self joined")
+    check(notices.compact("You have joined aryanepstein's party!", "Self", 70018) == "You joined aryanepstein's party")
+    check(notices.player == "aryanepstein") // The accepting player's phases use the host's ID.
     notices.command("party accept aryanepstein", automatic = true, 70019)
     notices.command("p accept aryanepstein", automatic = false, 70020)
     check(notices.compact("You have joined aryanepstein's party!", "Self", 70021) == null)
@@ -487,6 +506,15 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(restoredBorders.size == 2) // A lone border is never lost.
     check(!borders.filter(Component.literal("-----\nYou have joined Host's party!\n-----"), true, true, 300, restoredBorders::add))
     check(!borders.filter(border, false, false, 301, restoredBorders::add)) // A bundled closing border needs no extra suppression.
+    borders.clear()
+
+    check(borders.filter(border, true, false, 400, restoredBorders::add))
+    var reentered = 0
+    borders.filter(Component.literal("Unrelated"), false, false, 401) { restored ->
+        reentered++
+        check(!borders.filter(restored, false, false, 401) { error("Recursive border restore") })
+    }
+    check(reentered == 1) // The held packet is released before invoking a callback.
     borders.clear()
 
     val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")

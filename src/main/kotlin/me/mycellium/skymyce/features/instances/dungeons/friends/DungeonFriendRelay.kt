@@ -151,7 +151,7 @@ object DungeonFriendRelay {
                                                 sign()
                                             }
                                             val base64 = Base64.getEncoder()
-                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid,
+                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid, "liveUpdates" to true,
                                                 "expires" to certificate.expiresAt().toEpochMilli(),
                                                 "publicKey" to base64.encodeToString(certificate.key().encoded),
                                                 "keySignature" to base64.encodeToString(certificate.keySignature()),
@@ -190,6 +190,23 @@ object DungeonFriendRelay {
                                         }
                                     }
                                     "stats_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
+                                    "stats_update" -> {
+                                        check(connected)
+                                        val record = json.getAsJsonObject("record")
+                                        val name = record.get("name").asString
+                                        val friend = tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI.getFriend(name)
+                                        val self = name.equals(user.name, true)
+                                        if (self || friend != null || DungeonFriendStatsCache.get(name) != null) {
+                                            val uuid = (if (self) user.profileId else friend?.uuid)?.toString()?.replace("-", "")
+                                            DungeonFriendStatsCache.receiveShared(record, name, uuid, System.currentTimeMillis())
+                                        }
+                                    }
+                                    "party_update" -> {
+                                        check(connected)
+                                        val name = json.get("name").asString.lowercase()
+                                        check(name.matches(Regex("[a-z0-9_]{1,16}")))
+                                        cachePolicy(name, json)
+                                    }
                                     "party_result" -> {
                                         check(connected)
                                         val request = policyRequest
@@ -203,14 +220,7 @@ object DungeonFriendRelay {
                                             if (parties == null) nextPolicyRequest = DungeonFriends.now() + 5000
                                             else for (name in request.second) {
                                                 val value = parties.get(name)?.takeIf { it.isJsonObject }?.asJsonObject
-                                                val policy = value?.let {
-                                                    val uuid = it.get("uuid").asString
-                                                    val floor = tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.valueOf(it.get("floor").asString)
-                                                    val limit = it.get("maxPbMillis")?.takeUnless { it.isJsonNull }?.asLong
-                                                    check(uuid.matches(Regex("[a-f0-9]{32}")) && floor in FRIEND_FLOORS && (limit == null || limit in 1..59999999))
-                                                    PartyPolicy(uuid, DungeonJoinPolicy(floor, limit, it.get("open").asBoolean))
-                                                }
-                                                partyPolicies[name] = DungeonFriends.now() + 20000 to policy
+                                                cachePolicy(name, value)
                                             }
                                         }
                                     }
@@ -266,6 +276,17 @@ object DungeonFriendRelay {
     }
 
     fun partyPolicy(name: String): PartyPolicy? = partyPolicies[name.lowercase()]?.takeIf { it.first > DungeonFriends.now() }?.second
+
+    private fun cachePolicy(name: String, value: JsonObject?) {
+        val policy = value?.let {
+            val uuid = it.get("uuid").asString
+            val floor = tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.valueOf(it.get("floor").asString)
+            val limit = it.get("maxPbMillis")?.takeUnless { it.isJsonNull }?.asLong
+            check(uuid.matches(Regex("[a-f0-9]{32}")) && floor in FRIEND_FLOORS && (limit == null || limit in 1..59999999))
+            PartyPolicy(uuid, DungeonJoinPolicy(floor, limit, it.get("open").asBoolean))
+        }
+        partyPolicies[name] = DungeonFriends.now() + 20000 to policy
+    }
 
     fun requestPolicies(names: List<String>) {
         val now = DungeonFriends.now()
