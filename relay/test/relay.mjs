@@ -175,11 +175,29 @@ try {
   const oldRefresh = await cache(modernBob, lookup);
   assert.equal((await cache(modernBob, { ...entry, upload: oldRefresh.upload })).stored, false);
   alice.ws.send("ping"); assert.equal(await alice.next(), "pong"); // Stale uploads produce no update.
+  modernBob.ws.send(JSON.stringify({ type: "party_set", name: "Alice", uuid: identities.get("Alice"),
+    floor: "F7", open: true, selectedClass: "TANK" }));
+  modernBob.ws.send("ping"); assert.equal(await modernBob.next(), "pong");
+  assert.deepEqual(await alice.next(), { type: "party_update", name: "Bob", uuid: identities.get("Bob"),
+    floor: "F7", maxPbMillis: null, open: true, selectedClass: "TANK" }); // Identity belongs to the authenticated player.
+  const changedClass = (await cache(alice, lookup)).record;
+  assert.equal(changedClass.stats.selectedClass, "TANK");
+  assert.equal(changedClass.fetchedAt, liveStats.record.fetchedAt); // Class change does not renew PB freshness.
+  assert.deepEqual(changedClass.stats.sPlusTimes, improved.stats.sPlusTimes);
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.equal((await policies(alice, ["Bob"])).parties.bob.selectedClass, "TANK");
+  const classRefresh = await cache(modernBob, lookup);
+  assert.equal((await cache(modernBob, { ...improved, fetchedAt: Date.now(), upload: classRefresh.upload })).stored, true);
+  assert.equal((await alice.next()).record.stats.selectedClass, "TANK"); // A later API upload cannot undo a live class.
   carol.ws.send("ping"); assert.equal(await carol.next(), "pong"); // Neither stats nor policy pushes cross rooms.
   const invalidPolicy = await connect("InvalidPolicy", "testing"); invalidPolicy.authenticate(); await invalidPolicy.next();
   const policyClosed = closeEvent(invalidPolicy.ws);
   invalidPolicy.ws.send(JSON.stringify({ type: "party_set", floor: "F7", maxPbMillis: -1, open: true }));
   assert.equal((await policyClosed).code, 1008);
+  const invalidClass = await connect("InvalidPolicy", "testing"); invalidClass.authenticate(); await invalidClass.next();
+  const classClosed = closeEvent(invalidClass.ws);
+  invalidClass.ws.send(JSON.stringify({ type: "party_set", floor: "F7", open: true, selectedClass: "FARMER" }));
+  assert.equal((await classClosed).code, 1008);
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

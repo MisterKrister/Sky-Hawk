@@ -9,6 +9,7 @@ import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.config.instances.dungeons.PartyListing
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.PlayerUtils.sendCommand
+import me.mycellium.skymyce.utils.Utils.displayTitle
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents
@@ -53,6 +54,7 @@ object DungeonFriends : SkyMyceModule() {
     private val receivedOffers = mutableMapOf<String, DungeonLfgOffer>()
     private var lastJoinStatus = ""
     private var nextJoinStatsCheck = 0L
+    private val joinedTitles = mutableMapOf<String, Long>()
     var partyFloor: DungeonFloor? = null
         private set
     var partyRevision = 0L
@@ -108,6 +110,7 @@ object DungeonFriends : SkyMyceModule() {
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
         partyBorders.tick(now()) { it.send() }
         replies.prune(now())
+        joinedTitles.entries.removeIf { it.value <= now() }
         sentOffers.entries.removeIf { it.value.expires <= now() }
         receivedOffers.entries.removeIf { it.value.expires <= now() }
         joining.prune(now())
@@ -135,7 +138,7 @@ object DungeonFriends : SkyMyceModule() {
                 PartyAPI.leader?.name.equals(self.name.string, true) || PartyAPI.members.any { it.uuid == self.uuid && it.role.name == "MOD" })
             val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canInvite, partySize,
                 partyFloor ?: DungeonFriendsSettings.availability.floor, openClasses, party.members.toSet())
-            DungeonFriendRelay.publishPolicy(context.policy)
+            DungeonFriendRelay.publishPolicy(context.policy, DungeonFriendStatsCache.get(self.name.string)?.selectedClass)
             joining.nextCommand(context, now(), DungeonFriendStatsCache::verified)?.let {
                 sendJoinAction(it)
                 nextAction = now() + 1000
@@ -264,6 +267,20 @@ object DungeonFriends : SkyMyceModule() {
             partyRevision++
             nextPartyRequest = 0
         }
+        dungeonClassChange(message, MC.player.name.string)?.let { (name, clazz) ->
+            val uuid = if (name.equals(MC.player.name.string, true)) MC.player.uuid else
+                PartyAPI.members.firstOrNull { it.name.equals(name, true) }?.uuid ?: FriendsAPI.getFriend(name)?.uuid
+            if (name.equals(MC.player.name.string, true) || name.lowercase() in party.members) {
+                onClassChange(name, uuid?.toString()?.replace("-", ""), clazz)
+            }
+        }
+        DungeonFriendParty.joinedPlayer(message)?.let { name ->
+            if (DungeonFriendsSettings.titleNotifications && !name.equals(MC.player.name.string, true) && name.lowercase() !in joinedTitles) {
+                joinedTitles[name.lowercase()] = now() + 5000
+                val clazz = party.classes[name.lowercase()] ?: joining.classFor(name) ?: DungeonFriendStatsCache.get(name)?.selectedClass
+                displayTitle("§f$name joined your party", partyFloor?.let { dungeonTitleDetails(it, listOfNotNull(clazz)) }.orEmpty())
+            }
+        }
         joinedPartyLeader(message)?.let { leader ->
             currentLeader = leader
             awaitingRoster = true
@@ -288,6 +305,10 @@ object DungeonFriends : SkyMyceModule() {
         var replacement: Component? = null
         var noticePlayer = ""
         serverPartyInviter(event.component)?.let { inviter ->
+            if (DungeonFriendsSettings.titleNotifications) {
+                val details = joining.inviteDetails(inviter, now())
+                displayTitle("§f$inviter has invited you", dungeonTitleDetails(details?.first, listOfNotNull(details?.second)))
+            }
             if (joining.expectsInvite(inviter, now())) {
                 noticePlayer = inviter
                 replacement = Component.literal("§b[Party] §fYou have been invited to $inviter's party")
@@ -335,6 +356,9 @@ object DungeonFriends : SkyMyceModule() {
             message.append(Component.literal("  §a[Yes]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${offer.request.token}")) })
             message.append(Component.literal("  §c[No]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${offer.request.token}")) })
             partyMessage(name, message)
+            if (DungeonFriendsSettings.titleNotifications) {
+                displayTitle("§f$name has invited you", dungeonTitleDetails(offer.request.floor, offer.request.classes))
+            }
         } else if (request != null) {
             val manual = sentOffers[name.lowercase()]?.takeIf { it.expires > now() && it.request == request } != null
             if (joining.receiveRequest(name, request, now(), manual)) {
@@ -359,6 +383,22 @@ object DungeonFriends : SkyMyceModule() {
         if (MC.instance.player != null) message.send("skymyce:party:${name.lowercase()}")
     }
 
+    fun onClassChange(name: String, uuid: String?, clazz: DungeonClass) {
+        val self = MC.instance.player ?: return
+        val friend = FriendsAPI.getFriend(name)
+        val member = PartyAPI.members.firstOrNull { it.name.equals(name, true) }
+        val own = name.equals(self.name.string, true)
+        val knownUuid = (if (own) self.uuid else friend?.uuid ?: member?.uuid)?.toString()?.replace("-", "")
+        if (uuid != null && knownUuid != null && uuid != knownUuid) return
+        if (!own && friend == null && name.lowercase() !in party.members && DungeonFriendStatsCache.get(name) == null) return
+        DungeonFriendStatsCache.updateClass(name, uuid ?: knownUuid, clazz)
+        if (name.lowercase() in party.members && party.classes[name.lowercase()] != clazz) {
+            party.classes[name.lowercase()] = clazz
+            party.advance()
+            saveParty()
+        }
+    }
+
     private fun notify(text: String, name: String) {
         partyMessage(name, Component.literal("§b[Party] §f$text"))
     }
@@ -376,6 +416,7 @@ object DungeonFriends : SkyMyceModule() {
             if (command.startsWith("party invite ")) {
                 val name = command.substringAfterLast(' ')
                 notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...", name)
+                replies.invited(name, now())
             }
             sendPartyAction(command)
             return true
@@ -409,7 +450,7 @@ object DungeonFriends : SkyMyceModule() {
     }
 
     fun invite(friend: OnlineDungeonFriend) {
-        if (action(friend, "p ${friend.name}")) replies.forget(friend.name)
+        if (action(friend, "p ${friend.name}")) replies.invited(friend.name, now())
     }
 
     fun message(friend: OnlineDungeonFriend, floor: DungeonFloor, clazz: DungeonClass?) {
@@ -474,6 +515,7 @@ object DungeonFriends : SkyMyceModule() {
         nextPartyRequest = 0
         nextAction = 0
         replies.clear()
+        joinedTitles.clear()
         sentOffers.clear()
         receivedOffers.clear()
         lastJoinStatus = ""
@@ -494,7 +536,10 @@ object DungeonFriends : SkyMyceModule() {
 
     @Subscription
     fun onProfileChange(event: ProfileChangeEvent) {
-        MC.instance.player?.let { DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true, bypassShared = true) }
+        MC.instance.player?.let {
+            DungeonFriendStatsCache.forgetLiveClass(it.name.string)
+            DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true, bypassShared = true)
+        }
     }
 
     fun now(): Long = System.nanoTime() / 1000000

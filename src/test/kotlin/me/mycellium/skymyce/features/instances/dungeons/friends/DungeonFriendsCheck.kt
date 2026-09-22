@@ -152,6 +152,20 @@ fun main() {
     check(DungeonFriendStatsCache.get("Alice")?.sPlusTimes?.get(F7) == 290000L)
     check(!DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
     DungeonFriendStatsCache.clear()
+    check(DungeonFriendStatsCache.receiveShared(sharedJson, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), TANK))
+    check(DungeonFriendStatsCache.get("Alice") == known.copy(selectedClass = TANK))
+    check(DungeonFriendStatsCache.verified("Alice") == null) // Class updates cannot renew an expired PB.
+    val classVersion = DungeonFriendStatsCache.version
+    check(!DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), TANK))
+    check(DungeonFriendStatsCache.version == classVersion)
+    check(!DungeonFriendStatsCache.updateClass("Alice", "b".repeat(32), HEALER))
+    check(DungeonFriendStatsCache.receiveShared(improved, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice")?.selectedClass == TANK) // A late stats result cannot undo the live class.
+    DungeonFriendStatsCache.forgetLiveClass("Alice")
+    check(DungeonFriendStatsCache.receiveShared(improved.deepCopy().apply { addProperty("fetchedAt", 1000075) }, "Alice", "a".repeat(32), 1000100))
+    check(DungeonFriendStatsCache.get("Alice")?.selectedClass == ARCHER) // A profile change releases the live override.
+    DungeonFriendStatsCache.clear()
     check(sharedDungeonFriend(sharedJson, "Bob", null, 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", "b".repeat(32), 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", null, 1600000) == null)
@@ -357,6 +371,17 @@ fun main() {
     check(newlyAddedFriend("From Alice: You are now friends with Bob") == null)
     check(newlyAddedFriend("You are now friends with invalid/name") == null)
     check(newlyAddedFriend("You sent a friend request to Alice!") == null)
+    check(dungeonClassChange("You have selected the Berserk Dungeon Class!", "Self") == "Self" to BERSERKER)
+    check(dungeonClassChange("§aYou have selected the Mage Dungeon Class! §8(§7x§r2§8)", "Self") == "Self" to MAGE)
+    check(dungeonClassChange("Party Finder > Cessna808 set their class to Healer Level 49!", "Self") == "Cessna808" to HEALER)
+    check(dungeonClassChange("Party Finder > [MVP+] Alice set their class to Archer Level 44!", "Self") == "Alice" to ARCHER)
+    check(dungeonClassChange("Party > Alice: You have selected the Tank Dungeon Class!", "Self") == null)
+    check(dungeonClassChange("You have selected the Farmer Dungeon Class!", "Self") == null)
+    check(dungeonTitleDetails(F7, listOf(MAGE)) == "to play §aF7§f as §bMage")
+    check(dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER)) == "to play §cM7§f as §aTank§f/§6Berserk§f/§cArcher§f/§dHealer") {
+        dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER))
+    }
+    check(dungeonTitleDetails(null, emptyList()) == "to their party")
 
     val replies = DungeonLfgReplies()
     replies.receive("Alice", "yes", 0)
@@ -377,6 +402,13 @@ fun main() {
     replies.sent("Alice", 400000)
     check(replies.get("Alice")?.status == LfgReplyStatus.WAITING)
     replies.forget("Alice")
+    check(replies.get("Alice") == null)
+    replies.invited("Alice", 500000)
+    check(replies.get("Alice")?.status == LfgReplyStatus.INVITED)
+    replies.prune(560000)
+    check(replies.get("Alice") == null)
+    replies.invited("Alice", 600000)
+    replies.forget("Alice") // Joining the roster clears the pending row marker.
     check(replies.get("Alice") == null)
 
     // Match SkyBlockPv's public getters, including Kotlin's encoded Duration representation.

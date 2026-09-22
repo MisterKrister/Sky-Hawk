@@ -43,6 +43,8 @@ object DungeonFriendsSettings {
         private set
     var availability = DungeonAvailability()
         private set
+    var titleNotifications = false
+        private set
     var lastParty: SavedDungeonParty? = null
         private set
     var relayUrl = "wss://skyblock-relay.skyblock-relay.workers.dev/websocket"
@@ -82,6 +84,7 @@ object DungeonFriendsSettings {
             messageTemplate = template
             secondaryClasses = secondary
             availability = available
+            titleNotifications = json.get("titleNotifications")?.asBoolean ?: false
             lastParty = savedParty
             relayUrl = relay.trim()
         } catch (_: Exception) {
@@ -96,6 +99,7 @@ object DungeonFriendsSettings {
         available: DungeonAvailability = availability,
         savedParty: SavedDungeonParty? = lastParty,
         relay: String = relayUrl,
+        titles: Boolean = titleNotifications,
     ): Boolean {
         load()
         if (error != null) return false
@@ -109,7 +113,7 @@ object DungeonFriendsSettings {
             try {
                 Files.newBufferedWriter(temporary).use { writer ->
                     gson.toJson(mapOf("messageTemplate" to template, "secondaryClasses" to classes,
-                        "availability" to available, "lastParty" to savedParty, "relayUrl" to relay.trim()), writer)
+                        "availability" to available, "lastParty" to savedParty, "relayUrl" to relay.trim(), "titleNotifications" to titles), writer)
                 }
                 try {
                     Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
@@ -122,6 +126,7 @@ object DungeonFriendsSettings {
             messageTemplate = template
             secondaryClasses = classes
             availability = available
+            titleNotifications = titles
             lastParty = savedParty
             relayUrl = relay.trim()
             return true

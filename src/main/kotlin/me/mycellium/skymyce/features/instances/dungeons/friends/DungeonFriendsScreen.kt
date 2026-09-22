@@ -28,6 +28,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var classesDraft = emptySet<DungeonClass>()
     private var availableDraft = emptySet<DungeonClass>()
     private var pbLimitDraft = ""
+    private var titlesDraft = false
     private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
@@ -271,10 +272,13 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
             padding(Insets.of(6))
             gap(5)
-            surface(Surface.flat(0xFF17212A.toInt()))
             val secondary = DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()].orEmpty()
                 .filter { it != stats?.selectedClass }
             val reply = DungeonFriends.replies.get(friend.name)
+            val pendingInvite = reply?.status in setOf(LfgReplyStatus.WAITING, LfgReplyStatus.INVITED)
+            surface(if (pendingInvite) Surface.flat(0xFF29231C.toInt()).and(Surface { graphics, component ->
+                graphics.fill(component.x(), component.y(), component.x() + 2, component.y() + component.height(), 0xFFFFAA00.toInt())
+            }) else Surface.flat(0xFF17212A.toInt()))
             val accepted = reply?.status == LfgReplyStatus.ACCEPTED
             val availability = stats?.state?.takeIf { it != StatsState.AVAILABLE }?.label
                 ?: if (stats == null) "Waiting for SkyBlock stats" else "SkyBlock profile stats"
@@ -344,6 +348,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         classesDraft = DungeonFriendsSettings.secondaryClasses[friend?.lowercase()].orEmpty()
         availableDraft = DungeonFriendsSettings.availability.classes
         pbLimitDraft = DungeonFriendsSettings.availability.maxPbMillis?.let(::formatDungeonTime).orEmpty()
+        titlesDraft = DungeonFriendsSettings.titleNotifications
         settingsOpen = true
         rebuild()
     }
@@ -361,6 +366,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun settingsContent(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(8)
         if (editingFriend == null) {
+            child(button("Title notifications: ${if (titlesDraft) "On" else "Off"}", 164) { button ->
+                titlesDraft = !titlesDraft
+                button.message = Component.literal("Title notifications: ${if (titlesDraft) "On" else "Off"}")
+            }.tooltip(Component.literal("Show invitations and players joining your party as titles.")))
             child(label("AVAILABLE FOR ${floor.name}", CYAN))
             DungeonClass.entries.chunked(((panelWidth - 28) / 98).coerceIn(1, 5)).forEach { group ->
                 child(row().apply {
@@ -423,7 +432,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     if (classesDraft.isEmpty()) classes.remove(name) else classes[name] = classesDraft
                 }
                 val changedAvailability = available != DungeonFriendsSettings.availability
-                if (DungeonFriendsSettings.save(templateDraft, classes, available)) {
+                if (DungeonFriendsSettings.save(templateDraft, classes, available, titles = titlesDraft)) {
                     if (changedAvailability) DungeonFriends.joining.clear()
                     settingsOpen = false
                     rebuild()

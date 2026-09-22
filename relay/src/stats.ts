@@ -1,4 +1,4 @@
-const classes = ["HEALER", "MAGE", "BERSERKER", "ARCHER", "TANK"];
+export const classes = ["HEALER", "MAGE", "BERSERKER", "ARCHER", "TANK"];
 const floors = [...Array(7)].flatMap((_, i) => [`F${i + 1}`, `M${i + 1}`]);
 export const STATS_TTL = 600_000;
 export type CachedStats = { uuid: string; name: string; stats: Record<string, unknown>; fetchedAt: number };
@@ -47,6 +47,12 @@ export class SharedStats {
     ).toArray()[0];
     if (!row || (uuid && row.uuid !== uuid)) return null;
     return { uuid: row.uuid, name: row.name, stats: JSON.parse(row.stats), fetchedAt: row.fetched_at };
+  }
+
+  selectClass(name: string, uuid: string, selectedClass: string): void {
+    // Class changes do not renew the age of PBs or any other cached stats.
+    this.sql.exec("UPDATE player_stats SET stats = json_set(stats, '$.selectedClass', ?) WHERE uuid = ? AND name = ?",
+      selectedClass, uuid, name);
   }
 
   put(record: CachedStats, publisher: string, now: number, ownRefresh = false): boolean {

@@ -185,8 +185,29 @@ fun newlyAddedFriend(message: String): String? = Regex(
 ).matchEntire(message.replace(Regex("§."), "").trim())?.groupValues?.get(1)
 
 enum class LfgReplyStatus(val label: String) {
-    WAITING("§7Awaiting reply"), ACCEPTED("§aAccepted"), DECLINED("§cDeclined"), REPLIED("§eReplied"),
+    WAITING("§6Awaiting reply"), INVITED("§6Invited"), ACCEPTED("§aAccepted"), DECLINED("§cDeclined"), REPLIED("§eReplied"),
 }
+
+fun dungeonClassChange(message: String, self: String): Pair<String, DungeonClass>? {
+    val text = message.replace(Regex("§."), "").trim().replace(Regex("\\s+\\(x\\d+\\)$"), "")
+    val own = Regex("^You have selected the (\\w+) Dungeon Class!$").matchEntire(text)
+    if (own != null) return parseDungeonClass(own.groupValues[1])?.let { self to it }
+    val other = Regex("^Party Finder > (?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16}) set their class to (\\w+) Level \\d+!$")
+        .matchEntire(text) ?: return null
+    return parseDungeonClass(other.groupValues[2])?.let { other.groupValues[1] to it }
+}
+
+fun coloredDungeonClass(clazz: DungeonClass): String = when (clazz) {
+    DungeonClass.MAGE -> "§b"
+    DungeonClass.TANK -> "§a"
+    DungeonClass.BERSERKER -> "§6"
+    DungeonClass.ARCHER -> "§c"
+    DungeonClass.HEALER -> "§d"
+} + clazz.displayName
+
+fun dungeonTitleDetails(floor: DungeonFloor?, classes: Collection<DungeonClass>): String =
+    (floor?.let { "to play ${if (it.name.startsWith('M')) "§c" else "§a"}${it.name}§f" } ?: "to their party") +
+        if (classes.isEmpty()) "" else " as ${classes.joinToString("§f/") { coloredDungeonClass(it) }}"
 
 fun classifyLfgReply(message: String): LfgReplyStatus {
     val text = message.lowercase().replace('’', '\'').replace(',', ' ').trim().replace(Regex("\\s+"), " ")
@@ -209,6 +230,10 @@ class DungeonLfgReplies {
     fun get(name: String): LfgReply? = replies[name.lowercase()]
     fun sent(name: String, now: Long) {
         replies[name.lowercase()] = LfgReply(LfgReplyStatus.WAITING, "", now + 300000)
+        version++
+    }
+    fun invited(name: String, now: Long) {
+        replies[name.lowercase()] = LfgReply(LfgReplyStatus.INVITED, get(name)?.text.orEmpty(), now + 60000)
         version++
     }
     fun receive(name: String, text: String, now: Long) {
@@ -285,6 +310,7 @@ class DungeonFriendParty {
         private val OWN_JOIN = Regex("^You have joined $PLAYER's? party!$")
         private val LEFT = Regex("^(?:\\[Party] )?$PLAYER (?:has left|has been removed from) the party\\.$")
         private val CLASS_JOIN = Regex("^Party Finder > $PLAYER joined the dungeon group! \\((\\w+) Level \\d+\\)$")
+        fun joinedPlayer(message: String): String? = (JOIN.matchEntire(message) ?: CLASS_JOIN.matchEntire(message))?.groupValues?.get(1)
         private val LEAVE = Regex("^(?:You left the party\\.|You have been kicked from the party by .+|You are not (?:currently )?in a party\\.|The party was disbanded.*|(?:\\[[^]]+] )?[A-Za-z0-9_]{1,16} has disbanded the party!)$")
     }
 }

@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyAccount } from "./auth";
-import { SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
+import { classes, SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
 
 type RelayEnv = Env;
-type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean };
+type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
 type Session = {
   challenge: string;
   expires: number;
@@ -121,13 +121,18 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       session.partyCredits--;
       if (data.type === "party_set") {
         const limit = data.maxPbMillis ?? null;
+        const selectedClass = data.selectedClass ?? undefined;
         if (typeof data.floor !== "string" || !/^[FM][1-7]$/.test(data.floor) || typeof data.open !== "boolean" ||
+            (selectedClass !== undefined && (typeof selectedClass !== "string" || !classes.includes(selectedClass))) ||
             (limit !== null && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || limit > 59999999))) {
           ws.close(1008, "Invalid party policy"); return;
         }
         // A policy belongs to the authenticated socket, never to a client-supplied name.
-        const party = { floor: data.floor, maxPbMillis: limit, open: data.open };
+        const party = { floor: data.floor, maxPbMillis: limit, open: data.open, selectedClass: selectedClass as string | undefined };
         const changed = JSON.stringify(session.party) !== JSON.stringify(party);
+        if (party.selectedClass && party.selectedClass !== session.party?.selectedClass) {
+          this.stats.selectClass(session.name, session.uuid!, party.selectedClass);
+        }
         session.party = party;
         ws.serializeAttachment(session);
         if (changed) this.broadcast(ws, { type: "party_update", name: session.name, uuid: session.uuid, ...party });
@@ -178,6 +183,11 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.uploads = session.uploads.filter(it => it !== grant);
         ws.serializeAttachment(session);
         const record = { name: data.name, uuid: data.uuid, stats, fetchedAt: Math.min(data.fetchedAt as number, now) };
+        const live = this.ctx.getWebSockets().find(other => other.readyState === WebSocket.OPEN &&
+          (other.deserializeAttachment() as Session).uuid === record.uuid)?.deserializeAttachment() as Session | undefined;
+        if (live?.name?.toLowerCase() === record.name.toLowerCase() && live.party?.selectedClass) {
+          record.stats.selectedClass = live.party.selectedClass;
+        }
         const ownRefresh = session.liveUpdates === true && data.uuid === session.uuid && data.name.toLowerCase() === session.name.toLowerCase();
         const stored = this.stats.put(record, session.uuid!, now, ownRefresh);
         ws.send(JSON.stringify({ type: "stats_result", id: data.id, stored }));

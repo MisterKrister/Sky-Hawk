@@ -197,6 +197,9 @@ class DungeonFriendJoining {
         it.first.equals(name, true) && it.second.expires > now && it.second.offered != null
     } == true
 
+    fun inviteDetails(name: String, now: Long): Pair<DungeonFloor, DungeonClass>? =
+        outgoing?.takeIf { expectsInvite(name, now) }?.second?.let { it.data.floor to it.offered!! }
+
     fun request(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): String {
         outgoing = name.lowercase() to Request(data, now + 60000, manual = manual)
         statusPlayer = name
