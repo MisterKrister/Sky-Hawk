@@ -40,7 +40,6 @@ data class DungeonFriendStats(
     val completedFloors: Set<DungeonFloor> = emptySet(),
     val selectedClass: DungeonClass? = null,
 ) {
-    val bestClass: DungeonClass? get() = classes.maxByOrNull { it.value }?.key
     val highestFloor: DungeonFloor? get() = FRIEND_FLOORS.lastOrNull { it in completedFloors }
 
     fun eligible(floor: DungeonFloor): Boolean = when (state) {
@@ -147,8 +146,8 @@ fun friendComparator(stats: Map<String, DungeonFriendStats>, floor: DungeonFloor
 }
 
 fun matchesFriendClass(stats: DungeonFriendStats?, secondary: Set<DungeonClass>, wanted: Set<DungeonClass>): Boolean =
-    wanted.isEmpty() || stats?.bestClass in wanted || secondary.any { it in wanted } ||
-        ((stats?.bestClass == null || stats.state == StatsState.HIDDEN || stats.state == StatsState.UNAVAILABLE) && secondary.isEmpty())
+    wanted.isEmpty() || stats?.selectedClass in wanted || secondary.any { it in wanted } ||
+        ((stats?.selectedClass == null || stats.state == StatsState.HIDDEN || stats.state == StatsState.UNAVAILABLE) && secondary.isEmpty())
 
 fun nextMissingClass(current: DungeonClass?, occupied: Collection<DungeonClass>): DungeonClass? =
     current?.takeIf { it !in occupied } ?: DungeonClass.entries.firstOrNull { it !in occupied }

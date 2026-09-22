@@ -25,6 +25,7 @@ object DungeonFriendStatsCache {
     private var nextRequest = 0L
     private var apiKey = ""
     private var feedback = ""
+    val pendingCount: Int get() = pending.size + if (inFlight != null) 1 else 0
     val status: String get() = feedback.ifEmpty {
         inFlight?.let { "Loading PBs: $it (${pending.size} queued)" }
             ?: if (pending.isNotEmpty()) "Loading PBs: ${pending.size} queued" else ""

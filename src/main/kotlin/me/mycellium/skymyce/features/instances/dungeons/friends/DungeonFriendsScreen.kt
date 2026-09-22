@@ -40,6 +40,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
     private lateinit var sortButton: ButtonComponent
+    private lateinit var refreshButton: ButtonComponent
     private val sortHeaders = mutableMapOf<FriendSort, Pair<ButtonComponent, String>>()
     private val actions = mutableListOf<ButtonComponent>()
     private val joinActions = mutableListOf<ButtonComponent>()
@@ -92,6 +93,15 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             else -> DungeonFriendStatsCache.status.ifEmpty { "Configure SkyBlock stats" }
         }))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
+        val remaining = DungeonFriendStatsCache.pendingCount
+        val refreshing = LocationAPI.onHypixel && (DungeonFriends.scanner.scanning || remaining > 0)
+        refreshButton.message = Component.literal(if (refreshing) "§bRefresh${".".repeat(Math.floorMod(DungeonFriends.now() / 350, 3) + 1)}" else "Refresh")
+        refreshButton.active(LocationAPI.onHypixel && !refreshing)
+        refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else buildString {
+            append(DungeonFriends.scanner.status)
+            if (remaining > 0) append("\n$remaining player stats remaining")
+            DungeonFriendStatsCache.status.takeIf { it.isNotEmpty() }?.let { append("\n$it") }
+        }))
         relayStatus.text(Component.literal(DungeonFriendRelay.status))
         relayStatus.color(Color.ofRgb(if (DungeonFriendRelay.connected) CYAN else MUTED))
     }
@@ -212,10 +222,12 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     private fun toolbarActions(row: FlowLayout) {
         row.child(button(if (DungeonFriendsSettings.availability.enabled) "§aAvailable" else "Available", 76) { openSettings(null) })
-        row.child(button("Refresh", 50) {
+        refreshButton = button("Refresh", 64) {
             DungeonFriends.scanner.refresh(DungeonFriends.now())
             DungeonFriendStatsCache.refresh()
-        })
+            it.active(false)
+        }
+        row.child(refreshButton)
         row.child(button("Settings", 54) { openSettings(null) })
     }
 
@@ -229,7 +241,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun messageClass(friend: OnlineDungeonFriend): DungeonClass? {
         val wanted = wantedClasses()
         val stats = DungeonFriendStatsCache.get(friend.name)
-        return stats?.bestClass?.takeIf { it in wanted }
+        return stats?.selectedClass?.takeIf { it in wanted }
             ?: DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()]?.firstOrNull { it in wanted }
             ?: wanted.firstOrNull()
     }
@@ -285,9 +297,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             val identity = UIContainers.verticalFlow(Sizing.expand(), Sizing.content()).apply {
                 gap(3)
                 child(label(friend.name).horizontalSizing(Sizing.fill()))
-                child(label(friend.badge, MUTED).horizontalSizing(Sizing.fill()))
+                child(label(stats?.selectedClass?.displayName ?: "Unknown", if (stats?.selectedClass != null) CYAN else MUTED)
+                    .horizontalSizing(Sizing.fill()))
                 if (reply != null) child(label(reply.status.label).horizontalSizing(Sizing.fill()))
-                tooltip(Component.literal("${friend.location}\n$availability${reply?.text?.takeIf { it.isNotEmpty() }?.let { "\nReply: $it" }.orEmpty()}"))
+                tooltip(Component.literal("${friend.badge}§r\n${friend.location}\nLast played: ${stats?.selectedClass?.displayName ?: "Unknown"}\n$availability${reply?.text?.takeIf { it.isNotEmpty() }?.let { "\nReply: $it" }.orEmpty()}"))
             }
             child(row().apply {
                 child(identity)
@@ -324,14 +337,14 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         }
 
     private fun statColumns(row: FlowLayout, stats: DungeonFriendStats?, titles: Boolean) {
-        val best = stats?.bestClass
+        val selected = stats?.selectedClass
         if (!titles) row.child(label(stats?.catacombs?.toString() ?: "—").horizontalSizing(Sizing.fixed(32)))
         displayedClasses.forEach { (clazz, heading) ->
             row.child(UIContainers.verticalFlow(if (titles) Sizing.fill(20) else Sizing.fixed(42), Sizing.content()).apply {
                 gap(3)
                 if (titles) child(label(heading, MUTED))
-                child(label(stats?.classes?.get(clazz)?.toString() ?: "—", if (clazz == best) CYAN else WHITE))
-                tooltip(Component.literal("${clazz.displayName}${if (clazz == best) " (highest class)" else ""}\n${stats?.state?.label ?: "Waiting for SkyBlock stats"}"))
+                child(label(stats?.classes?.get(clazz)?.toString() ?: "—", if (clazz == selected) CYAN else WHITE))
+                tooltip(Component.literal("${clazz.displayName}${if (clazz == selected) " (last played)" else ""}\n${stats?.state?.label ?: "Waiting for SkyBlock stats"}"))
             })
         }
         if (!titles) row.child(label(stats?.sPlusTimes?.get(floor)?.let(::formatDungeonTime) ?: "—", CYAN)

@@ -117,7 +117,7 @@ fun main() {
             }
         }
     }""")
-    check(known.catacombs == 52 && known.bestClass == ARCHER && known.classes.size == 2)
+    check(known.catacombs == 52 && known.classes[ARCHER] == 52 && known.classes.size == 2)
     check(known.classes[MAGE] == 2 && known.selectedClass == ARCHER)
     check(known.highestFloor == M7) // Completion count sets defaults, but isn't a PB for eligibility.
     check(known.eligible(F7) && known.eligible(M1) && !known.eligible(M7))
@@ -147,7 +147,7 @@ fun main() {
         check(allFloors.completionTimes[floor] == (if (master) 180000L else 60000L) + floor.floorNumber * 1000L)
     }
     check(allFloors.classes == mapOf(HEALER to 0, MAGE to 1, BERSERKER to 2, ARCHER to 3, TANK to 4))
-    check(allFloors.bestClass == TANK)
+    check(allFloors.selectedClass == null)
     check(parse("""{"dungeons":{"player_classes":{"berserker":{"experience":125}}}}""").classes[BERSERKER] == 2)
     check(parse("""{"dungeons":{"player_classes":{"berserk":{"experience":235},"berserker":{"experience":50}}}}""").classes[BERSERKER] == 3)
     check(dungeonLevel(769809640.0) == 51 && dungeonLevel(569809640.0) == 50)
@@ -163,18 +163,24 @@ fun main() {
 
     // Repeated list ticks and invalid names must not grow the pending request queue.
     DungeonFriendStatsCache.clear()
+    check(DungeonFriendStatsCache.pendingCount == 0)
     DungeonFriendStatsCache.request("Alice")
     DungeonFriendStatsCache.request("ALICE")
     DungeonFriendStatsCache.request("Bob")
     DungeonFriendStatsCache.request("invalid/name")
     check(DungeonFriendStatsCache.status == "Loading PBs: 2 queued")
+    check(DungeonFriendStatsCache.pendingCount == 2)
     DungeonFriendStatsCache.refresh()
     check(DungeonFriendStatsCache.status == "Loading PBs: 2 queued")
+    check(DungeonFriendStatsCache.pendingCount == 2)
     DungeonFriendStatsCache.clear()
     check(DungeonFriendStatsCache.status.isEmpty())
+    check(DungeonFriendStatsCache.pendingCount == 0)
 
     check(matchesFriendClass(hidden, emptySet(), setOf(TANK)))
-    check(matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(TANK)))
+    check(matchesFriendClass(known.copy(selectedClass = null), emptySet(), setOf(TANK)))
+    check(matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(ARCHER)))
+    check(!matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(TANK)))
     check(matchesFriendClass(known, setOf(TANK), setOf(TANK)))
     check(!matchesFriendClass(known, emptySet(), setOf(TANK)))
     check(parseDungeonClass("Berserk") == BERSERKER)
@@ -261,6 +267,12 @@ fun main() {
     check(viewerStats.sPlusTimes[F7] == 310000L && viewerStats.completionTimes[F7] == 300000L)
     check(viewerStats.sPlusTimes[M1] == null && viewerStats.completionTimes[M1] == 90000L)
     check(viewerStats.selectedClass == BERSERKER)
+    // The last-played class wins even when another class has more XP.
+    check(viewerStats.classes.getValue(ARCHER) > viewerStats.classes.getValue(BERSERKER))
+    check(matchesFriendClass(viewerStats, emptySet(), setOf(BERSERKER)))
+    check(!matchesFriendClass(viewerStats, emptySet(), setOf(ARCHER)))
+    check(matchesFriendClass(viewerStats, setOf(ARCHER), setOf(ARCHER)))
+    check(matchesFriendClass(viewerStats, emptySet(), emptySet()))
 
     val savedDirectory = Files.createTempDirectory("dungeon-friends-check")
     val savedFile = savedDirectory.resolve("stats.json")
@@ -293,6 +305,7 @@ fun main() {
         DungeonFriendStatsCache.refresh()
         check(DungeonFriendStatsCache.get("low")?.catacombs == 40)
         DungeonFriendStatsCache.disconnect()
+        check(DungeonFriendStatsCache.pendingCount == 0)
         DungeonFriendStatsCache.clear()
         DungeonFriendStatsCache.initialize(savedFile)
         check(DungeonFriendStatsCache.get("high")?.sPlusTimes == known.sPlusTimes)
