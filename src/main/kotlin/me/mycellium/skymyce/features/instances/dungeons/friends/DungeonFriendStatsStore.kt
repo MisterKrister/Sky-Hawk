@@ -1,6 +1,7 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import java.nio.file.AtomicMoveNotSupportedException
@@ -12,6 +13,29 @@ data class CachedDungeonFriend(val stats: DungeonFriendStats, val uuid: String?,
     // Failed first lookups may retry; successfully checked low/hidden profiles stay cached across sessions.
     fun shouldRefresh(now: Long): Boolean = now >= expires &&
         (stats.state == StatsState.UNAVAILABLE || (stats.catacombs ?: 0) > 40)
+}
+
+/** Shared stats are fresh reports from verified mod users, not a signed Hypixel response. */
+fun sharedDungeonFriend(json: JsonObject, name: String, uuid: String?, now: Long): CachedDungeonFriend? = runCatching {
+    require(json.get("name").asString.equals(name, true))
+    val id = json.get("uuid").asString
+    require(id.matches(Regex("[a-f0-9]{32}")) && (uuid == null || uuid == id))
+    val fetchedAt = json.get("fetchedAt").asLong
+    require(fetchedAt > now - 600000 && fetchedAt <= now + 60000)
+    val stats = GsonBuilder().create().fromJson(json.get("stats"), DungeonFriendStats::class.java)
+    validateDungeonFriendStats(stats)
+    require(stats.state != StatsState.UNAVAILABLE)
+    CachedDungeonFriend(stats, id, minOf(fetchedAt, now) + 600000)
+}.getOrNull()
+
+private fun validateDungeonFriendStats(stats: DungeonFriendStats) {
+    require(stats.state in StatsState.entries)
+    require(stats.catacombs == null || stats.catacombs in 0..10000)
+    requireNotNull(stats.classes).forEach { (key, level) -> require(key in DungeonClass.entries && level in 0..10000) }
+    listOf(requireNotNull(stats.completionTimes), requireNotNull(stats.sPlusTimes)).forEach { times ->
+        times.forEach { (floor, time) -> require(floor in FRIEND_FLOORS && time in 1..86400000L) }
+    }
+    require(requireNotNull(stats.completedFloors).all { it in FRIEND_FLOORS })
 }
 
 /** Only normalized stats/UUIDs are persisted, never API credentials or private messages. */
@@ -28,14 +52,7 @@ class DungeonFriendStatsStore(private val file: Path) {
             require(value.uuid == null || value.uuid.matches(Regex("[a-fA-F0-9]{32}")))
             require(value.expires >= 0)
             require(value.verifiedUntil >= 0)
-            val stats = requireNotNull(value.stats)
-            require(stats.state in StatsState.entries)
-            require(stats.catacombs == null || stats.catacombs >= 0)
-            requireNotNull(stats.classes).forEach { (key, level) -> require(key in DungeonClass.entries && level >= 0) }
-            listOf(requireNotNull(stats.completionTimes), requireNotNull(stats.sPlusTimes)).forEach { times ->
-                times.forEach { (floor, time) -> require(floor in FRIEND_FLOORS && time > 0) }
-            }
-            require(requireNotNull(stats.completedFloors).all { it in FRIEND_FLOORS })
+            validateDungeonFriendStats(requireNotNull(value.stats))
             name to value
         }
     }

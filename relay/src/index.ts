@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyAccount } from "./auth";
+import { SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
 
 type RelayEnv = Env;
 type Session = {
@@ -13,6 +14,9 @@ type Session = {
   updated: number;
   seen: string[];
   inbox: { id: string; from: string; expires: number }[];
+  uploads?: StatsGrant[];
+  cacheCredits?: number;
+  cacheUpdated?: number;
 };
 const username = /^[A-Za-z0-9_]{1,16}$/;
 const uuid = /^[a-f0-9]{32}$/;
@@ -39,9 +43,11 @@ export default {
 } satisfies ExportedHandler<RelayEnv>;
 
 export class RelayRoom extends DurableObject<RelayEnv> {
+  private readonly stats: SharedStats;
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    this.stats = new SharedStats(ctx.storage.sql);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -66,7 +72,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
 
   async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer): Promise<void> {
     const session = ws.deserializeAttachment() as Session;
-    if (typeof raw !== "string" || encoder.encode(raw).length > (session.name ? 2048 : 8192)) { ws.close(1009, "Message too large"); return; }
+    if (typeof raw !== "string" || encoder.encode(raw).length > 8192) { ws.close(1009, "Message too large"); return; }
     let data: Record<string, unknown>;
     try {
       data = JSON.parse(raw);
@@ -96,10 +102,44 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.uuid = profile.id;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2 }));
-      } catch { ws.close(1013, "Minecraft verification unavailable; retry later"); }
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true }));
+      } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
       return;
     }
+
+    if (data.type === "stats_get" || data.type === "stats_put") {
+      const now = Date.now();
+      session.cacheCredits = Math.min(30, (session.cacheCredits ?? 30) + (now - (session.cacheUpdated ?? now)) / 1000);
+      session.cacheUpdated = now;
+      if (session.cacheCredits < 1) { ws.send(JSON.stringify({ type: "stats_result", id: data.id, error: "rate_limited" })); return; }
+      session.cacheCredits--;
+      session.uploads = (session.uploads ?? []).filter(it => it.expires > now);
+      ws.serializeAttachment(session);
+      if (typeof data.id !== "string" || !uuid.test(data.id) || typeof data.name !== "string" || !username.test(data.name) ||
+          (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid)))) { ws.close(1008, "Invalid stats request"); return; }
+      if (data.type === "stats_get") {
+        const record = this.stats.get(data.name, data.uuid as string | undefined, now);
+        const grant: StatsGrant | undefined = record ? undefined : { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
+          token: crypto.randomUUID().replaceAll("-", ""), expires: now + 120_000 };
+        if (grant) session.uploads = [...session.uploads.filter(it => it.name !== grant.name).slice(-3), grant];
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "stats_result", id: data.id, record, upload: grant?.token }));
+      } else {
+        const grant = session.uploads.find(it => it.name === (data.name as string).toLowerCase() && it.token === data.upload && (!it.uuid || it.uuid === data.uuid));
+        const stats = validateStats(data.stats);
+        if (!grant || !stats || typeof data.uuid !== "string" || !Number.isSafeInteger(data.fetchedAt) ||
+            (data.fetchedAt as number) > now + 60_000 || (data.fetchedAt as number) <= now - STATS_TTL) {
+          ws.send(JSON.stringify({ type: "stats_result", id: data.id, error: "invalid_upload" })); return;
+        }
+        session.uploads = session.uploads.filter(it => it !== grant);
+        ws.serializeAttachment(session);
+        const stored = this.stats.put({ name: data.name, uuid: data.uuid, stats, fetchedAt: Math.min(data.fetchedAt as number, now) }, session.uuid!, now);
+        ws.send(JSON.stringify({ type: "stats_result", id: data.id, stored }));
+      }
+      return;
+    }
+
+    if (encoder.encode(raw).length > 2048) { ws.close(1009, "Message too large"); return; }
 
     if ((data.type !== "message" && data.type !== "ack") || typeof data.id !== "string" || !/^[a-f0-9]{32}$/.test(data.id) ||
         typeof data.to !== "string" || !username.test(data.to) || (data.type === "message" && (typeof data.text !== "string" ||
@@ -148,5 +188,5 @@ export class RelayRoom extends DurableObject<RelayEnv> {
   }
 
   webSocketClose(ws: WebSocket): void { ws.close(1000, "Client disconnected"); }
-  webSocketError(ws: WebSocket): void { ws.close(1011, "Connection error"); }
+  webSocketError(ws: WebSocket): void { console.error({ event: "websocket_error" }); ws.close(1011, "Connection error"); }
 }

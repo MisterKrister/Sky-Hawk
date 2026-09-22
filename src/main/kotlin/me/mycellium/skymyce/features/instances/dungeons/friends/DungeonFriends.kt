@@ -45,6 +45,9 @@ object DungeonFriends : SkyMyceModule() {
     private var restoredParty = false
     private var currentLeader: String? = null
     private val fallbackMessages = ArrayDeque<Triple<String, String, Boolean>>()
+    private val sentOffers = mutableMapOf<String, DungeonLfgOffer>()
+    private val receivedOffers = mutableMapOf<String, DungeonLfgOffer>()
+    private var lastJoinStatus = ""
     var partyFloor: DungeonFloor? = null
         private set
     var partyRevision = 0L
@@ -68,7 +71,12 @@ object DungeonFriends : SkyMyceModule() {
         ClientTickEvents.END_CLIENT_TICK.register { tick() }
         ClientSendMessageEvents.ALLOW_COMMAND.register { command ->
             if (!sendingScan && command.matches(Regex("(?i)(?:f|friend) list(?: \\d+)?"))) scanner.manualCommand(now())
-            true
+            val reply = Regex("(?i)^(?:msg|w|tell|whisper) ([A-Za-z0-9_]{1,16}) (.+)$").matchEntire(command)
+            val offer = reply?.groupValues?.get(1)?.lowercase()?.let(receivedOffers::get)
+            if (offer != null && offer.expires > now() && classifyLfgReply(reply.groupValues[2]) == LfgReplyStatus.ACCEPTED) {
+                relayReply(reply.groupValues[1], reply.groupValues[2])
+                false
+            } else true
         }
     }
 
@@ -77,6 +85,8 @@ object DungeonFriends : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock) fallbackMessages.clear()
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
         replies.prune(now())
+        sentOffers.entries.removeIf { it.value.expires <= now() }
+        receivedOffers.entries.removeIf { it.value.expires <= now() }
         joining.prune(now())
         syncParty()
         if (now() >= nextPartyRequest) {
@@ -98,13 +108,17 @@ object DungeonFriends : SkyMyceModule() {
         DungeonFriendStatsCache.tick()
         if (LocationAPI.isOnSkyBlock && now() >= nextAction && MC.connection != null) {
             val self = MC.player
-            val canInvite = DungeonFriendRelay.connected && canAct && (!PartyAPI.inParty || PartyAPI.allInvite || PartyAPI.leader?.uuid == self.uuid ||
+            val canInvite = canAct && (!PartyAPI.inParty || PartyAPI.allInvite || PartyAPI.leader?.uuid == self.uuid ||
                 PartyAPI.leader?.name.equals(self.name.string, true) || PartyAPI.members.any { it.uuid == self.uuid && it.role.name == "MOD" })
             val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canInvite, partySize,
                 partyFloor ?: DungeonFriendsSettings.availability.floor, openClasses, party.members.toSet())
             joining.nextCommand(context, now(), DungeonFriendStatsCache::verified)?.let {
                 sendJoinAction(it)
                 nextAction = now() + 1000
+            }
+            if (joining.status != lastJoinStatus) {
+                lastJoinStatus = joining.status
+                if (lastJoinStatus.contains("does not meet") || lastJoinStatus.endsWith("expired")) notify(lastJoinStatus)
             }
             if (now() >= nextAction && fallbackMessages.isNotEmpty()) {
                 val (name, text, reply) = fallbackMessages.removeFirst()
@@ -208,7 +222,7 @@ object DungeonFriends : SkyMyceModule() {
         }
         message.lines().mapNotNull(::newlyAddedFriend).forEach { name ->
             scanner.notification(name, true)
-            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true)
+            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true, bypassShared = true)
             scanner.refresh(now())
         }
         if (message.startsWith("You removed ") && message.endsWith(" from your friends list!")) {
@@ -247,10 +261,17 @@ object DungeonFriends : SkyMyceModule() {
             nextPartyRequest = minOf(nextPartyRequest, now() + 2000)
         }
         serverPartyInviter(event.component)?.let { inviter ->
-            if (LocationAPI.isOnSkyBlock && DungeonFriendsSettings.availability.enabled && solo) {
+            event.cancel()
+            MC.player.sendSystemMessage(Component.literal("§b[Party] §f$inviter invited you  §a[Join]")
+                .withStyle { it.withClickEvent(ClickEvent.RunCommand("/party accept $inviter")) })
+            if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
                 joining.invited(inviter, now())
                 checkJoinStats(inviter)
             }
+        }
+        compactPartyNotice(message, MC.player.name.string)?.let { notice ->
+            event.cancel()
+            notify(notice)
         }
     }
 
@@ -258,6 +279,7 @@ object DungeonFriends : SkyMyceModule() {
     fun onPrivateReply(event: PlayerMessageEvent) {
         if (!LocationAPI.onHypixel || event.type != ChatChannel.PRIVATE) return
         replies.receive(event.player, event.message, now())
+        acceptLfgReply(event.player, event.message)
     }
 
     private fun isFriend(name: String) = name.matches(Regex("[A-Za-z0-9_]{1,16}")) &&
@@ -267,60 +289,65 @@ object DungeonFriends : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock || !isFriend(name)) return false
         val knownUuid = FriendsAPI.getFriend(name)?.uuid?.toString()?.replace("-", "")
         if (knownUuid != null && knownUuid != uuid) return false
-        if (text == CONNECTION_TEST) {
-            MC.player.sendSystemMessage(Component.literal("§b[SkyMyce Connect] §fReceived a connection test from $name; replying."))
-            return true
-        }
+        if (text == "[SkyMyce Connection Test]") return false // Ignore diagnostics from older clients.
+        val offer = DungeonLfgOffer.parse(text, now())
         val request = DungeonJoinRequest.parse(text)
-        if (request != null) {
-            if (joining.receiveRequest(name, request, now())) checkJoinStats(name)
+        if (offer != null) {
+            if (receivedOffers.size >= 16 && name.lowercase() !in receivedOffers) return false
+            receivedOffers[name.lowercase()] = offer
+            val classes = offer.request.classes.joinToString("/") { it.displayName }
+            val message = Component.literal("§b$name §7wants you to join §b${offer.request.floor.name} §7as §f$classes")
+                .withStyle { it.withHoverEvent(net.minecraft.network.chat.HoverEvent.ShowText(Component.literal(offer.text))) }
+            message.append(Component.literal("  §a[Yes]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${offer.request.token}")) })
+            message.append(Component.literal("  §c[No]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${offer.request.token}")) })
+            MC.player.sendSystemMessage(message)
+        } else if (request != null) {
+            val manual = sentOffers[name.lowercase()]?.takeIf { it.expires > now() && it.request == request } != null
+            if (joining.receiveRequest(name, request, now(), manual)) {
+                if (manual) replies.receive(name, "yes", now())
+                sentOffers.remove(name.lowercase())
+                notify("$name has requested to join")
+                checkJoinStats(name)
+            }
         } else if (text.startsWith("Inviting you for ") && text.contains("[SkyMyce Ready ")) {
             joining.receiveOffer(name, text, now())
         } else {
-            val isReply = replies.get(name) != null
             replies.receive(name, text, now())
-            val message = Component.literal("§b[SkyMyce Relay] §f$name: $text")
-            if (!isReply) {
-                message.append(Component.literal(" §a[Yes]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes")) })
-                message.append(Component.literal(" §c[No]").withStyle { it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no")) })
-                message.append(Component.literal(" §b[Reply]").withStyle { it.withClickEvent(ClickEvent.SuggestCommand("/skymyce relaymsg $name ")) })
-            }
-            MC.player.sendSystemMessage(message)
+            acceptLfgReply(name, text)
+            MC.player.sendSystemMessage(Component.literal("§b$name §8» §f$text"))
         }
         return true
     }
 
-    fun testConnection(name: String) {
-        fun report(message: String) {
-            MC.instance.player?.sendSystemMessage(Component.literal("§b[SkyMyce Connect] §r$message"))
-        }
-        val player = MC.instance.player ?: return
-        val started = now()
-        val problem = when {
-            !name.matches(Regex("[A-Za-z0-9_]{1,16}")) -> "Enter a valid Minecraft username."
-            !LocationAPI.isOnSkyBlock -> "Join SkyBlock first; the relay connects there."
-            name.equals(player.name.string, true) -> "Choose another player to test the connection."
-            !DungeonFriendRelay.connected -> "${DungeonFriendRelay.status}. Check /skymyce pf > Settings > Player Relay."
-            !isFriend(name) -> "$name is not in your known friends. Add them and refresh /skymyce pf."
-            started < nextAction -> "Please wait a moment before testing again."
-            else -> null
-        }
-        if (problem != null) { report("§e$problem"); return }
-        nextAction = started + 1000
-        if (DungeonFriendRelay.send(name, CONNECTION_TEST, {
-            report("§aConnection to $name confirmed (${now() - started} ms round trip).")
-        }, {
-            report("§cNo relay reply from $name: offline, timed out, or connection lost. Both players need the mod and the same relay room.")
-        })) report("§7Testing connection to $name... Waiting up to 5 seconds for their mod.")
-        else report("§eCould not send the test: ${DungeonFriendRelay.status}. Try again shortly.")
+    private fun notify(text: String) {
+        MC.instance.player?.sendSystemMessage(Component.literal("§b[Party] §f$text"))
     }
 
-    private fun sendJoinAction(command: String) {
-        if (!command.startsWith("msg ")) { sendCommand(command); return }
+    private fun acceptLfgReply(name: String, text: String) {
+        val offer = sentOffers[name.lowercase()]?.takeIf { it.expires > now() } ?: return
+        if (classifyLfgReply(text) == LfgReplyStatus.ACCEPTED && isFriend(name)) {
+            joining.receiveAcceptedReply(name, offer.request, now())
+            sentOffers.remove(name.lowercase())
+            checkJoinStats(name)
+        }
+    }
+
+    private fun sendJoinAction(command: String): Boolean {
+        if (!command.startsWith("msg ")) {
+            if (command.startsWith("party invite ")) {
+                val name = command.substringAfterLast(' ')
+                notify("Inviting ${FriendsAPI.getFriend(name)?.name ?: scanner.online[name]?.name ?: name}...")
+            }
+            sendCommand(command)
+            return true
+        }
         val parts = command.split(' ', limit = 3)
         val name = parts[1]
         val token = parts[2].substringAfterLast(' ').removeSuffix("]")
-        if (!DungeonFriendRelay.send(name, parts[2], { joining.acknowledged(name, token) }, { joining.failed(name, token) })) joining.failed(name, token)
+        val failed = { if (joining.failed(name, token)) notify("Could not reach $name") }
+        val sent = DungeonFriendRelay.send(name, parts[2], { joining.acknowledged(name, token) }, failed)
+        if (!sent) failed()
+        return sent
     }
 
     private fun checkJoinStats(name: String) {
@@ -333,9 +360,11 @@ object DungeonFriends : SkyMyceModule() {
         if (!canJoin(floor) || MC.connection == null || friend.name.lowercase() !in scanner.online) return
         if (!friend.name.matches(Regex("[A-Za-z0-9_]{1,16}")) || friend.name.equals(MC.player.name.string, true)) return
         val request = DungeonJoinRequest(floor, DungeonFriendsSettings.availability.classes, UUID.randomUUID().toString().replace("-", "").take(16))
-        sendJoinAction(joining.request(friend.name, request, now()))
+        if (sendJoinAction(joining.request(friend.name, request, now()))) {
+            notify("Requested to join ${friend.name}")
+            checkJoinStats(friend.name)
+        }
         nextAction = now() + 1000
-        checkJoinStats(friend.name)
     }
 
     fun invite(friend: OnlineDungeonFriend) {
@@ -346,23 +375,39 @@ object DungeonFriends : SkyMyceModule() {
         val text = lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, clazz, floor)
         if (text.isEmpty() || !canAct || MC.connection == null || friend.name.lowercase() !in scanner.online || !isFriend(friend.name)) return
         replies.sent(friend.name, now())
-        sendLfg(friend.name, text, false)
+        val classes = clazz?.let(::setOf) ?: DungeonClass.entries.toSet()
+        val offer = DungeonLfgOffer(DungeonJoinRequest(floor, classes, UUID.randomUUID().toString().replace("-", "").take(16)), text, now() + 60000)
+        sentOffers[friend.name.lowercase()] = offer
+        sendLfg(friend.name, text, false, offer.message())
     }
 
     fun relayReply(name: String, text: String) {
         if (!LocationAPI.isOnSkyBlock || !isFriend(name) || now() < nextAction || text.length !in 1..220 || text.any { it < ' ' || it == '§' || it == '\u007f' }) return
-        sendLfg(name, text, true)
+        val offer = receivedOffers[name.lowercase()]?.takeIf { it.expires > now() }
+        val buttonReply = Regex("^(yes|no) ([a-f0-9]{16})$").matchEntire(text)
+        if (buttonReply != null && buttonReply.groupValues[2] != offer?.request?.token) { notify("That request has expired"); return }
+        val reply = buttonReply?.groupValues?.get(1) ?: text
+        if (offer != null && classifyLfgReply(reply) == LfgReplyStatus.ACCEPTED) {
+            if (!solo || joining.busy(now())) { notify("Leave your current party before joining"); return }
+            receivedOffers.remove(name.lowercase())
+            if (sendJoinAction(joining.request(name, offer.request, now(), manual = true))) {
+                checkJoinStats(name)
+                notify("Waiting for $name's invite...")
+            }
+            nextAction = now() + 1000
+            return
+        }
+        receivedOffers.remove(name.lowercase())
+        sendLfg(name, reply, true)
     }
 
-    private fun sendLfg(name: String, text: String, reply: Boolean) {
+    private fun sendLfg(name: String, text: String, reply: Boolean, relayText: String = text) {
         nextAction = now() + 1000
         val fallback = {
             if (LocationAPI.isOnSkyBlock && fallbackMessages.size < 16) fallbackMessages.addLast(Triple(name, text, reply))
             Unit
         }
-        if (!DungeonFriendRelay.send(name, text, {
-            MC.instance.player?.sendSystemMessage(Component.literal("§b[SkyMyce] §7$name's mod received your message; awaiting their reply."))
-        }, fallback)) fallback()
+        if (!DungeonFriendRelay.send(name, relayText, {}, fallback)) fallback()
     }
 
     private fun action(friend: OnlineDungeonFriend, command: String): Boolean {
@@ -381,6 +426,9 @@ object DungeonFriends : SkyMyceModule() {
         nextPartyRequest = 0
         nextAction = 0
         replies.clear()
+        sentOffers.clear()
+        receivedOffers.clear()
+        lastJoinStatus = ""
         fallbackMessages.clear()
         DungeonFriendRelay.disconnect()
         joining.clear()
@@ -395,12 +443,11 @@ object DungeonFriends : SkyMyceModule() {
 
     @Subscription
     fun onProfileChange(event: ProfileChangeEvent) {
-        MC.instance.player?.let { DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true) }
+        MC.instance.player?.let { DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true, bypassShared = true) }
     }
 
     fun now(): Long = System.nanoTime() / 1000000
 
-    private const val CONNECTION_TEST = "[SkyMyce Connection Test]"
     private const val PLAYER = "(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16})"
     private val FRIEND_NOTICE = Regex("^Friend > $PLAYER (joined|left)(?:\\.| the (?:server|network)[!.]?)?$")
 }

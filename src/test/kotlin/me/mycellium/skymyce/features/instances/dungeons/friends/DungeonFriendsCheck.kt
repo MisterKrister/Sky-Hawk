@@ -17,6 +17,14 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    val progress = DungeonRefreshProgress()
+    check(progress.update(0, 100, 0, 0) == 0)
+    check(progress.update(3, 97, 0, 0) == 3)
+    check(progress.update(4, 96, 0, 0) == 4)
+    check(progress.update(4, 196, 0, 0) == 4) // Discovering another page never goes backwards.
+    check(progress.update(200, 0, 0, 1) == 99)
+    check(progress.update(200, 0, 1, 0) == 100)
+    check(progress.update(200, 10, 0, 1) == 0) // A new refresh starts a new percentage.
     check(relayUri("wss://example.workers.dev/websocket") != null)
     check(relayUri("ws://127.0.0.1:8787/websocket?room=testing") != null)
     listOf("http://example.com/websocket", "ws://example.com/websocket", "wss://user:password@example.com/websocket",
@@ -122,6 +130,16 @@ fun main() {
     check(known.highestFloor == M7) // Completion count sets defaults, but isn't a PB for eligibility.
     check(known.eligible(F7) && known.eligible(M1) && !known.eligible(M7))
     check(known.completionTimes[F7] == 400000L && known.sPlusTimes[F7] == 420000L)
+    val sharedJson = JsonParser.parseString(Gson().toJson(mapOf("name" to "Alice", "uuid" to "a".repeat(32),
+        "stats" to known, "fetchedAt" to 1000000L))).asJsonObject
+    val cloudStats = sharedDungeonFriend(sharedJson, "ALICE", "a".repeat(32), 1000100)!!
+    check(cloudStats.stats == known && cloudStats.verifiedUntil == 1600000L)
+    check(sharedDungeonFriend(sharedJson, "Bob", null, 1000100) == null)
+    check(sharedDungeonFriend(sharedJson, "Alice", "b".repeat(32), 1000100) == null)
+    check(sharedDungeonFriend(sharedJson, "Alice", null, 1600000) == null)
+    check(sharedDungeonFriend(sharedJson, "Alice", null, 900000) == null)
+    sharedJson.getAsJsonObject("stats").getAsJsonObject("sPlusTimes").addProperty("F7", -1)
+    check(sharedDungeonFriend(sharedJson, "Alice", null, 1000100) == null)
     check(!known.copy(catacombs = 23).eligible(F7))
     check(known.copy(catacombs = 24).eligible(F7))
     check(!known.copy(catacombs = 35, completionTimes = mapOf(M7 to 1L)).eligible(M7))
@@ -352,8 +370,18 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(partyInviter("From Alice: Bob has invited you to join their party!") == null)
     check(joinedPartyLeader("You have joined [MVP++] Cessna808's party!") == "Cessna808")
     check(joinedPartyLeader("From Bob: You have joined Alice's party!") == null)
+    check(compactPartyNotice("[MVP+] Alice joined the party.", "Self") == "Alice joined")
+    check(compactPartyNotice("You have joined aryanepstein's party!", "Self") == "Self joined")
+    check(compactPartyNotice("---------------------\nYou have invited [MVP+] Alice to your party! They have 60 seconds to accept.\n---------------------", "Self") == "Alice has been invited")
+    check(compactPartyNotice("[MVP+] Host invited [VIP] Alice to the party! They have 60 seconds to accept.", "Self") == "Alice has been invited")
+    check(compactPartyNotice("From Bob: Alice joined the party.", "Self") == null)
+    check(compactPartyNotice("Alice joined the party.\nUnrelated message", "Self") == null)
 
     val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")
+    val lfg = DungeonLfgOffer(request, "Want to join?", 60000)
+    check(DungeonLfgOffer.parse(lfg.message(), 0) == lfg)
+    check(DungeonLfgOffer.parse("yes", 0) == null)
+    check(DungeonLfgOffer.parse(lfg.message().replace("F7", "F8"), 0) == null)
     check(DungeonJoinRequest.parse(request.message()) == request)
     check(DungeonJoinRequest.parse(request.message().replace("F7", "M8")) == null)
     check(DungeonJoinRequest.parse(request.message().replace("Archer", "Unknown")) == null)
@@ -418,6 +446,32 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(client.nextCommand(clientContext, 55000) { known } == null)
     host.prune(62000)
     check(host.classFor("Self") == null)
+
+    // Explicit Yes consents to this host even with background availability off.
+    val manualClient = DungeonFriendJoining()
+    val manualHost = DungeonFriendJoining()
+    val manualContext = clientContext.copy(availability = DungeonAvailability())
+    val manualHostContext = manualContext.copy(members = setOf("host"))
+    manualClient.request("Host", request, 100, manual = true)
+    check(manualClient.expectsInvite("Host", 101) && !manualClient.expectsInvite("Stranger", 101))
+    check(manualHost.receiveRequest("Self", request, 101, manual = true))
+    val manualOffer = manualHost.nextCommand(manualHostContext, 102) { null }!!
+    manualClient.receiveOffer("Host", manualOffer.removePrefix("msg self "), 103)
+    check(manualHost.nextCommand(manualHostContext, 104) { null } == null)
+    manualHost.acknowledged("Self", request.token)
+    check(manualHost.nextCommand(manualHostContext, 105) { null } == "party invite self")
+    manualClient.invited("Stranger", 105)
+    check(manualClient.nextCommand(manualContext, 106) { null } == null)
+    manualClient.invited("Host", 107)
+    check(manualClient.nextCommand(manualContext, 108) { null } == "party accept host")
+    val privateReply = DungeonFriendJoining()
+    privateReply.receiveAcceptedReply("Self", request, 0)
+    check(privateReply.nextCommand(manualHostContext, 1) { null } == "party invite self")
+    check(privateReply.nextCommand(manualHostContext, 2) { null } == null)
+    val guarded = DungeonFriendJoining()
+    guarded.request("Host", request, 0, manual = true)
+    guarded.invited("Host", 1)
+    check(guarded.nextCommand(clientContext, 2) { hidden } == null) // Explicit Yes still honors a configured PB limit.
 
     val listing = partyListingFromLore(10, null, listOf("§7Dungeon: §bMaster Mode", "§7Floor: §bFloor VII", "Members:",
         "§b[MVP+] Leader: Mage (50)", "Alice: Berserk (49)", "Bob: Healer (48)", "Note: quick runs", "Empty"))!!

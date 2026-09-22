@@ -36,11 +36,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private lateinit var partyStatus: LabelComponent
     private lateinit var apiSetup: ButtonComponent
     private lateinit var listStatus: LabelComponent
-    private lateinit var relayStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
     private lateinit var sortButton: ButtonComponent
     private lateinit var refreshButton: ButtonComponent
+    private val refreshProgress = DungeonRefreshProgress()
     private val sortHeaders = mutableMapOf<FriendSort, Pair<ButtonComponent, String>>()
     private val actions = mutableListOf<ButtonComponent>()
     private val joinActions = mutableListOf<ButtonComponent>()
@@ -95,15 +95,15 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
         val remaining = DungeonFriendStatsCache.pendingCount
         val refreshing = LocationAPI.onHypixel && (DungeonFriends.scanner.scanning || remaining > 0)
-        refreshButton.message = Component.literal(if (refreshing) "§bRefresh${".".repeat(Math.floorMod(DungeonFriends.now() / 350, 3) + 1)}" else "Refresh")
+        val percent = refreshProgress.update(DungeonFriendStatsCache.completedCount, remaining,
+            DungeonFriends.scanner.completedPages, DungeonFriends.scanner.remainingPages)
+        refreshButton.message = Component.literal(if (refreshing || percent == 100) "${if (refreshing) "§b" else ""}Refresh $percent%" else "Refresh")
         refreshButton.active(LocationAPI.onHypixel && !refreshing)
         refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else buildString {
             append(DungeonFriends.scanner.status)
             if (remaining > 0) append("\n$remaining player stats remaining")
             DungeonFriendStatsCache.status.takeIf { it.isNotEmpty() }?.let { append("\n$it") }
         }))
-        relayStatus.text(Component.literal(DungeonFriendRelay.status))
-        relayStatus.color(Color.ofRgb(if (DungeonFriendRelay.connected) CYAN else MUTED))
     }
 
     private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text))
@@ -213,8 +213,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         child(separator())
         child(row().apply {
             gap(8)
-            relayStatus = label(DungeonFriendRelay.status, MUTED)
-            child(relayStatus.horizontalSizing(Sizing.expand()))
+            horizontalAlignment(HorizontalAlignment.RIGHT)
             apiSetup = button("API setup", 62) { openApiSettings() }
             child(apiSetup)
         })
@@ -222,7 +221,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     private fun toolbarActions(row: FlowLayout) {
         row.child(button(if (DungeonFriendsSettings.availability.enabled) "§aAvailable" else "Available", 76) { openSettings(null) })
-        refreshButton = button("Refresh", 64) {
+        refreshButton = button("Refresh", 82) {
             DungeonFriends.scanner.refresh(DungeonFriends.now())
             DungeonFriendStatsCache.refresh()
             it.active(false)
@@ -386,7 +385,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 onChanged().subscribe { relayUrlDraft = it }
             })
             child(button("Reconnect", 80) { DungeonFriendRelay.disconnect() }
-                .tooltip(Component.literal("Reconnect using saved relay settings. Save first if you changed the address.")))
+                .tooltip(Component.literal("${DungeonFriendRelay.status}\nReconnect using saved relay settings. Save first if you changed the address.")))
             child(separator())
             child(label("AVAILABLE FOR ${floor.name}", CYAN))
             child(label("Check the classes you can play. Eligible party invitations will be accepted while you are solo in SkyBlock. Uncheck all to stop auto joining.", MUTED)
@@ -398,7 +397,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 })
             }
             child(label("S+ PB LIMIT (m:ss or m:ss.sss)", CYAN))
-            child(label("Inviters and incoming Join requests must have a verified ${floor.name} S+ PB at or faster than this time. Hidden or unknown PBs never qualify.", MUTED)
+            child(label("Inviters and incoming Join requests must have a recent ${floor.name} S+ PB at or faster than this time. Hidden or unknown PBs never qualify.", MUTED)
                 .horizontalSizing(Sizing.fill()))
             child(UIComponents.textBox(Sizing.fill()).apply {
                 setMaxLength(10)

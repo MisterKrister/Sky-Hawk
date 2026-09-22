@@ -9,6 +9,9 @@ class FriendListScanner {
         private set
     private var page = 1
     private var lastPage = 1
+    var completedPages = 0
+        private set
+    val remainingPages: Int get() = if (scanning) (lastPage - completedPages).coerceAtLeast(1) else 0
     private var waiting = false
     private var headerSeen = false
     private var deadline = 0L
@@ -30,6 +33,7 @@ class FriendListScanner {
             if (now < nextScan) return null
             scanning = true
             page = 1
+            completedPages = 0
             stopAfterResponse = false
             seen.clear()
         }
@@ -99,6 +103,7 @@ class FriendListScanner {
 
     private fun finishPage(now: Long) {
         if (!waiting) return
+        completedPages = page
         waiting = false
         if (stopAfterResponse) {
             scanning = false

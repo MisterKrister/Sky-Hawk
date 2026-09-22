@@ -2,6 +2,7 @@ package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import com.google.gson.JsonObject
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.MC
@@ -53,6 +54,9 @@ object DungeonFriendRelay {
     private val gson = Gson()
     private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
     private val deliveries = RelayDeliveries()
+    private val statsRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    var sharedStatsAvailable = false
+        private set
     private var socket: WebSocket? = null
     private var sending: CompletableFuture<*> = CompletableFuture.completedFuture(null)
     private var generation = 0L
@@ -80,6 +84,7 @@ object DungeonFriendRelay {
         if (key != identity) { disconnect(); identity = key }
         val now = DungeonFriends.now()
         deliveries.tick(now)
+        statsRequests.filterValues { it.first <= now }.keys.toList().forEach { statsRequests.remove(it)?.second?.complete(null) }
         if ((connecting || socket != null) && now >= deadline) failed("Relay timed out; reconnecting")
         if (connected && now >= nextPing) { packet("ping"); nextPing = now + 45000 }
         if (socket != null || connecting || now < nextAttempt) return
@@ -100,7 +105,7 @@ object DungeonFriendRelay {
                 webSocket.request(1)
             }
             override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
-                if (text.length + data.length > 4096) {
+                if (text.length + data.length > 8192) {
                     MC.instance.execute { if (token == generation) failed("Relay sent an oversized message") }
                     return null
                 }
@@ -155,6 +160,7 @@ object DungeonFriendRelay {
                                         check(json.get("uuid").asString == user.profileId.toString().replace("-", ""))
                                         check(json.get("name").asString.equals(user.name, true))
                                         connected = true
+                                        sharedStatsAvailable = json.get("statsCache")?.asBoolean == true
                                         retryDelay = 1000
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
@@ -173,6 +179,7 @@ object DungeonFriendRelay {
                                             if (DungeonFriends.onRelayMessage(from, uuid, body)) packet(mapOf("type" to "ack", "to" to from, "id" to id))
                                         }
                                     }
+                                    "stats_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
                                     "error" -> { check(connected); deliveries.fail(json.get("id").asString) }
                                     else -> error("Unknown relay packet")
                                 }
@@ -215,6 +222,21 @@ object DungeonFriendRelay {
         return true
     }
 
+    fun lookupStats(name: String, uuid: String?): CompletableFuture<JsonObject?>? {
+        if (!sharedStatsAvailable || statsRequests.size >= 8) return null
+        val id = UUID.randomUUID().toString().replace("-", "")
+        val future = CompletableFuture<JsonObject?>()
+        statsRequests[id] = DungeonFriends.now() + 5000 to future
+        packet(buildMap { put("type", "stats_get"); put("id", id); put("name", name); uuid?.let { put("uuid", it) } })
+        return future
+    }
+
+    fun publishStats(name: String, uuid: String, stats: DungeonFriendStats, fetchedAt: Long, upload: String) {
+        if (!sharedStatsAvailable) return
+        packet(mapOf("type" to "stats_put", "id" to UUID.randomUUID().toString().replace("-", ""), "name" to name,
+            "uuid" to uuid, "stats" to stats, "fetchedAt" to fetchedAt, "upload" to upload))
+    }
+
     private fun packet(data: Any) {
         val ws = socket ?: return
         val token = generation
@@ -229,6 +251,9 @@ object DungeonFriendRelay {
         socket?.abort()
         socket = null
         connected = false
+        sharedStatsAvailable = false
+        statsRequests.values.forEach { it.second.complete(null) }
+        statsRequests.clear()
         connecting = false
         sending = CompletableFuture.completedFuture(null)
         nextAttempt = DungeonFriends.now() + retryDelay

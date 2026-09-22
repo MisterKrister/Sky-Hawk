@@ -5,6 +5,26 @@ import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 
 val FRIEND_FLOORS = DungeonFloor.entries.filter { it != DungeonFloor.E }
+
+/** Count completed work; discovering more friends never moves the displayed percentage backwards. */
+class DungeonRefreshProgress {
+    var percent = 0
+        private set
+    private var running = false
+    private var completedAt = 0L
+    fun update(completed: Long, pending: Int, pagesDone: Int, pagesLeft: Int): Int {
+        if (pending == 0 && pagesLeft == 0) {
+            if (running) percent = 100
+            running = false
+            return percent
+        }
+        if (!running) { running = true; percent = 0; completedAt = completed }
+        val done = (completed - completedAt).coerceAtLeast(0) + pagesDone
+        percent = maxOf(percent, (100 * done / (done + pending + pagesLeft)).toInt()).coerceAtMost(99)
+        return percent
+    }
+}
+
 private val minimumLevels = listOf(1, 3, 5, 9, 14, 19, 24, 24, 26, 28, 30, 32, 34, 36)
 private val dungeonXp = listOf(
     50, 75, 110, 160, 230, 330, 470, 670, 950, 1340,

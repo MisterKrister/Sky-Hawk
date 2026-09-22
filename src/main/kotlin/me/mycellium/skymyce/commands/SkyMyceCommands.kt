@@ -6,7 +6,6 @@ import com.teamresourceful.resourcefulconfig.api.client.ResourcefulConfigScreen
 import me.mycellium.skymyce.ModuleManager
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.SkyMyceModule
-import me.mycellium.skymyce.api.AuctionAPI
 import me.mycellium.skymyce.features.general.AuctionHouseScreen
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
@@ -45,13 +44,6 @@ object SkyMyceCommands : SkyMyceModule() {
                 MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
                 1
             })
-            .then(literal("connect").executes {
-                displayMessage("§b[SkyMyce Connect] §fUsage: /skymyce connect <ign>")
-                1
-            }.then(argument("name", StringArgumentType.word()).executes {
-                DungeonFriends.testConnection(StringArgumentType.getString(it, "name"))
-                1
-            }))
             .then(literal("relaymsg").then(argument("name", StringArgumentType.word())
                 .then(argument("message", StringArgumentType.greedyString()).executes {
                     DungeonFriends.relayReply(StringArgumentType.getString(it, "name"), StringArgumentType.getString(it, "message"))
@@ -60,16 +52,7 @@ object SkyMyceCommands : SkyMyceModule() {
             .then(auction())
             .then(hud())
             .then(modules())
-            .then(test())
             .then(troll())
-    }
-
-    fun test(): LiteralArgumentBuilder<FabricClientCommandSource> {
-        return literal("ah_data")
-            .executes {
-                AuctionAPI.getData()
-                1
-            }
     }
 
     fun dungeon(): LiteralArgumentBuilder<FabricClientCommandSource> {

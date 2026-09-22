@@ -74,7 +74,32 @@ try {
   const alice = await connect("Alice"); alice.authenticate(); assert.equal((await alice.next()).type, "ready");
   const bob = await connect("Bob"); bob.authenticate(); assert.equal((await bob.next()).type, "ready");
   const carol = await connect("Carol", "testing"); carol.authenticate(); await carol.next();
+  let cacheId = 100;
+  async function cache(client, data) {
+    client.ws.send(JSON.stringify({ id: (cacheId++).toString(16).padStart(32, "0"), ...data }));
+    const response = await client.next();
+    assert.equal(response.type, "stats_result");
+    return response;
+  }
+  const stats = { state: "AVAILABLE", catacombs: 52, classes: { ARCHER: 52, MAGE: 2 },
+    selectedClass: "MAGE", completionTimes: { F7: 300000 }, sPlusTimes: { F7: 310000 }, completedFloors: ["F7"] };
+  const lookup = { type: "stats_get", name: "Bob", uuid: identities.get("Bob") };
+  const first = await cache(alice, lookup), racing = await cache(bob, lookup);
+  assert.equal(first.record, null); assert.match(first.upload, /^[a-f0-9]{32}$/);
+  const entry = { type: "stats_put", name: "Bob", uuid: identities.get("Bob"), stats, fetchedAt: Date.now(), upload: first.upload };
+  assert.equal((await cache(alice, { ...entry, upload: "0".repeat(32) })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...entry, fetchedAt: Date.now() - 660000 })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...entry, stats: { ...stats, sPlusTimes: { F7: -1 } } })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...entry, stats: { ...stats, state: { toString: "AVAILABLE" } } })).error, "invalid_upload");
+  assert.equal((await cache(alice, entry)).stored, true);
+  assert.equal((await cache(bob, { ...entry, upload: racing.upload, stats: { ...stats, catacombs: 99 } })).stored, false);
+  const cached = await cache(bob, lookup);
+  assert.deepEqual(cached.record.stats, stats); assert.equal(cached.record.fetchedAt, entry.fetchedAt);
+  assert.equal(cached.upload, undefined); // No upload needed and no duplicate row or renewed age.
+  assert.equal((await cache(carol, lookup)).record, null); // Room isolation includes stats.
+  assert.equal((await cache(bob, { ...lookup, uuid: identities.get("Alice") })).record, null);
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.deepEqual((await cache(bob, lookup)).record.stats, stats); // SQLite survives hibernation.
   const id = "1".repeat(32);
   alice.ws.send(JSON.stringify({ type: "message", id, to: "Bob", from: "Forged", text: "LFG F7?" }));
   const received = await bob.next();
@@ -112,7 +137,7 @@ try {
   const cleanClose = closeEvent(carol.ws);
   carol.ws.close(1000, "Diagnostic complete");
   assert.equal((await cleanClose).code, 1000);
-  console.log("Relay checks passed: signed account proof, name/UUID binding, expiry, replay rejection, hibernation, receipts, isolation, and limits.");
+  console.log("Relay checks passed: signed account proof, shared stats persistence/deduplication/expiry validation, hibernation, receipts, isolation, and limits.");
 } finally {
   for (const ws of sockets) { try { ws.close(); } catch {} }
   await mf.dispose();
