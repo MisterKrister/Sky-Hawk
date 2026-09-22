@@ -24,7 +24,7 @@
 - **Dungeon Message Filter**: Filters annoying chat messages while in a dungeon
 - **Safe Chest Reroll**: Blocks accidental chest rerolls if they contain a valuable item (configurable)
 - **Dungeon Chest Profit**: Shows the value of the items while in a dungeon chest
-- **Dungeon Friends & LFG (/sm friends)**: Shows online friends with floor eligibility, Catacombs/class levels, PBs, location badges, and quick party invites/messages.
+- **Dungeon Friends & LFG (/skymyce pf)**: Shows online friends with floor eligibility, Catacombs/class levels, PBs, location badges, and quick party invites/messages.
 ### Dungeon Tracker
 - **Tracker Screen (/skymyce dungeon)**: Opens a detailed overview of your dungeon runs
 - **Widget**: Shows a summary of your dungeon tracker while in the dungeon hub or at the end of your dungeon run
@@ -33,7 +33,7 @@
 
 # Dungeon Friends & LFG
 
-Open `/sm friends` (or `/skymyce friends`). Set the existing **General > Party Commands > Hypixel API Key** to load profile stats. The floor defaults to your highest completed tier, checking Master Mode first; selecting a floor manually keeps your choice for that screen.
+Open `/skymyce pf` (or `/sm pf`). Set the existing **General > Party Commands > Hypixel API Key** to load profile stats. The floor defaults to your highest completed tier, checking Master Mode first; selecting a floor manually keeps your choice for that screen.
 
 - Friends refresh silently every minute in SkyBlock, including all friend-list pages. Disable background scans under **Instances > Dungeons > Dungeon Friends**. Opening the assistant also scans. Manually requested friend lists remain visible.
 - Known stats must meet the floor's Catacombs requirement and include a completion time. Hidden or unavailable stats appear as **Unknown**, with the reason shown. S+ PB sorting puts friends without S+ times last; an ordinary completion still qualifies.

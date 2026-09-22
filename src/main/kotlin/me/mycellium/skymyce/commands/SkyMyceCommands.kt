@@ -38,7 +38,7 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             }
             .then(dungeon())
-            .then(literal("friends").executes {
+            .then(literal("pf").executes {
                 MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
                 1
             })

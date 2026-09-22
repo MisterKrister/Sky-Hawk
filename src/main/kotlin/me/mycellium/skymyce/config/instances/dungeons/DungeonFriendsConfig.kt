@@ -23,7 +23,7 @@ object DungeonFriendsConfig : CategoryKt("Dungeon Friends") {
         button {
             title = "Dungeon Friend & LFG Assistant"
             text = "Open"
-            description = "Online dungeon friends, floor stats and quick invites (/sm friends)"
+            description = "Online dungeon friends, floor stats and quick invites (/skymyce pf)"
             onClick { MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) } }
         }
     }

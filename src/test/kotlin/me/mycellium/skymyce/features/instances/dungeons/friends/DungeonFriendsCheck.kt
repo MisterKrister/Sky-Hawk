@@ -1,11 +1,23 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.JsonParser
+import me.mycellium.mixin.LabelComponentMixin
+import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.HoverEvent
+import net.minecraft.network.chat.Style
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass.*
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.*
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    // Hovering a full-width label's blank area has no text style, even when it has a location tooltip.
+    val hoverFix = LabelComponentMixin::class.java.getDeclaredMethod("skymyce\$nonNullHoverStyle", Style::class.java)
+        .apply { isAccessible = true }
+    val mixin = LabelComponentMixin()
+    check(hoverFix.invoke(mixin, null) === Style.EMPTY)
+    val textStyle = Style.EMPTY.withHoverEvent(HoverEvent.ShowText(Component.literal("Friend location")))
+    check(hoverFix.invoke(mixin, textStyle) === textStyle)
+
     val scanner = FriendListScanner()
     check(!scanner.receive("Friends (Page 1 of 1)", 0))
     check(scanner.tick(0) == "friend list 1")
