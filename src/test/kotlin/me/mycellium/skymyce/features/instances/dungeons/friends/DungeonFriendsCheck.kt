@@ -7,6 +7,9 @@ import net.minecraft.network.chat.HoverEvent
 import net.minecraft.network.chat.Style
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass.*
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.*
+import java.nio.file.Files
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
@@ -75,7 +78,7 @@ fun main() {
             }
         }
     }""")
-    check(known.catacombs == 50 && known.bestClass == ARCHER && known.classes.size == 5)
+    check(known.catacombs == 52 && known.bestClass == ARCHER && known.classes.size == 2)
     check(known.classes[MAGE] == 2 && known.selectedClass == ARCHER)
     check(known.highestFloor == M7) // Completion count sets defaults, but isn't a PB for eligibility.
     check(known.eligible(F7) && known.eligible(M1) && !known.eligible(M7))
@@ -93,7 +96,7 @@ fun main() {
     fun times(offset: Int) = (1..7).joinToString(",") { "\"$it\":${offset + it * 1000}" }
     val allFloors = parse("""{"dungeons":{
         "player_classes":{"healer":{"experience":0},"mage":{"experience":50},
-            "berserker":{"experience":125},"archer":{"experience":235},"tank":{"experience":395}},
+            "berserk":{"experience":125},"archer":{"experience":235},"tank":{"experience":395}},
         "dungeon_types":{
             "catacombs":{"experience":999999999,"fastest_time":{${times(60000)}},"fastest_time_s_plus":{${times(120000)}}},
             "master_catacombs":{"fastest_time":{${times(180000)}},"fastest_time_s_plus":{${times(240000)}}}
@@ -106,6 +109,9 @@ fun main() {
     }
     check(allFloors.classes == mapOf(HEALER to 0, MAGE to 1, BERSERKER to 2, ARCHER to 3, TANK to 4))
     check(allFloors.bestClass == TANK)
+    check(parse("""{"dungeons":{"player_classes":{"berserker":{"experience":125}}}}""").classes[BERSERKER] == 2)
+    check(parse("""{"dungeons":{"player_classes":{"berserk":{"experience":235},"berserker":{"experience":50}}}}""").classes[BERSERKER] == 3)
+    check(dungeonLevel(769809640.0) == 51 && dungeonLevel(569809640.0) == 50)
     check(known.sPlusTimes[M1] == null && known.completionTimes[M1] == 100000L)
     val selectedProfile = DungeonFriendStats.fromProfiles(JsonParser.parseString("""{"success":true,"profiles":[
         {"members":{"abc":{"last_save":999999,"dungeons":{}}}},
@@ -128,6 +134,7 @@ fun main() {
     check(DungeonFriendStatsCache.status.isEmpty())
 
     check(matchesFriendClass(hidden, emptySet(), setOf(TANK)))
+    check(matchesFriendClass(known.copy(classes = emptyMap()), emptySet(), setOf(TANK)))
     check(matchesFriendClass(known, setOf(TANK), setOf(TANK)))
     check(!matchesFriendClass(known, emptySet(), setOf(TANK)))
     check(parseDungeonClass("Berserk") == BERSERKER)
@@ -161,12 +168,104 @@ fun main() {
 
     val friends = listOf(OnlineDungeonFriend("Unknown", "Hub"), OnlineDungeonFriend("Fast", "Dungeons"), OnlineDungeonFriend("Slow", "Hub"))
     val stats = mapOf("unknown" to hidden, "fast" to known.copy(sPlusTimes = mapOf(F7 to 1000)), "slow" to known.copy(sPlusTimes = mapOf(F7 to 2000)))
-    check(friends.sortedWith(friendComparator(stats, F7, ARCHER, FriendSort.PB)).map { it.name } == listOf("Fast", "Slow", "Unknown"))
-    check(friends.sortedWith(friendComparator(stats, F7, ARCHER, FriendSort.CLASS)).last().name == "Unknown")
-    check(friends.sortedWith(friendComparator(stats, F7, ARCHER, FriendSort.CATACOMBS)).last().name == "Unknown")
+    check(friends.sortedWith(friendComparator(stats, F7, FriendSort.PB)).map { it.name } == listOf("Fast", "Slow", "Unknown"))
+    check(friends.sortedWith(friendComparator(stats, F7, FriendSort.PB, false)).map { it.name } == listOf("Slow", "Fast", "Unknown"))
+    val levels = stats + mapOf("fast" to known.copy(catacombs = 45, classes = mapOf(ARCHER to 30, MAGE to 50)),
+        "slow" to known.copy(catacombs = 41, classes = mapOf(ARCHER to 50, MAGE to 30)))
+    check(friends.sortedWith(friendComparator(levels, F7, FriendSort.CATACOMBS)).map { it.name } == listOf("Fast", "Slow", "Unknown"))
+    check(friends.sortedWith(friendComparator(levels, F7, FriendSort.CATACOMBS, true)).map { it.name } == listOf("Slow", "Fast", "Unknown"))
+    check(friends.sortedWith(friendComparator(levels, F7, FriendSort.ARCHER)).map { it.name } == listOf("Slow", "Fast", "Unknown"))
+    check(friends.sortedWith(friendComparator(levels, F7, FriendSort.MAGE)).map { it.name } == listOf("Fast", "Slow", "Unknown"))
+    check(friends.sortedWith(friendComparator(levels, F7, FriendSort.ARCHER, true)).map { it.name } == listOf("Fast", "Slow", "Unknown"))
     check(lfgMessage("Hi {name}, {class} for {floor}?", "Alice", ARCHER, M7) == "Hi Alice, Archer for M7?")
+    check(lfgMessage("Hi {name}, {class} for {floor}?", "Alice", null, M7) == "Hi Alice, any class for M7?")
     check(!lfgMessage("hello\n/p someone", "Alice", TANK, F7).contains('\n'))
     check(lfgMessage("x".repeat(300), "Alice", TANK, F7).length + "msg Alice ".length <= 256)
     check(formatDungeonTime(61234) == "1:01.234")
+
+    check(newlyAddedFriend("You are now friends with aryanepstein") == "aryanepstein")
+    check(newlyAddedFriend("§aYou are now friends with [MVP++] Alice!") == "Alice")
+    check(newlyAddedFriend("From Alice: You are now friends with Bob") == null)
+    check(newlyAddedFriend("You are now friends with invalid/name") == null)
+    check(newlyAddedFriend("You sent a friend request to Alice!") == null)
+
+    val replies = DungeonLfgReplies()
+    replies.receive("Alice", "yes", 0)
+    check(replies.get("Alice") == null)
+    replies.sent("Alice", 100)
+    replies.receive("ALICE", "sure 1s", 200)
+    check(replies.get("alice")?.status == LfgReplyStatus.ACCEPTED)
+    replies.receive("alice", "no thanks", 300)
+    check(replies.get("Alice")?.status == LfgReplyStatus.DECLINED)
+    listOf("yes", "yeah", "yes inv me", "invite me", "I'm down", "OK!", "Sure, 1s", "sounds good").forEach {
+        check(classifyLfgReply(it) == LfgReplyStatus.ACCEPTED)
+    }
+    listOf("yesterday", "yes but not now", "maybe", "sure?", "yes if you wait", "no", "I said yes yesterday").forEach {
+        check(classifyLfgReply(it) != LfgReplyStatus.ACCEPTED)
+    }
+    replies.receive("Alice", "yes", 300101)
+    check(replies.get("Alice") == null)
+    replies.sent("Alice", 400000)
+    check(replies.get("Alice")?.status == LfgReplyStatus.WAITING)
+    replies.forget("Alice")
+    check(replies.get("Alice") == null)
+
+    // Match SkyBlockPv's public getters, including Kotlin's encoded Duration representation.
+    val viewerData = ViewerDungeons(
+        mapOf("catacombs" to ViewerType(999999999, mapOf("7" to ViewerFloor(5, 300000.milliseconds, 310000.milliseconds))),
+            "master_catacombs" to ViewerType(0, mapOf("1" to ViewerFloor(1, 90000.milliseconds, Duration.INFINITE)))),
+        mapOf("berserk" to 125L, "archer" to 235L), "berserk",
+    )
+    val viewerStats = DungeonFriendProfileProvider.fromViewerDungeonData(viewerData)
+    check(viewerStats.catacombs == 52 && viewerStats.classes[BERSERKER] == 2)
+    check(viewerStats.sPlusTimes[F7] == 310000L && viewerStats.completionTimes[F7] == 300000L)
+    check(viewerStats.sPlusTimes[M1] == null && viewerStats.completionTimes[M1] == 90000L)
+    check(viewerStats.selectedClass == BERSERKER)
+
+    val savedDirectory = Files.createTempDirectory("dungeon-friends-check")
+    val savedFile = savedDirectory.resolve("stats.json")
+    try {
+        val store = DungeonFriendStatsStore(savedFile)
+        val saved = mapOf(
+            "low" to CachedDungeonFriend(known.copy(catacombs = 40), "a".repeat(32), 1),
+            "high" to CachedDungeonFriend(known.copy(catacombs = 41), "b".repeat(32), 1),
+            "hidden" to CachedDungeonFriend(hidden, null, 1),
+        )
+        check(!saved.getValue("low").shouldRefresh(1000))
+        check(saved.getValue("high").shouldRefresh(1000))
+        check(!saved.getValue("high").shouldRefresh(0))
+        check(!saved.getValue("hidden").shouldRefresh(1000))
+        check(CachedDungeonFriend(DungeonFriendStats(StatsState.UNAVAILABLE), null, 1).shouldRefresh(1000))
+        store.save(saved)
+        check(DungeonFriendStatsStore(savedFile).load() == saved)
+        DungeonFriendStatsCache.clear()
+        DungeonFriendStatsCache.initialize(savedFile)
+        DungeonFriendStatsCache.request("low")
+        DungeonFriendStatsCache.request("high")
+        DungeonFriendStatsCache.request("hidden")
+        DungeonFriendStatsCache.request("newfriend")
+        check(DungeonFriendStatsCache.status == "Loading PBs: 2 queued")
+        DungeonFriendStatsCache.refresh()
+        check(DungeonFriendStatsCache.get("low")?.catacombs == 40)
+        DungeonFriendStatsCache.disconnect()
+        DungeonFriendStatsCache.clear()
+        DungeonFriendStatsCache.initialize(savedFile)
+        check(DungeonFriendStatsCache.get("high")?.sPlusTimes == known.sPlusTimes)
+        DungeonFriendStatsCache.request("low", force = true) // New-friend notification explicitly checks a re-added friend.
+        check(DungeonFriendStatsCache.status == "Loading PBs: 1 queued")
+        store.save(mapOf("invalid" to CachedDungeonFriend(known, "bad-uuid", 1)))
+        check(runCatching { store.load() }.isFailure)
+        Files.writeString(savedFile, "{bad json")
+        check(runCatching { store.load() }.isFailure)
+        check(Files.readString(savedFile) == "{bad json")
+        DungeonFriendStatsCache.clear()
+    } finally {
+        Files.deleteIfExists(savedFile)
+        Files.deleteIfExists(savedDirectory)
+    }
     println("Dungeon Friends checks passed")
 }
+
+data class ViewerFloor(val completions: Long, val fastestTime: Duration, val fastestTimeSplus: Duration)
+data class ViewerType(val experience: Long, val floors: Map<String, ViewerFloor>)
+data class ViewerDungeons(val dungeonTypes: Map<String, ViewerType>, val classExperience: Map<String, Long>, val selectedClass: String)

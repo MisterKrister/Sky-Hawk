@@ -20,7 +20,7 @@ fun dungeonLevel(experience: Double): Int {
         if (remaining < required) return level
         remaining -= required
     }
-    return 50
+    return 50 + (remaining / 200000000.0).coerceAtMost((Int.MAX_VALUE - 50).toDouble()).toInt()
 }
 
 fun parseDungeonClass(name: String): DungeonClass? = DungeonClass.entries.firstOrNull {
@@ -59,6 +59,7 @@ data class DungeonFriendStats(
             val profile = profiles.firstOrNull { it.get("selected")?.asBoolean == true }
                 ?: profiles.maxByOrNull { it.obj("members")?.obj(uuid)?.number("last_save") ?: 0.0 }!!
             val member = profile.obj("members")?.obj(uuid)
+                ?: profile.obj("members")?.obj(uuid.replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5"))
                 ?: return DungeonFriendStats(StatsState.UNAVAILABLE)
             val dungeons = member.obj("dungeons")
                 ?: return DungeonFriendStats(StatsState.HIDDEN)
@@ -66,6 +67,10 @@ data class DungeonFriendStats(
                 member.obj("api_settings")?.get(setting)?.let { !it.isJsonNull && !it.asBoolean } == true
             }) return DungeonFriendStats(StatsState.HIDDEN)
 
+            return fromDungeons(dungeons)
+        }
+
+        fun fromDungeons(dungeons: JsonObject): DungeonFriendStats {
             val types = dungeons.obj("dungeon_types")
             val cata = types?.obj("catacombs")
             if (cata != null && cata.number("experience") == null) return DungeonFriendStats(StatsState.HIDDEN)
@@ -86,9 +91,11 @@ data class DungeonFriendStats(
             return DungeonFriendStats(
                 state = StatsState.AVAILABLE,
                 catacombs = dungeonLevel(cata?.number("experience") ?: 0.0),
-                classes = DungeonClass.entries.associateWith {
-                    dungeonLevel(classes?.obj(it.name.lowercase())?.number("experience") ?: 0.0)
-                },
+                classes = DungeonClass.entries.mapNotNull { clazz ->
+                    val xp = (if (clazz == DungeonClass.BERSERKER) classes?.obj("berserk") ?: classes?.obj("berserker")
+                        else classes?.obj(clazz.name.lowercase()))?.number("experience")
+                    xp?.let { clazz to dungeonLevel(it) }
+                }.toMap(),
                 completionTimes = completionTimes,
                 sPlusTimes = sPlusTimes,
                 completedFloors = completed,
@@ -112,20 +119,36 @@ data class OnlineDungeonFriend(val name: String, val location: String) {
     }
 }
 
-enum class FriendSort(val label: String) { CATACOMBS("Catacombs"), CLASS("Class level"), PB("S+ PB") }
+enum class FriendSort(val label: String, val dungeonClass: DungeonClass? = null) {
+    CATACOMBS("Cata"), HEALER("Healer", DungeonClass.HEALER), MAGE("Mage", DungeonClass.MAGE),
+    BERSERKER("Berserk", DungeonClass.BERSERKER), ARCHER("Archer", DungeonClass.ARCHER),
+    TANK("Tank", DungeonClass.TANK), PB("S+ PB"),
+}
 
-fun friendComparator(stats: Map<String, DungeonFriendStats>, floor: DungeonFloor, clazz: DungeonClass?, sort: FriendSort) =
-    when (sort) {
-        FriendSort.CATACOMBS -> compareByDescending<OnlineDungeonFriend> { stats[it.name.lowercase()]?.catacombs ?: -1 }
-        FriendSort.CLASS -> compareByDescending { friend: OnlineDungeonFriend ->
-            stats[friend.name.lowercase()]?.let { it.classes[clazz ?: it.bestClass] } ?: -1
+fun friendComparator(stats: Map<String, DungeonFriendStats>, floor: DungeonFloor, sort: FriendSort, ascending: Boolean = sort == FriendSort.PB): Comparator<OnlineDungeonFriend> {
+    fun value(friend: OnlineDungeonFriend): Long? = stats[friend.name.lowercase()]?.let {
+        when (sort) {
+            FriendSort.CATACOMBS -> it.catacombs?.toLong()
+            FriendSort.PB -> it.sPlusTimes[floor]
+            else -> it.classes[sort.dungeonClass]?.toLong()
         }
-        FriendSort.PB -> compareBy { friend: OnlineDungeonFriend -> stats[friend.name.lowercase()]?.sPlusTimes?.get(floor) ?: Long.MAX_VALUE }
+    }
+    return Comparator<OnlineDungeonFriend> { a, b ->
+        val first = value(a)
+        val second = value(b)
+        when {
+            first == null && second == null -> 0
+            first == null -> 1
+            second == null -> -1
+            ascending -> first.compareTo(second)
+            else -> second.compareTo(first)
+        }
     }.thenBy { it.name.lowercase() }
+}
 
 fun matchesFriendClass(stats: DungeonFriendStats?, secondary: Set<DungeonClass>, wanted: Set<DungeonClass>): Boolean =
     wanted.isEmpty() || stats?.bestClass in wanted || secondary.any { it in wanted } ||
-        ((stats == null || stats.state == StatsState.HIDDEN || stats.state == StatsState.UNAVAILABLE) && secondary.isEmpty())
+        ((stats?.bestClass == null || stats.state == StatsState.HIDDEN || stats.state == StatsState.UNAVAILABLE) && secondary.isEmpty())
 
 fun nextMissingClass(current: DungeonClass?, occupied: Collection<DungeonClass>): DungeonClass? =
     current?.takeIf { it !in occupied } ?: DungeonClass.entries.firstOrNull { it !in occupied }
@@ -137,6 +160,50 @@ fun lfgMessage(template: String, name: String, clazz: DungeonClass?, floor: Dung
 fun formatDungeonTime(millis: Long?): String = millis?.let {
     "%d:%02d.%03d".format(it / 60000, it / 1000 % 60, it % 1000)
 } ?: "Unknown"
+
+fun newlyAddedFriend(message: String): String? = Regex(
+    "^You are now friends with (?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16})[!.]?$", RegexOption.IGNORE_CASE,
+).matchEntire(message.replace(Regex("§."), "").trim())?.groupValues?.get(1)
+
+enum class LfgReplyStatus(val label: String) {
+    WAITING("§7Awaiting reply"), ACCEPTED("§aAccepted"), DECLINED("§cDeclined"), REPLIED("§eReplied"),
+}
+
+fun classifyLfgReply(message: String): LfgReplyStatus {
+    val text = message.lowercase().replace('’', '\'').replace(',', ' ').trim().replace(Regex("\\s+"), " ")
+    // ponytail: recognize explicit short English replies; leave ambiguous prose for the player to read.
+    val positive = "(?:y|yes|ye|yea|yh|yep|yup|yeah|sure|ok|okay|alright|sounds good|of course|i'm (?:in|down)|im (?:in|down)|i am (?:in|down)|let'?s go|inv(?:ite)?(?: me)?|send (?:inv|invite))"
+    val suffix = "(?: (?:pls|please|inv(?:ite)?(?: me)?|[0-9]+s|[0-9]+ sec(?:onds)?|give me [0-9]+s))?"
+    return when {
+        Regex("^$positive$suffix[!.]*$").matches(text) -> LfgReplyStatus.ACCEPTED
+        Regex("^(?:no|nope|nah|can't|cannot|not now|no thanks)(?:[ ,!.].*)?$").matches(text) -> LfgReplyStatus.DECLINED
+        else -> LfgReplyStatus.REPLIED
+    }
+}
+
+data class LfgReply(val status: LfgReplyStatus, val text: String, val expires: Long)
+
+class DungeonLfgReplies {
+    private val replies = mutableMapOf<String, LfgReply>()
+    var version = 0L
+        private set
+    fun get(name: String): LfgReply? = replies[name.lowercase()]
+    fun sent(name: String, now: Long) {
+        replies[name.lowercase()] = LfgReply(LfgReplyStatus.WAITING, "", now + 300000)
+        version++
+    }
+    fun receive(name: String, text: String, now: Long) {
+        prune(now)
+        val previous = get(name) ?: return
+        val result = classifyLfgReply(text)
+        val status = if (result == LfgReplyStatus.REPLIED && previous.status == LfgReplyStatus.ACCEPTED) previous.status else result
+        replies[name.lowercase()] = previous.copy(status = status, text = text.take(256))
+        version++
+    }
+    fun prune(now: Long) { if (replies.entries.removeIf { it.value.expires <= now }) version++ }
+    fun forget(name: String) { if (replies.remove(name.lowercase()) != null) version++ }
+    fun clear() { replies.clear(); version++ }
+}
 
 /** PartyAPI supplies rosters; server announcements fill in class choices and immediate membership changes. */
 class DungeonFriendParty {

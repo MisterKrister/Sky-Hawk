@@ -12,7 +12,6 @@ import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
-import me.mycellium.skymyce.config.misc.PartyCommandsConfig
 import me.mycellium.skymyce.utils.MC
 import net.minecraft.network.chat.Component
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
@@ -23,8 +22,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var floor = DungeonFloor.F1
     private var floorChosen = false
     private var sort = FriendSort.CATACOMBS
-    private var filter = "Next needed"
-    private var chosenClass: DungeonClass? = null
+    private var ascending = false
+    private var missingClasses: Set<DungeonClass>? = null
     private var settingsOpen = false
     private var editingFriend: String? = null
     private var templateDraft = DungeonFriendsSettings.messageTemplate
@@ -35,6 +34,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private lateinit var listStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
+    private lateinit var sortButton: ButtonComponent
+    private val sortHeaders = mutableMapOf<FriendSort, Pair<ButtonComponent, String>>()
     private val actions = mutableListOf<ButtonComponent>()
     private var renderedState: List<Any?> = emptyList()
     private val panelWidth get() = minOf(660, width - 24)
@@ -43,6 +44,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
     override fun build(root: FlowLayout) {
+        sortHeaders.clear()
         root.surface(Surface.blur(3.0f, 10.0f).and(Surface.flat(0x66090D12)))
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(if (settingsOpen) settingsPanel() else friendsPanel())
@@ -58,8 +60,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             }
         }
         val state = listOf(
-            DungeonFriendStatsCache.version, DungeonFriends.scanner.online.toMap(), floor, sort, filter, chosenClass,
-            DungeonFriends.neededClass, DungeonFriends.openClasses, DungeonFriendsSettings.secondaryClasses,
+            DungeonFriendStatsCache.version, DungeonFriends.scanner.online.toMap(), floor, sort, ascending, wantedClasses(),
+            DungeonFriendsSettings.secondaryClasses, DungeonFriends.replies.version,
         )
         if (state != renderedState) {
             renderedState = state
@@ -70,10 +72,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         partyStatus.color(Color.ofRgb(if (DungeonFriends.partyFull) 0xF18C8C else CYAN))
         apiStatus.text(Component.literal(when {
             !LocationAPI.onHypixel -> "Join Hypixel to load player stats"
-            PartyCommandsConfig.hypixelApiKey.isBlank() -> "Add your Hypixel API key to load PBs"
-            else -> DungeonFriendStatsCache.status.ifEmpty { "SkyBlock stats up to date" }
+            !DungeonFriendStatsCache.canFetch -> "Use SkyBlockPv / SkyBlocker or add an API key"
+            else -> DungeonFriendStatsCache.status.ifEmpty { "Cached stats ready; refresh updates Cata > 40" }
         }))
-        apiStatus.color(Color.ofRgb(if (PartyCommandsConfig.hypixelApiKey.isBlank()) 0xE6BD79 else MUTED))
+        apiStatus.color(Color.ofRgb(if (!DungeonFriendStatsCache.canFetch) 0xE6BD79 else MUTED))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
     }
 
@@ -124,35 +126,28 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         })
         child(row().apply {
             gap(6)
-            child(button("Sort: ${sort.label}", 110) { button ->
+            sortButton = button("Sort: ${sort.label}", 116) { button ->
                 menu(button) { dropdown ->
                     FriendSort.entries.forEach { value ->
-                        dropdown.button(Component.literal(value.label)) {
-                            sort = value
-                            button.message = Component.literal("Sort: ${sort.label}")
-                            updateResults()
-                        }
-                    }
-                }
-            })
-            classButton = button("Next: Berserker", 116) { button ->
-                menu(button) { dropdown ->
-                    listOf("Next needed", "All needed", "All classes").forEach { value ->
-                        dropdown.button(Component.literal(value)) {
-                            filter = value
-                            chosenClass = null
-                            updateResults()
-                        }
-                    }
-                    DungeonClass.entries.forEach { value ->
-                        dropdown.button(Component.literal(value.displayName)) {
-                            filter = "Selected"
-                            chosenClass = value
-                            updateResults()
-                        }
+                        dropdown.button(Component.literal(value.label)) { changeSort(value) }
                     }
                 }
             }
+            sortButton.tooltip(Component.literal("Choose Cata, a class, or S+ PB. Select it again to reverse the order."))
+            child(sortButton)
+            classButton = button("Missing", 104) { button ->
+                menu(button) { dropdown ->
+                    DungeonClass.entries.forEach { value ->
+                        dropdown.checkbox(Component.literal(value.displayName), value in wantedClasses()) { checked ->
+                            missingClasses = if (checked) wantedClasses() + value else wantedClasses() - value
+                            updateResults()
+                        }
+                    }
+                    dropdown.button(Component.literal("Use party classes")) { missingClasses = null; updateResults() }
+                    dropdown.button(Component.literal("Clear (show all)")) { missingClasses = emptySet(); updateResults() }
+                }
+            }
+            classButton.tooltip(Component.literal("Check the classes you need. Clear all boxes to show every class."))
             child(classButton)
             if (!compact) {
                 child(UIContainers.horizontalFlow(Sizing.expand(), Sizing.fixed(1)))
@@ -171,11 +166,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             listStatus = label("ONLINE FRIENDS", CYAN)
             child(listStatus.horizontalSizing(Sizing.expand()))
             if (!compact) {
-                child(label("CATA", MUTED).horizontalSizing(Sizing.fixed(32)))
-                displayedClasses.forEach { (_, heading) ->
-                    child(label(heading, MUTED).horizontalSizing(Sizing.fixed(42)))
+                child(sortHeader("CATA", 32, FriendSort.CATACOMBS))
+                displayedClasses.forEach { (clazz, heading) ->
+                    child(sortHeader(heading, 42, FriendSort.entries.first { it.dungeonClass == clazz }))
                 }
-                child(label("S+ PB", CYAN).horizontalSizing(Sizing.fixed(70)))
+                child(sortHeader("S+ PB", 70, FriendSort.PB))
                 child(label("ACTIONS", MUTED).horizontalSizing(Sizing.fixed(100)))
             }
             padding(Insets.horizontal(6))
@@ -210,21 +205,35 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             .withParent(this).withQuery("Hypixel API Key").build())
     }
 
-    private fun selectedClass(): DungeonClass? = chosenClass ?: DungeonFriends.neededClass
+    private fun wantedClasses(): Set<DungeonClass> = missingClasses ?: DungeonFriends.openClasses
+
+    private fun messageClass(friend: OnlineDungeonFriend): DungeonClass? {
+        val wanted = wantedClasses()
+        val stats = DungeonFriendStatsCache.get(friend.name)
+        return stats?.bestClass?.takeIf { it in wanted }
+            ?: DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()]?.firstOrNull { it in wanted }
+            ?: wanted.firstOrNull()
+    }
+
+    private fun changeSort(value: FriendSort) {
+        ascending = if (sort == value) !ascending else value == FriendSort.PB
+        sort = value
+        updateResults()
+    }
+
+    private fun sortHeader(text: String, width: Int, value: FriendSort) = button(text, width) { changeSort(value) }.apply {
+        sortHeaders[value] = this to text
+        tooltip(Component.literal("Sort by ${value.label}; click again to reverse"))
+    }
 
     private fun updateResults() {
         if (settingsOpen || !::results.isInitialized) return
         floorButton.message = Component.literal("§b${floor.name} v")
-        classButton.message = Component.literal(when (filter) {
-            "Selected" -> "Class: ${chosenClass?.displayName}"
-            "Next needed" -> "Next: ${DungeonFriends.neededClass?.displayName ?: "None"}"
-            else -> filter
-        })
-        val wanted = when (filter) {
-            "Next needed" -> setOfNotNull(DungeonFriends.neededClass)
-            "All needed" -> DungeonFriends.openClasses
-            "Selected" -> setOfNotNull(chosenClass)
-            else -> emptySet()
+        val wanted = wantedClasses()
+        classButton.message = Component.literal("Missing (${wanted.size})")
+        sortButton.message = Component.literal("Sort: ${sort.label} ${if (ascending) "↑" else "↓"}")
+        sortHeaders.forEach { (value, header) ->
+            header.first.message = Component.literal("${if (sort == value) "§b" else "§7"}${header.second}")
         }
         val stats = DungeonFriendStatsCache.stats
         val friends = DungeonFriends.scanner.online.values.filter { friend ->
@@ -232,12 +241,12 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             (data?.eligible(floor) != false) && matchesFriendClass(
                 data, DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()].orEmpty(), wanted,
             )
-        }.sortedWith(friendComparator(stats, floor, selectedClass(), sort))
+        }.sortedWith(friendComparator(stats, floor, sort, ascending))
         listStatus.text(Component.literal("FRIENDS  ${friends.size}/${DungeonFriends.scanner.online.size}"))
         actions.clear()
         results.child(UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
             gap(3)
-            if (friends.isEmpty()) child(label("No matching friends. Try another floor or All classes.", MUTED)
+            if (friends.isEmpty()) child(label("No matching friends. Try another floor or clear Missing.", MUTED)
                 .horizontalSizing(Sizing.fill()).margins(Insets.of(8)))
             friends.forEach { friend -> child(friendRow(friend, stats[friend.name.lowercase()])) }
         })
@@ -249,13 +258,16 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             gap(5)
             surface(Surface.flat(0xFF17212A.toInt()))
             val secondary = DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()].orEmpty()
+            val reply = DungeonFriends.replies.get(friend.name)
+            val accepted = reply?.status == LfgReplyStatus.ACCEPTED
             val availability = stats?.state?.takeIf { it != StatsState.AVAILABLE }?.label
                 ?: if (stats == null) "Waiting for SkyBlock stats" else "SkyBlock profile stats"
             val identity = UIContainers.verticalFlow(Sizing.expand(), Sizing.content()).apply {
                 gap(3)
                 child(label(friend.name).horizontalSizing(Sizing.fill()))
                 child(label(friend.badge, MUTED).horizontalSizing(Sizing.fill()))
-                tooltip(Component.literal("${friend.location}\n$availability"))
+                if (reply != null) child(label(reply.status.label).horizontalSizing(Sizing.fill()))
+                tooltip(Component.literal("${friend.location}\n$availability${reply?.text?.takeIf { it.isNotEmpty() }?.let { "\nReply: $it" }.orEmpty()}"))
             }
             child(row().apply {
                 child(identity)
@@ -265,9 +277,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     horizontalAlignment(HorizontalAlignment.RIGHT)
                     gap(3)
                     val invite = button("/p", 24) { DungeonFriends.invite(friend) }.active(DungeonFriends.canAct)
+                    if (accepted) invite.renderer(ButtonComponent.Renderer.flat(0xFF246545.toInt(), 0xFF34865C.toInt(), 0xFF151C23.toInt()))
                     invite.tooltip(Component.literal("Invite ${friend.name}; disabled when the party is full"))
-                    val message = button("/msg", 34) { DungeonFriends.message(friend, floor, selectedClass()) }.active(DungeonFriends.canAct)
-                    message.tooltip(Component.literal(lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, selectedClass(), floor)))
+                    val message = button("/msg", 34) { DungeonFriends.message(friend, floor, messageClass(friend)) }.active(DungeonFriends.canAct)
+                    message.tooltip(Component.literal(lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, messageClass(friend), floor)))
                     actions += invite
                     actions += message
                     child(invite)
@@ -345,7 +358,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             }
         }
         child(label("PERSONAL BESTS", CYAN))
-        child(label("PBs and class levels load from Hypixel's SkyBlock API. Add your API key once to load the player list.", MUTED)
+        child(label("Uses installed SkyBlocker / SkyBlockPv, with your Hypixel API key as a fallback. Stats are saved between sessions; repeat refreshes only update Cata > 40.", MUTED)
             .horizontalSizing(Sizing.fill()))
         child(button("API setup", 80) { openApiSettings() })
         val feedback = label(DungeonFriendsSettings.error.orEmpty(), 0xF18C8C)

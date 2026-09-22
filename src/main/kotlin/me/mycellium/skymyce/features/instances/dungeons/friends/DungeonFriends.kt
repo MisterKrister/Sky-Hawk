@@ -1,12 +1,16 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import me.mycellium.skymyce.SkyMyceModule
+import me.mycellium.skymyce.SkyMyce
+import me.mycellium.skymyce.api.events.ChatChannel
+import me.mycellium.skymyce.api.events.PlayerMessageEvent
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsConfig
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.config.instances.dungeons.PartyListing
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.PlayerUtils.sendCommand
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents
 import net.hypixel.modapi.HypixelModAPI
 import net.hypixel.modapi.packet.impl.serverbound.ServerboundPartyInfoPacket
@@ -24,6 +28,7 @@ import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
 import tech.thatgravyboat.skyblockapi.api.profile.party.PartyAPI
 
 object DungeonFriends : SkyMyceModule() {
+    val replies = DungeonLfgReplies()
     var scanner = FriendListScanner()
         private set
     private var party = DungeonFriendParty()
@@ -41,6 +46,8 @@ object DungeonFriends : SkyMyceModule() {
 
     override fun init() {
         DungeonFriendsSettings.load()
+        DungeonFriendStatsCache.initialize(SkyMyce.configPath.resolve("dungeon_friend_stats.json"))
+        ClientLifecycleEvents.CLIENT_STOPPING.register { DungeonFriendStatsCache.save(true) }
         ClientTickEvents.END_CLIENT_TICK.register { tick() }
         ClientSendMessageEvents.ALLOW_COMMAND.register { command ->
             if (!sendingScan && command.matches(Regex("(?i)(?:f|friend) list(?: \\d+)?"))) scanner.manualCommand(now())
@@ -50,6 +57,7 @@ object DungeonFriends : SkyMyceModule() {
 
     override fun tick() {
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
+        replies.prune(now())
         syncParty()
         if (now() >= nextPartyRequest) {
             val sent = HypixelModAPI.getInstance().sendPacket(ServerboundPartyInfoPacket())
@@ -81,6 +89,7 @@ object DungeonFriends : SkyMyceModule() {
             previousRoster = roster
         }
         for (name in party.members) {
+            replies.forget(name)
             // Last selected class is a fallback, never a replacement for a class observed in the current party.
             if (name !in party.classes) DungeonFriendStatsCache.get(name)?.selectedClass?.let { party.classes[name] = it }
         }
@@ -125,6 +134,11 @@ object DungeonFriends : SkyMyceModule() {
         FRIEND_NOTICE.matchEntire(message)?.let {
             scanner.notification(it.groupValues[1], it.groupValues[2] == "joined")
         }
+        message.lines().mapNotNull(::newlyAddedFriend).forEach { name ->
+            scanner.notification(name, true)
+            DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true)
+            scanner.refresh(now())
+        }
         if (message.startsWith("You removed ") && message.endsWith(" from your friends list!")) {
             val name = message.substringAfter("You removed ").substringBefore(" from your friends list!").substringAfterLast(' ')
             scanner.notification(name, false)
@@ -136,18 +150,26 @@ object DungeonFriends : SkyMyceModule() {
         }
     }
 
-    fun invite(friend: OnlineDungeonFriend) = action(friend, "p ${friend.name}")
-
-    fun message(friend: OnlineDungeonFriend, floor: DungeonFloor, clazz: DungeonClass?) {
-        val text = lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, clazz ?: neededClass, floor)
-        if (text.isNotEmpty()) action(friend, "msg ${friend.name} $text")
+    @Subscription
+    fun onPrivateReply(event: PlayerMessageEvent) {
+        if (LocationAPI.onHypixel && event.type == ChatChannel.PRIVATE) replies.receive(event.player, event.message, now())
     }
 
-    private fun action(friend: OnlineDungeonFriend, command: String) {
+    fun invite(friend: OnlineDungeonFriend) {
+        if (action(friend, "p ${friend.name}")) replies.forget(friend.name)
+    }
+
+    fun message(friend: OnlineDungeonFriend, floor: DungeonFloor, clazz: DungeonClass?) {
+        val text = lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, clazz, floor)
+        if (text.isNotEmpty() && action(friend, "msg ${friend.name} $text")) replies.sent(friend.name, now())
+    }
+
+    private fun action(friend: OnlineDungeonFriend, command: String): Boolean {
         // Recheck at the send boundary, including clicks from rows rendered before the fifth member joined.
-        if (!canAct || friend.name.lowercase() !in scanner.online || !friend.name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return
+        if (!canAct || MC.connection == null || friend.name.lowercase() !in scanner.online || !friend.name.matches(Regex("[A-Za-z0-9_]{1,16}"))) return false
         nextAction = now() + 1000
         sendCommand(command)
+        return true
     }
 
     @Subscription
@@ -157,11 +179,14 @@ object DungeonFriends : SkyMyceModule() {
         previousRoster = null
         nextPartyRequest = 0
         nextAction = 0
-        DungeonFriendStatsCache.clear()
+        replies.clear()
+        DungeonFriendStatsCache.disconnect()
     }
 
     @Subscription
-    fun onProfileChange(event: ProfileChangeEvent) { DungeonFriendStatsCache.clear() }
+    fun onProfileChange(event: ProfileChangeEvent) {
+        MC.instance.player?.let { DungeonFriendStatsCache.request(it.name.string, it.uuid, force = true) }
+    }
 
     fun now(): Long = System.nanoTime() / 1000000
 
