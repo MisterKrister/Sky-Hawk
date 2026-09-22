@@ -292,7 +292,7 @@ object DungeonFriends : SkyMyceModule() {
                 noticePlayer = inviter
                 replacement = Component.literal("§b[Party] §fYou have been invited to $inviter's party")
             }
-            if (LocationAPI.isOnSkyBlock && (DungeonFriendsSettings.availability.enabled || joining.expectsInvite(inviter, now())) && solo) {
+            if (LocationAPI.isOnSkyBlock && joining.expectsInvite(inviter, now()) && solo) {
                 joining.invited(inviter, now())
             }
         }

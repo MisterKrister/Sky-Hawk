@@ -86,7 +86,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         partyStatus.color(Color.ofRgb(if (DungeonFriends.partyFull) 0xF18C8C else CYAN))
         partyStatus.tooltip(Component.literal(DungeonFriendsSettings.availability.let {
             if (it.enabled) "Available for ${it.floor.name}: ${it.classes.joinToString { clazz -> clazz.displayName }}"
-            else "Auto join is off. Choose Available classes to accept invitations automatically."
+            else "Choose Available classes for Join requests. Auto-joining requires a relay agreement."
         } + DungeonFriends.joining.status.takeIf { it.isNotEmpty() }?.let { "\n$it" }.orEmpty()))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
         val remaining = DungeonFriendStatsCache.pendingCount
@@ -193,7 +193,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     child(sortHeader(heading, 42, FriendSort.entries.first { it.dungeonClass == clazz }))
                 }
                 child(sortHeader("S+ PB", 70, FriendSort.PB))
-                child(label("ACTIONS", MUTED).horizontalSizing(Sizing.fixed(140)))
+                child(label("ACTIONS", MUTED).horizontalTextAlignment(HorizontalAlignment.CENTER)
+                    .horizontalSizing(Sizing.fixed(ACTIONS_WIDTH)).margins(Insets.left(ACTIONS_GAP)))
             }
             padding(Insets.horizontal(6))
             // Match the list's scrollbar gutter so headers align with row values.
@@ -289,13 +290,13 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 child(identity)
                 if (!compact) statColumns(this, stats, false)
                 child(row().apply {
-                    horizontalSizing(Sizing.fixed(140))
-                    horizontalAlignment(HorizontalAlignment.RIGHT)
+                    horizontalSizing(Sizing.fixed(ACTIONS_WIDTH))
+                    margins(Insets.left(ACTIONS_GAP))
                     gap(3)
-                    val invite = button("/p", 24) { DungeonFriends.invite(friend) }.active(DungeonFriends.canAct)
+                    val invite = button("Party", 40) { DungeonFriends.invite(friend) }.active(DungeonFriends.canAct)
                     if (accepted) invite.renderer(ButtonComponent.Renderer.flat(0xFF246545.toInt(), 0xFF34865C.toInt(), 0xFF151C23.toInt()))
-                    invite.tooltip(Component.literal("Invite ${friend.name}; disabled when the party is full"))
-                    val message = button("/msg", 34) { DungeonFriends.message(friend, floor, messageClass(friend)) }.active(DungeonFriends.canAct)
+                    invite.tooltip(Component.literal("Send ${friend.name} a party invite to accept manually; disabled when the party is full"))
+                    val message = button("Invite", 44) { DungeonFriends.message(friend, floor, messageClass(friend)) }.active(DungeonFriends.canAct)
                     message.tooltip(Component.literal(lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, messageClass(friend), floor) + "\nTries relay first; uses /msg if their mod does not acknowledge within 5 seconds."))
                     actions += invite
                     actions += message
@@ -320,16 +321,19 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     private fun statColumns(row: FlowLayout, stats: DungeonFriendStats?, titles: Boolean) {
         val selected = stats?.selectedClass
-        if (!titles) row.child(label(stats?.catacombs?.toString() ?: "—").horizontalSizing(Sizing.fixed(32)))
+        if (!titles) row.child(label(stats?.catacombs?.toString() ?: "—").horizontalTextAlignment(HorizontalAlignment.CENTER)
+            .horizontalSizing(Sizing.fixed(32)))
         displayedClasses.forEach { (clazz, heading) ->
             row.child(UIContainers.verticalFlow(if (titles) Sizing.fill(20) else Sizing.fixed(42), Sizing.content()).apply {
                 gap(3)
+                horizontalAlignment(HorizontalAlignment.CENTER)
                 if (titles) child(label(heading, MUTED))
                 child(label(stats?.classes?.get(clazz)?.toString() ?: "—", if (clazz == selected) CYAN else WHITE))
                 tooltip(Component.literal("${clazz.displayName}${if (clazz == selected) " (last played)" else ""}\n${stats?.state?.label ?: "Waiting for SkyBlock stats"}"))
             })
         }
         if (!titles) row.child(label(stats?.sPlusTimes?.get(floor)?.let(::formatDungeonTime) ?: "—", CYAN)
+            .horizontalTextAlignment(HorizontalAlignment.CENTER)
             .horizontalSizing(Sizing.fixed(70))
             .tooltip(Component.literal("${floor.name} fastest S+ completion\n${stats?.sPlusTimes?.get(floor)?.let(::formatDungeonTime) ?: "No published S+ time"}")))
     }
@@ -365,7 +369,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                         child(button("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}", 94) { button ->
                             availableDraft = if (clazz in availableDraft) availableDraft - clazz else availableDraft + clazz
                             button.message = Component.literal("${if (clazz in availableDraft) "[x]" else "[ ]"} ${clazz.displayName}")
-                        }.tooltip(Component.literal("Auto-accept invitations as ${clazz.displayName} while solo. Uncheck all to turn off.")))
+                        }.tooltip(Component.literal("Offer ${clazz.displayName} when requesting to join. Auto-accept requires an agreed relay request.")))
                     }
                 })
             }
@@ -386,7 +390,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         child(UIComponents.textBox(Sizing.fill()).apply {
             setMaxLength(220)
             text(templateDraft)
-            setHint(Component.literal("Message sent by the /msg button"))
+            setHint(Component.literal("Message sent by the Invite button"))
             onChanged().subscribe { templateDraft = it }
         })
         editingFriend?.let { name ->
@@ -444,6 +448,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     }
 
     companion object {
+        private const val ACTIONS_WIDTH = 157 // Party + Invite + Join + Edit, with three 3px gaps.
+        private const val ACTIONS_GAP = 12
         private const val CYAN = 0x67CCF2
         private const val WHITE = 0xEDF3F7
         private const val MUTED = 0x91A2AF
