@@ -9,6 +9,7 @@ import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.HoverEvent
 import net.minecraft.network.chat.Style
+import net.minecraft.ChatFormatting
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass.*
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.*
 import java.nio.file.Files
@@ -130,6 +131,46 @@ fun main() {
     check(firstOffline.receive("--------------------\nFriends (Page 1 of 8)\n§6Cessna808 §eis in SkyBlock - Dungeon Hub\n§b10inchleftie §cis currently offline\n--------------------", 1))
     check(firstOffline.online.keys == setOf("cessna808") && !firstOffline.scanning)
     check(firstOffline.tick(60000) == null && firstOffline.remainingPages == 0)
+    val bestFriends = FriendListScanner()
+    check(bestFriends.tick(0) == "friend list 1")
+    val boldFriendList = "--------------------\nFriends (Page 1 of 8)\n§6§lCessna808 §eis in SkyBlock - Dungeon Hub\n§7hettkill §eis in SkyBlock - Garden\n§b10inchleftie §cis currently offline\n-------------------- §8(§7x§r2§8)"
+    check(bestFriends.receive(boldFriendList, 1))
+    check(!bestFriends.scanning && bestFriends.online.keys == setOf("cessna808", "hettkill"))
+    check(bestFriends.online["cessna808"]?.let { it.bestFriend && it.rankColor == 0xFFAA00 } == true)
+    check(bestFriends.online["hettkill"]?.let { !it.bestFriend && it.rankColor == 0xAAAAAA } == true)
+    check(bestFriends.tick(60001) == null)
+    check(bestFriendChange("[MVP++] Cessna808 is now a best friend!") == ("Cessna808" to true))
+    check(bestFriendChange("§6[MVP++] Cessna808 §eis no longer a best friend!") == ("Cessna808" to false))
+    check(bestFriendChange("From Bob: Cessna808 is now a best friend!") == null)
+    bestFriends.bestFriend("Cessna808", false)
+    check(bestFriends.online["cessna808"]?.bestFriend == false)
+    bestFriends.bestFriend("Cessna808", true)
+    bestFriends.notification("Cessna808", true)
+    check(bestFriends.online["cessna808"]?.let { it.bestFriend && it.rankColor == 0xFFAA00 } == true)
+    // The supplied component dump has inherited blue text and a repeat suffix, with no bold flag remaining.
+    val modifiedList = Component.literal("--------------------\nFriends (Page 1 of 8)\n")
+        .withStyle(ChatFormatting.BLUE)
+        .append(Component.literal("Cessna808 is in SkyBlock - Dungeon Hub"))
+        .append(Component.literal("\n10inchleftie is currently offline\n--------------------"))
+        .append(Component.literal(" (x2)").withStyle(ChatFormatting.YELLOW))
+    bestFriends.refresh(60002)
+    check(bestFriends.tick(60002) == "friend list 1")
+    check(bestFriends.receive(modifiedList.string, 60003, modifiedList))
+    check(bestFriends.online["cessna808"]?.bestFriend == true && !bestFriends.scanning)
+    check(bestFriends.online["cessna808"]?.rankColor == 0xFFAA00) // A flattened blue line cannot replace the known gold rank.
+    check(bestFriends.tick(120004) == null)
+
+    val rankedPlayer = Component.literal("[MVP++] ").withStyle(ChatFormatting.GOLD)
+        .append(Component.empty().withStyle(ChatFormatting.BOLD)
+            .append(Component.literal("Cessna")).append(Component.literal("808")))
+        .append(Component.literal(" joined the party.").withStyle(ChatFormatting.YELLOW))
+    check(dungeonPlayerNameStyle(rankedPlayer, "Cessna808")?.let { it.color?.value == 0xFFAA00 && it.isBold } == true)
+    check(dungeonPlayerNameStyle(Component.literal("§6§lCessna808§r joined"), "Cessna808")?.color?.value == 0xFFAA00)
+    check(dungeonPlayerNameStyle(Component.literal("Cessna8080 joined"), "Cessna808") == null)
+    val rankedTitle = dungeonPlayerTitle("Cessna808", "joined your party", 0xFFAA00)
+    check(rankedTitle.string == "Cessna808 joined your party")
+    check(dungeonPlayerNameStyle(rankedTitle, "Cessna808")?.color?.value == 0xFFAA00)
+    check(dungeonPlayerNameStyle(rankedTitle, "joined")?.color?.value == 0xFFFFFF)
 
     fun parse(member: String) = DungeonFriendStats.fromProfiles(JsonParser.parseString(
         """{"success":true,"profiles":[{"selected":true,"members":{"abc":$member}}]}"""
@@ -404,6 +445,9 @@ fun main() {
         dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER))
     }
     check(dungeonTitleDetails(null, emptyList()) == "to their party")
+    check(dungeonJoinedDetails(known, MAGE) == "§bCata 52 §8| §bMage §f2")
+    check(dungeonJoinedDetails(null, TANK) == "§bCata ? §8| §aTank §f?")
+    check(dungeonJoinedDetails(null, null) == "§bCata ? §8| §7Class ?")
 
     val replies = DungeonLfgReplies()
     replies.receive("Alice", "yes", 0)
@@ -477,6 +521,10 @@ fun main() {
         friendStore.save(emptyList())
         val emptyScanner = FriendListScanner(friendStore.load())
         check(emptyScanner.hasScanned && emptyScanner.online.isEmpty() && emptyScanner.tick(0) == null)
+        friendStore.save(listOf(OnlineDungeonFriend("Cessna808", "Dungeon Hub", 0xFFAA00, true)))
+        check(FriendListScanner(friendStore.load()).online["cessna808"]?.let { it.bestFriend && it.rankColor == 0xFFAA00 } == true)
+        Files.writeString(savedFriends, """{"version":1,"online":[{"name":"Alice","location":"Hub"}]}""")
+        check(friendStore.load() == listOf(OnlineDungeonFriend("Alice", "Hub"))) // Older caches still load without another scan.
         check(FriendListScanner(FriendListStore(savedDirectory.resolve("other-account.json")).load()).tick(0) == "friend list 1")
         Files.writeString(savedFriends, "{bad json")
         check(runCatching { friendStore.load() }.isFailure)

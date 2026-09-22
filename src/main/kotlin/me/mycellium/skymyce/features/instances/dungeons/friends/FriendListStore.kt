@@ -18,7 +18,9 @@ class FriendListStore(private val file: Path) {
             val name = friend.get("name").asString
             val location = friend.get("location").asString
             require(name.matches(Regex("[A-Za-z0-9_]{1,16}")) && location.length <= 256)
-            OnlineDungeonFriend(name, location)
+            val color = friend.get("rankColor")?.takeUnless { it.isJsonNull }?.asInt
+            require(color == null || color in 0..0xFFFFFF)
+            OnlineDungeonFriend(name, location, color, friend.get("bestFriend")?.asBoolean ?: false)
         }
     }
 

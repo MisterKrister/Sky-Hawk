@@ -276,15 +276,17 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 .filter { it != stats?.selectedClass }
             val reply = DungeonFriends.replies.get(friend.name)
             val pendingInvite = reply?.status in setOf(LfgReplyStatus.WAITING, LfgReplyStatus.INVITED)
-            surface(if (pendingInvite) Surface.flat(0xFF29231C.toInt()).and(Surface { graphics, component ->
-                graphics.fill(component.x(), component.y(), component.x() + 2, component.y() + component.height(), 0xFFFFAA00.toInt())
+            val declined = reply?.status == LfgReplyStatus.DECLINED
+            surface(if (pendingInvite || declined) Surface.flat(if (declined) 0xFF2D1B20.toInt() else 0xFF29231C.toInt()).and(Surface { graphics, component ->
+                graphics.fill(component.x(), component.y(), component.x() + 2, component.y() + component.height(),
+                    if (declined) 0xFFFF5555.toInt() else 0xFFFFAA00.toInt())
             }) else Surface.flat(0xFF17212A.toInt()))
             val accepted = reply?.status == LfgReplyStatus.ACCEPTED
             val availability = stats?.state?.takeIf { it != StatsState.AVAILABLE }?.label
                 ?: if (stats == null) "Waiting for SkyBlock stats" else "SkyBlock profile stats"
             val identity = UIContainers.verticalFlow(Sizing.expand(), Sizing.content()).apply {
                 gap(3)
-                child(label(friend.name).horizontalSizing(Sizing.fill()))
+                child(label(if (friend.bestFriend) "§l${friend.name}" else friend.name).horizontalSizing(Sizing.fill()))
                 child(label(stats?.selectedClass?.displayName ?: "Unknown", if (stats?.selectedClass != null) CYAN else MUTED)
                     .horizontalSizing(Sizing.fill()))
                 if (reply != null) child(label(reply.status.label).horizontalSizing(Sizing.fill()))
