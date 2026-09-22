@@ -1,6 +1,9 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.JsonObject
+import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.Style
+import net.minecraft.util.StringDecomposer
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 
@@ -129,7 +132,7 @@ private fun JsonObject.obj(key: String): JsonObject? = get(key)?.takeIf { it.isJ
 private fun JsonObject.number(key: String): Double? = get(key)?.takeIf { it.isJsonPrimitive }
     ?.let { runCatching { it.asDouble }.getOrNull() }?.takeIf { it.isFinite() && it >= 0 }
 
-data class OnlineDungeonFriend(val name: String, val location: String) {
+data class OnlineDungeonFriend(val name: String, val location: String, val rankColor: Int? = null, val bestFriend: Boolean = false) {
     val badge: String get() = when {
         location.contains("Dungeon Hub", true) -> "§aIdle"
         location.contains("Dungeons", true) || location.contains("Catacombs", true) -> "§cIn Run"
@@ -137,6 +140,36 @@ data class OnlineDungeonFriend(val name: String, val location: String) {
         else -> "§7Unknown"
     }
 }
+
+/** Read the name's rendered style, including inherited component styles and legacy formatting codes. */
+fun dungeonPlayerNameStyle(component: Component, name: String): Style? {
+    val match = Regex("(?<![A-Za-z0-9_])${Regex.escape(name)}(?![A-Za-z0-9_])", RegexOption.IGNORE_CASE)
+        .find(StringDecomposer.getPlainText(component)) ?: return null
+    var offset = 0
+    var found: Style? = null
+    StringDecomposer.iterateFormatted(component, Style.EMPTY) { _, style, codePoint ->
+        if (offset == match.range.first) {
+            found = Style.EMPTY.withColor(style.color).withBold(style.isBold)
+            false
+        } else {
+            offset += Character.charCount(codePoint)
+            true
+        }
+    }
+    return found
+}
+
+fun dungeonPlayerTitle(name: String, suffix: String, rankColor: Int?): Component = Component.empty()
+    .append(Component.literal(name).withStyle { it.withColor(rankColor ?: 0xFFFFFF) })
+    .append(Component.literal(" $suffix").withStyle { it.withColor(0xFFFFFF) })
+
+fun dungeonJoinedDetails(stats: DungeonFriendStats?, clazz: DungeonClass?): String =
+    "§bCata ${stats?.catacombs ?: "?"} §8| " +
+        (clazz?.let { "${coloredDungeonClass(it)} §f${stats?.classes?.get(it) ?: "?"}" } ?: "§7Class ?")
+
+fun bestFriendChange(message: String): Pair<String, Boolean>? =
+    Regex("^(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16}) is (now|no longer) a best friend!$")
+        .matchEntire(message.replace(Regex("§."), "").trim())?.let { it.groupValues[1] to (it.groupValues[2] == "now") }
 
 enum class FriendSort(val label: String, val dungeonClass: DungeonClass? = null) {
     CATACOMBS("Cata"), HEALER("Healer", DungeonClass.HEALER), MAGE("Mage", DungeonClass.MAGE),
