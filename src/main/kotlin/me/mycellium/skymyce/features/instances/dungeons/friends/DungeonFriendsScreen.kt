@@ -30,11 +30,13 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var classesDraft = emptySet<DungeonClass>()
     private var availableDraft = emptySet<DungeonClass>()
     private var pbLimitDraft = ""
+    private var relayUrlDraft = ""
     private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
     private lateinit var apiStatus: LabelComponent
     private lateinit var listStatus: LabelComponent
+    private lateinit var relayStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
     private lateinit var sortButton: ButtonComponent
@@ -92,6 +94,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         }))
         apiStatus.color(Color.ofRgb(if (!DungeonFriendStatsCache.canFetch) 0xE6BD79 else MUTED))
         listStatus.tooltip(Component.literal(DungeonFriends.scanner.status))
+        relayStatus.text(Component.literal(DungeonFriendRelay.status))
+        relayStatus.color(Color.ofRgb(if (DungeonFriendRelay.connected) CYAN else MUTED))
     }
 
     private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text))
@@ -205,6 +209,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             child(apiStatus.horizontalSizing(Sizing.expand()))
             child(button("API setup", 62) { openApiSettings() })
         })
+        relayStatus = label(DungeonFriendRelay.status, MUTED)
+        child(relayStatus.horizontalSizing(Sizing.fill()))
     }
 
     private fun toolbarActions(row: FlowLayout) {
@@ -297,13 +303,13 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     if (accepted) invite.renderer(ButtonComponent.Renderer.flat(0xFF246545.toInt(), 0xFF34865C.toInt(), 0xFF151C23.toInt()))
                     invite.tooltip(Component.literal("Invite ${friend.name}; disabled when the party is full"))
                     val message = button("/msg", 34) { DungeonFriends.message(friend, floor, messageClass(friend)) }.active(DungeonFriends.canAct)
-                    message.tooltip(Component.literal(lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, messageClass(friend), floor)))
+                    message.tooltip(Component.literal(lfgMessage(DungeonFriendsSettings.messageTemplate, friend.name, messageClass(friend), floor) + "\nTries relay first; uses /msg if their mod does not acknowledge within 5 seconds."))
                     actions += invite
                     actions += message
                     child(invite)
                     child(message)
                     val join = button("Join", 34) { DungeonFriends.join(friend, floor) }.active(DungeonFriends.canJoin(floor))
-                    join.tooltip(Component.literal("Ask ${friend.name} for an invite, then auto join if their S+ PB qualifies.\nRequires Available classes and a PB limit for ${floor.name}; you must be solo in SkyBlock."))
+                    join.tooltip(Component.literal("Ask ${friend.name} through the relay, then auto join if their S+ PB qualifies.\nRequires a connected relay, Available classes and a PB limit for ${floor.name}; you must be solo in SkyBlock."))
                     joinActions += join
                     child(join)
                     child(button("Edit", 30) { openSettings(friend.name) }.tooltip(Component.literal("Edit secondary classes")))
@@ -342,6 +348,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         classesDraft = DungeonFriendsSettings.secondaryClasses[friend?.lowercase()].orEmpty()
         availableDraft = DungeonFriendsSettings.availability.classes
         pbLimitDraft = DungeonFriendsSettings.availability.maxPbMillis?.let(::formatDungeonTime).orEmpty()
+        relayUrlDraft = DungeonFriendsSettings.relayUrl
         settingsOpen = true
         rebuild()
     }
@@ -359,6 +366,18 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun settingsContent(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(8)
         if (editingFriend == null) {
+            child(label("PLAYER RELAY", CYAN))
+            child(label("Join messages use the relay. LFG tries the relay first, then /msg if the other mod does not acknowledge within 5 seconds. Minecraft verifies your account; no password or API key is sent to the relay.", MUTED)
+                .horizontalSizing(Sizing.fill()))
+            child(UIComponents.textBox(Sizing.fill()).apply {
+                setMaxLength(512)
+                text(relayUrlDraft)
+                setHint(Component.literal("wss://your-relay.workers.dev/websocket"))
+                onChanged().subscribe { relayUrlDraft = it }
+            })
+            child(button("Reconnect", 80) { DungeonFriendRelay.disconnect() }
+                .tooltip(Component.literal("Reconnect using saved relay settings. Save first if you changed the address.")))
+            child(separator())
             child(label("AVAILABLE FOR ${floor.name}", CYAN))
             child(label("Check the classes you can play. Eligible party invitations will be accepted while you are solo in SkyBlock. Uncheck all to stop auto joining.", MUTED)
                 .horizontalSizing(Sizing.fill()))
@@ -422,8 +441,15 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     if (classesDraft.isEmpty()) classes.remove(name) else classes[name] = classesDraft
                 }
                 val changedAvailability = available != DungeonFriendsSettings.availability
-                if (DungeonFriendsSettings.save(templateDraft, classes, available)) {
+                val relay = if (editingFriend == null) relayUrlDraft.trim() else DungeonFriendsSettings.relayUrl
+                if (relay.isNotBlank() && relayUri(relay) == null) {
+                    feedback.text(Component.literal("Use a wss:// address ending in /websocket. Leave blank to disable the relay."))
+                    return@button
+                }
+                val changedRelay = relay != DungeonFriendsSettings.relayUrl
+                if (DungeonFriendsSettings.save(templateDraft, classes, available, relay = relay)) {
                     if (changedAvailability) DungeonFriends.joining.clear()
+                    if (changedRelay) { DungeonFriends.joining.clear(); DungeonFriendRelay.disconnect() }
                     settingsOpen = false
                     rebuild()
                 } else feedback.text(Component.literal(DungeonFriendsSettings.error ?: "Use a nonempty message (up to 220 characters)."))

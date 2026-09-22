@@ -10,6 +10,7 @@ import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonAvailabil
 import me.mycellium.skymyce.features.instances.dungeons.friends.SavedDungeonParty
 import me.mycellium.skymyce.features.instances.dungeons.friends.FRIEND_FLOORS
 import me.mycellium.skymyce.features.instances.dungeons.friends.parseDungeonClass
+import me.mycellium.skymyce.features.instances.dungeons.friends.relayUri
 import me.mycellium.skymyce.utils.MC
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import java.nio.file.AtomicMoveNotSupportedException
@@ -44,6 +45,8 @@ object DungeonFriendsSettings {
         private set
     var lastParty: SavedDungeonParty? = null
         private set
+    var relayUrl = "wss://skyblock-relay.skyblock-relay.workers.dev/websocket"
+        private set
     var error: String? = null
         private set
     private var loaded = false
@@ -64,6 +67,8 @@ object DungeonFriendsSettings {
                 ?.let { gson.fromJson(it, DungeonAvailability::class.java) } ?: DungeonAvailability()
             require(available.floor in FRIEND_FLOORS && available.classes.all { it in DungeonClass.entries })
             require(available.maxPbMillis == null || available.maxPbMillis in 1..59999999)
+            val relay = json.get("relayUrl")?.asString ?: relayUrl
+            require(relay.isBlank() || relayUri(relay) != null)
             val savedParty = json.get("lastParty")?.takeUnless { it.isJsonNull }
                 ?.let { gson.fromJson(it, SavedDungeonParty::class.java) }
             savedParty?.let { saved ->
@@ -78,6 +83,7 @@ object DungeonFriendsSettings {
             secondaryClasses = secondary
             availability = available
             lastParty = savedParty
+            relayUrl = relay.trim()
         } catch (_: Exception) {
             error = "Could not read dungeon_friends.json. Repair or rename it before saving."
             SkyMyce.logger.warn("Could not read dungeon friend preferences; original file preserved")
@@ -89,19 +95,21 @@ object DungeonFriendsSettings {
         classes: Map<String, Set<DungeonClass>> = secondaryClasses,
         available: DungeonAvailability = availability,
         savedParty: SavedDungeonParty? = lastParty,
+        relay: String = relayUrl,
     ): Boolean {
         load()
         if (error != null) return false
         if (template.isBlank() || template.any { it < ' ' || it == '§' } || template.length > 220) return false
         if (available.floor !in FRIEND_FLOORS || (available.classes.isNotEmpty() && !available.enabled)) return false
         if (available.maxPbMillis != null && available.maxPbMillis !in 1..59999999) return false
+        if (relay.isNotBlank() && relayUri(relay) == null) return false
         try {
             Files.createDirectories(file.parent)
             val temporary = Files.createTempFile(file.parent, "dungeon_friends", ".tmp")
             try {
                 Files.newBufferedWriter(temporary).use { writer ->
                     gson.toJson(mapOf("messageTemplate" to template, "secondaryClasses" to classes,
-                        "availability" to available, "lastParty" to savedParty), writer)
+                        "availability" to available, "lastParty" to savedParty, "relayUrl" to relay.trim()), writer)
                 }
                 try {
                     Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
@@ -115,6 +123,7 @@ object DungeonFriendsSettings {
             secondaryClasses = classes
             availability = available
             lastParty = savedParty
+            relayUrl = relay.trim()
             return true
         } catch (_: Exception) {
             SkyMyce.logger.warn("Could not save dungeon friend preferences")

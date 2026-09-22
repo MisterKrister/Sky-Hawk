@@ -75,7 +75,8 @@ data class JoinPartyContext(
 
 /** Short-lived exchanges only: an offer in private chat is never treated as a server invitation. */
 class DungeonFriendJoining {
-    private data class Request(val data: DungeonJoinRequest, val expires: Long, var offered: DungeonClass? = null, var invited: Boolean = false)
+    private data class Request(val data: DungeonJoinRequest, val expires: Long, var offered: DungeonClass? = null,
+        var received: Boolean = false, var invited: Boolean = false)
     private val incoming = linkedMapOf<String, Request>()
     private val invitations = linkedMapOf<String, Long>()
     private val recent = mutableMapOf<String, Long>()
@@ -119,6 +120,18 @@ class DungeonFriendJoining {
         if (invitations.size < 5) invitations.putIfAbsent(name.lowercase(), now + 55000)
     }
 
+    fun acknowledged(name: String, token: String) {
+        incoming[name.lowercase()]?.takeIf { it.offered != null && it.data.token == token }?.received = true
+        if (outgoing?.first.equals(name, true) && outgoing?.second?.data?.token == token) status = "$name's mod received your Join request"
+    }
+
+    fun failed(name: String, token: String) {
+        val removed = incoming[name.lowercase()]?.takeIf { it.data.token == token }?.let { incoming.remove(name.lowercase()); true } == true
+        val requested = outgoing?.first.equals(name, true) && outgoing?.second?.data?.token == token
+        if (requested) outgoing = null
+        if (removed || requested) status = "$name did not acknowledge the relay request"
+    }
+
     fun nextCommand(context: JoinPartyContext, now: Long, stats: (String) -> DungeonFriendStats?): String? {
         prune(now)
         if (now < acceptingUntil) return null
@@ -159,6 +172,7 @@ class DungeonFriendJoining {
                 status = "Offering ${clazz.displayName} to $name"
                 return "msg $name Inviting you for ${context.floor.name} as ${clazz.displayName} [SkyMyce Ready ${request.data.token}]"
             }
+            if (!request.received) continue
             request.invited = true
             status = "Invited $name as ${clazz.displayName}"
             return "party invite $name"

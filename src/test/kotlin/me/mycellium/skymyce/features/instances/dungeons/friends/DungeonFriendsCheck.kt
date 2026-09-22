@@ -17,6 +17,32 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    check(relayUri("wss://example.workers.dev/websocket") != null)
+    check(relayUri("ws://127.0.0.1:8787/websocket?room=testing") != null)
+    listOf("http://example.com/websocket", "ws://example.com/websocket", "wss://user:password@example.com/websocket",
+        "wss://example.com/websocket#fragment", "wss://example.com/wrong", "wss://example.com/websocket?token=secret").forEach { check(relayUri(it) == null) }
+    val deliveries = RelayDeliveries()
+    var acknowledged = 0
+    var fallback = 0
+    deliveries.add("first", "Alice", 0, { acknowledged++ }, { fallback++ })
+    deliveries.acknowledge("first", "Bob")
+    deliveries.tick(4999)
+    check(acknowledged == 0 && fallback == 0)
+    deliveries.acknowledge("first", "ALICE")
+    deliveries.tick(5000)
+    check(acknowledged == 1 && fallback == 0)
+    deliveries.add("second", "Alice", 10000, { acknowledged++ }, { fallback++ })
+    deliveries.tick(15000)
+    deliveries.acknowledge("second", "Alice")
+    deliveries.fail("second")
+    check(acknowledged == 1 && fallback == 1) // Late/missing receipts fall back exactly once.
+    deliveries.add("third", "Bob", 20000, { acknowledged++ }, { fallback++ })
+    deliveries.clear()
+    deliveries.tick(30000)
+    check(fallback == 1) // Leaving the server cancels unsent messages.
+    deliveries.add("fourth", "Bob", 30000, { acknowledged++ }, { fallback++ })
+    deliveries.clear(failed = true)
+    check(fallback == 2) // A connection failure while still playing triggers fallback.
     // Hovering a full-width label's blank area has no text style, even when it has a location tooltip.
     val hoverFix = LabelComponentMixin::class.java.getDeclaredMethod("skymyce\$nonNullHoverStyle", Style::class.java)
         .apply { isAccessible = true }
@@ -328,6 +354,11 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     client.receiveOffer("Host", offer.removePrefix("msg self "), 500)
     check(client.nextCommand(clientContext, 600) { known } == null) // A private offer is not a server invitation.
     check(host.nextCommand(hostContext.copy(missing = emptySet()), 600) { known } == null)
+    check(host.nextCommand(hostContext, 700) { known } == null) // Wait for the recipient's mod, not just the relay server.
+    host.acknowledged("Self", "ffffffffffffffff")
+    host.failed("Self", "ffffffffffffffff")
+    check(host.nextCommand(hostContext, 800) { known } == null) // Old receipts/failures cannot affect a newer exchange.
+    host.acknowledged("Self", request.token)
     check(host.nextCommand(hostContext, 1500) { known } == "party invite self")
     check(host.nextCommand(hostContext, 1600) { known } == null)
     check(host.classFor("SELF") == TANK)
