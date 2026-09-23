@@ -20,6 +20,19 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    checkJoinLookups()
+    checkFullFriendRoster()
+    checkMenuRefresh()
+    checkSocialFeatures()
+    check(friendActivity("in SkyBlock - The Catacombs") == FriendActivity.IN_RUN)
+    check(friendActivity("in LIMBO") == FriendActivity.LIMBO)
+    check(friendActivity("in SkyBlock - Dungeon Hub") == FriendActivity.IDLE)
+    check(friendActivity("in SkyBlock - Private Island") == FriendActivity.IDLE)
+    check(friendActivity("in SkyBlock - Crystal Hollows") == FriendActivity.SKYBLOCK)
+    check(friendActivity("in Bed Wars") == FriendActivity.OTHER_GAME)
+    check(friendActivity("in Legend Arena") == FriendActivity.OTHER_GAME)
+    check(friendActivity("Unknown") == FriendActivity.UNKNOWN)
+    check(matchesFriendName("MisterKrister", " kris ") && !matchesFriendName("Alice", "bob"))
     val retry = RelayRetry()
     retry.failed(100, false)
     check(retry.nextAttempt == 1100L)
@@ -739,6 +752,229 @@ fun main() {
         Files.deleteIfExists(savedDirectory)
     }
     println("Dungeon Friends checks passed")
+}
+
+private fun checkJoinLookups() {
+    val shared = JsonParser.parseString("""{"name":"Alice","uuid":"${"a".repeat(32)}","fetchedAt":1000000,
+        "wealth":{"hasProfile":true,"networth":1000000000,"purse":1000,"profile":"Apple","status":""}}""").asJsonObject
+    val value = sharedFriendWealth(shared, "ALICE", null, 1000100)!!
+    check(value.networth == 1000000000.0 && value.purse == 1000.0 && value.bank == null)
+    check(value.fetchedAt == 1000000L && value.expires == 1900000L)
+    check(sharedFriendWealth(shared, "Bob", null, 1000100) == null)
+    check(sharedFriendWealth(shared, "Alice", java.util.UUID(0, 0), 1000100) == null)
+    check(sharedFriendWealth(shared, "Alice", null, 1900000) == null)
+    check(sharedFriendWealth(shared.deepCopy().apply { addProperty("fetchedAt", 1060101) }, "Alice", null, 1000100) == null)
+    check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("purse", -1) }, "Alice", null, 1000100) == null)
+    check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("purse", "1000") }, "Alice", null, 1000100) == null)
+    check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("hasProfile", false) }, "Alice", null, 1000100) == null)
+    val absentShared = shared.deepCopy().apply { add("wealth", JsonParser.parseString("""{"hasProfile":false}""")) }
+    check(sharedFriendWealth(absentShared, "Alice", null, 1900000)?.hasProfile == false)
+
+    val cooldown = ProfileLookupCooldown()
+    check(cooldown.start(1000))
+    check(!cooldown.start(1001)) // Wealth and dungeon stats cannot start simultaneous provider requests.
+    cooldown.finish(2000, success = false)
+    check(cooldown.nextRequest == 62000L && !cooldown.start(61999))
+    check(cooldown.start(62000))
+    cooldown.finish(63000, success = false)
+    check(cooldown.nextRequest == 183000L && !cooldown.start(182999))
+    check(cooldown.start(183000))
+    cooldown.finish(184000, success = true)
+    check(!cooldown.start(193999) && cooldown.start(194000))
+    cooldown.finish(195000, success = false)
+    check(cooldown.nextRequest == 255000L) // A successful request resets exponential backoff.
+    repeat(4) {
+        val ready = cooldown.nextRequest
+        check(cooldown.start(ready))
+        cooldown.finish(ready, success = false)
+        check(cooldown.nextRequest - ready in 60000L..300000L)
+    }
+
+    DungeonFriendStatsCache.clear()
+    DungeonFriendStatsCache.request("Background")
+    DungeonFriendStatsCache.request("Omas", priority = true)
+    check(DungeonFriendStatsCache.isPending("OMAS"))
+    val lookups = mutableListOf<String>()
+    DungeonFriendStatsCache.pollShared(1000) { name, _ ->
+        lookups += name
+        CompletableFuture.completedFuture(null)
+    }
+    check(lookups == listOf("omas")) // New joins do not wait behind the friends list.
+    val party = DungeonFriendParty()
+    party.roster(listOf("Self"), 1, true)
+    party.chat("Omas joined the party.", "Self")
+    val title = DungeonJoinedTitle("Omas", Component.literal("Omas joined the party."), 1000)
+    check(title.subtitle(1100, null, null, null, loading = true) == null)
+    party.chat("Party Finder > [MVP+] Omas joined the dungeon group! (Tank Level 47)", "Self")
+    check(party.size == 2 && party.classLevel("OMAS", TANK) == 47)
+    check(party.classLevel("Omas", MAGE) == null)
+    check(title.subtitle(1200, null, TANK, party.classLevel("Omas", TANK), loading = true) == null)
+    val fetched = DungeonFriendStats(StatsState.AVAILABLE, catacombs = 50, classes = mapOf(TANK to 46), selectedClass = ARCHER)
+    check(DungeonFriendStatsCache.storeFetched("omas", 0, fetched, "a".repeat(32), 1000, 2000))
+    check(title.subtitle(2000, DungeonFriendStatsCache.get("Omas"), party.classes["omas"],
+        party.classLevel("Omas", TANK), loading = true) == "§fCata §c§l50 §8| §aTank §c47")
+    check(title.subtitle(2200, fetched, TANK, 47, loading = false) == null) // One title for both announcements.
+    val unavailable = DungeonJoinedTitle("Omas", Component.empty(), 1000)
+    check(unavailable.subtitle(61000, null, TANK, 47, loading = true) == "§fCata §7? §8| §aTank §c47")
+    val failed = DungeonJoinedTitle("Omas", Component.empty(), 1000)
+    check(failed.subtitle(1200, null, TANK, 47, loading = false) != null)
+    party.chat("Omas has left the party.", "Self")
+    check(party.classLevel("Omas", TANK) == null)
+    DungeonFriendStatsCache.clear()
+}
+
+private fun checkFullFriendRoster() {
+    val old = OnlineDungeonFriend("Old", "in Hub")
+    val scanner = FriendListScanner(listOf(old))
+    scanner.refresh(0, full = true)
+    scanner.refresh(0) // A simultaneous Party Finder refresh cannot downgrade a full scan.
+    check(scanner.tick(0) == "friend list 1")
+    scanner.receive("Friends (Page 1 of 3)\nAlice is in SkyBlock - Garden\nBob is offline\n--------------------", 1)
+    check(scanner.scanning && !scanner.hasScannedAll && scanner.savedAllFriends == null)
+    check(scanner.savedFriends.toList() == listOf(old)) // Partial scans don't replace the saved snapshot.
+    check(scanner.tick(1201) == "friend list 2")
+    scanner.receive("Friends (Page 2 of 3)\nCarol is currently offline\n--------------------", 1202)
+    check(scanner.tick(2402) == "friend list 3")
+    scanner.receive("Friends (Page 3 of 3)\nDave is offline\n--------------------", 2403)
+    check(!scanner.scanning && scanner.hasScannedAll)
+    check(scanner.all.keys == setOf("alice", "bob", "carol", "dave") && scanner.online.keys == setOf("alice"))
+    check(scanner.all["carol"]?.activity == FriendActivity.OFFLINE)
+    scanner.bestFriend("Bob", true)
+    check(scanner.all["bob"]?.bestFriend == true)
+    scanner.notification("Alice", false)
+    check("alice" in scanner.all && "alice" !in scanner.online)
+    scanner.notification("NewFriend", true)
+    check("newfriend" in scanner.all && "newfriend" in scanner.online)
+    scanner.remove("Dave")
+    check("dave" !in scanner.all && scanner.savedAllFriends!!.none { it.name == "Dave" })
+    val folder = Files.createTempDirectory("friend-roster-check")
+    val rosterPath = folder.resolve("friends.json")
+    val wealthPath = folder.resolve("wealth.json")
+    try {
+        val store = FriendListStore(rosterPath)
+        store.save(scanner.savedFriends, scanner.savedAllFriends)
+        val restored = FriendListScanner(store.load(), store.loadAll())
+        check(restored.all == scanner.all && restored.hasScannedAll && restored.tick(0) == null)
+        restored.refresh(0, full = true)
+        restored.tick(0)
+        restored.receive("Friends (Page 1 of 3)\nPartial is offline\n--------------------", 1)
+        restored.tick(1201)
+        restored.tick(11201)
+        check(restored.savedAllFriends!!.toList() == scanner.savedAllFriends!!.toList())
+        val played = FriendWealth(networth = 100.0, fetchedAt = 1000, hasProfile = true, uuid = "a".repeat(8) + "-aaaa-aaaa-aaaa-" + "a".repeat(12))
+        val absent = FriendWealth(fetchedAt = 1000, hasProfile = false, uuid = "b".repeat(8) + "-bbbb-bbbb-bbbb-" + "b".repeat(12))
+        val failed = FriendWealth(fetchedAt = 1000, status = "API unavailable")
+        check(!played.shouldRefresh(999999, online = false, skyBlockLocation = false))
+        check(!played.shouldRefresh(301000, online = true, skyBlockLocation = true))
+        check(played.shouldRefresh(901000, online = true, skyBlockLocation = true))
+        check(!absent.shouldRefresh(Long.MAX_VALUE, online = true, skyBlockLocation = false))
+        check(!absent.copy(expires = 0).shouldRefresh(999999, online = false, skyBlockLocation = false))
+        check(absent.shouldRefresh(301000, online = true, skyBlockLocation = true)) // They started playing later.
+        check(!failed.shouldRefresh(60999, true, false) && failed.shouldRefresh(61000, true, false))
+        val wealth = FriendWealthStore(wealthPath)
+        wealth.save(mapOf("alice" to played, "bob" to absent, "failed" to failed))
+        check(wealth.load() == mapOf("alice" to played, "bob" to absent)) // No negative entry on API failure.
+        Files.writeString(wealthPath, "{bad json")
+        check(runCatching { wealth.load() }.isFailure && Files.readString(wealthPath) == "{bad json")
+        fun presence(text: String) = publicProfilePresence(JsonParser.parseString(text).asJsonObject)
+        check(presence("""{"success":true,"profiles":null}""") == false)
+        check(presence("""{"success":true,"profiles":[]}""") == false)
+        check(presence("""{"success":true,"profiles":[{}]}""") == true)
+        check(presence("""{"success":false,"profiles":[]}""") == null)
+        check(presence("""{"success":true}""") == null)
+        check(presence("""{"success":true,"profiles":[null]}""") == null)
+    } finally {
+        Files.deleteIfExists(rosterPath); Files.deleteIfExists(wealthPath); Files.deleteIfExists(folder)
+    }
+}
+
+private fun checkMenuRefresh() {
+    val scanner = FriendListScanner(listOf(OnlineDungeonFriend("Stale", "in Hub")))
+    check(scanner.refreshOnOpen(0))
+    check(!scanner.refreshOnOpen(0)) // Opening another menu before the first tick cannot queue a second scan.
+    check(scanner.tick(0) == "friend list 1")
+    check(scanner.receive("Friends (Page 1 of 9)\nAlice is in SkyBlock - Garden\nBob is offline\n--------------------", 1))
+    check(scanner.online.keys == setOf("alice") && !scanner.scanning)
+    check(!scanner.refreshOnOpen(59999))
+    check(scanner.tick(60000) == null) // Cooldown expiry alone does not start a periodic scan.
+    check(scanner.refreshOnOpen(60000))
+    check(scanner.tick(60000) == "friend list 1")
+    check(scanner.receive("Friends (Page 1 of 9)\nAlice is in SkyBlock - The Catacombs\nBob is currently offline\n--------------------", 60001))
+    check(scanner.online["alice"]?.activity == FriendActivity.IN_RUN)
+    check(scanner.tick(61201) == null && scanner.remainingPages == 0) // No page two after an offline friend.
+    scanner.refresh(62000) // Manual refresh remains available and restarts the automatic cooldown.
+    check(scanner.tick(62000) == "friend list 1")
+    check(scanner.receive("Friends (Page 1 of 9)\nAlice is in Limbo\nBob is offline\n--------------------", 62001))
+    scanner.cancel() // Closing/disconnecting does not reset the cooldown on this account's scanner.
+    check(!scanner.refreshOnOpen(121999))
+    check(scanner.refreshOnOpen(122000))
+    check(scanner.tick(122000) == "friend list 1")
+    scanner.receive("Friends (Page 1 of 9)\nAlice is in Hub\n--------------------", 122001)
+    check(!scanner.refreshOnOpen(182000)) // Never restart a scan that is between pages, even after a minute.
+    check(scanner.tick(182000) == "friend list 2")
+    check(scanner.receive("Friends (Page 2 of 9)\nBob is offline\n--------------------", 182001))
+    check(scanner.tick(183201) == null)
+    val initialScan = FriendListScanner()
+    check(!initialScan.refreshOnOpen(0)) // The automatic first load is already queued.
+    check(initialScan.tick(0) == "friend list 1")
+    check(initialScan.receive("You don't have any friends!", 1))
+    check(!initialScan.refreshOnOpen(59999) && initialScan.refreshOnOpen(60000))
+}
+
+private fun checkSocialFeatures() {
+    check(tradePartner("You     [MVP+] Alice_1") == "Alice_1")
+    check(tradePartner("You     Bob") == "Bob")
+    check(tradePartner("Trading with Bob") == null)
+    check(completedTradePartner("Trade completed with [MVP+] Alice_1!") == "Alice_1")
+    check(completedTradePartner("From Bob: Trade completed with Bob!") == null)
+    val item = TradedItem("item:hyperion", "Heroic Hyperion", 1, java.util.UUID.randomUUID().toString())
+    val trade = GearTrade(java.util.UUID.randomUUID().toString(), 1000, "Bob", null, "Apple", listOf(item), emptyList())
+    val capture = TradeCapture()
+    check(capture.complete("Bob", 1000) == null)
+    capture.observe(trade, 1000)
+    check(capture.complete("Alice", 1001) == null)
+    capture.observe(trade, 1000)
+    check(capture.complete("Bob", 6001) == null)
+    capture.observe(trade, 1000)
+    capture.clear() // Cancel/disconnect; later confirmation cannot resurrect an old offer.
+    check(capture.complete("Bob", 1001) == null)
+    capture.observe(trade, 1000)
+    check(capture.complete("bob", 1001)?.sent == listOf(item))
+    check(capture.complete("Bob", 1002) == null) // Duplicate confirmation.
+    capture.observe(trade, 1000)
+    capture.observe(trade.copy(sent = emptyList()), 1001) // Removed items are not lent.
+    check(capture.complete("Bob", 1002)?.sent?.isEmpty() == true)
+    val folder = Files.createTempDirectory("skymyce-ledger-check")
+    val file = folder.resolve("ledger.json")
+    try {
+        val ledger = GearLedger(file)
+        check(ledger.record(trade) && ledger.record(trade) && ledger.trades.size == 1)
+        check(ledger.mark(trade.id, 0, LoanState.LENT))
+        check(GearLedger(file).trades.single().sent.single().loan == LoanState.LENT)
+        check(ledger.mark(trade.id, 0, LoanState.RETURNED))
+        check(GearLedger(file).trades.single().sent.single().loan == LoanState.RETURNED)
+        check(!ledger.mark(trade.id, 1, LoanState.LENT))
+        val otherAccount = GearLedger(folder.resolve("other.json"))
+        check(otherAccount.trades.isEmpty())
+        Files.writeString(file, "{broken")
+        val broken = GearLedger(file)
+        check(broken.error != null && !broken.record(trade))
+        check(Files.readString(file) == "{broken")
+        Files.writeString(file, """{"version":99,"trades":[]}""")
+        check(!GearLedger(file).record(trade))
+    } finally {
+        Files.deleteIfExists(file)
+        Files.deleteIfExists(folder)
+    }
+    val balances = JsonParser.parseString("""{"banking":{"balance":0},"currencies":{"coin_purse":123.5}}""").asJsonObject
+    check(publicCoins(balances, "banking", "balance") == 0.0)
+    check(publicCoins(balances, "currencies", "coin_purse") == 123.5)
+    check(publicCoins(balances, "profile", "bank_account") == null)
+    check(publicCoins(JsonParser.parseString("""{"value":-1}""").asJsonObject, "value") == null)
+    check(publicCoins(JsonParser.parseString("""{"value":"NaN"}""").asJsonObject, "value") == null)
+    check(!hasPublicInventory(JsonParser.parseString("""{"inventory":{"bag_contents":{}}}""").asJsonObject))
+    check(!hasPublicInventory(JsonParser.parseString("""{"inventory":{"inv_contents":{"data":""}}}""").asJsonObject))
+    check(hasPublicInventory(JsonParser.parseString("""{"inventory":{"inv_contents":{"data":"encoded-NBT"}}}""").asJsonObject))
 }
 
 data class ViewerFloor(val completions: Long, val fastestTime: Duration, val fastestTimeSplus: Duration)

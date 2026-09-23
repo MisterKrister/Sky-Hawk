@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { verifyAccount } from "./auth";
 import { classes, SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
+import { SharedWealth, WEALTH_TTL, validateWealth } from "./wealth";
 
 type RelayEnv = Env;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
@@ -18,6 +19,9 @@ type Session = {
   seen: string[];
   inbox: { id: string; from: string; expires: number }[];
   uploads?: StatsGrant[];
+  wealthUploads?: StatsGrant[];
+  wealthCredits?: number;
+  wealthUpdated?: number;
   cacheCredits?: number;
   cacheUpdated?: number;
   party?: JoinPolicy;
@@ -50,10 +54,12 @@ export default {
 
 export class RelayRoom extends DurableObject<RelayEnv> {
   private readonly stats: SharedStats;
+  private readonly wealth: SharedWealth;
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     this.stats = new SharedStats(ctx.storage.sql);
+    this.wealth = new SharedWealth(ctx.storage.sql);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -112,7 +118,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.liveUpdates = data.liveUpdates === true;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, partyPolicies: true, liveUpdates: true }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
       return;
     }
@@ -156,6 +162,53 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         if (name && Object.hasOwn(parties, name) && peer.party && peer.uuid) parties[name] = { ...peer.party, uuid: peer.uuid };
       }
       ws.send(JSON.stringify({ type: "party_result", id: data.id, parties }));
+      return;
+    }
+
+    if (data.type === "wealth_get" || data.type === "wealth_put") {
+      const now = Date.now();
+      if (encoder.encode(raw).length > 2048 || typeof data.id !== "string" || !uuid.test(data.id) ||
+          typeof data.name !== "string" || !username.test(data.name) ||
+          (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid)))) {
+        ws.close(1008, "Invalid wealth request"); return;
+      }
+      session.wealthCredits = Math.min(6, (session.wealthCredits ?? 6) + (now - (session.wealthUpdated ?? now)) / 1000);
+      session.wealthUpdated = now;
+      session.wealthUploads = (session.wealthUploads ?? []).filter(it => it.expires > now);
+      const allowed = session.wealthCredits >= 1;
+      if (allowed) session.wealthCredits--;
+      ws.serializeAttachment(session);
+      if (!allowed) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, error: "rate_limited", retryAt: now + 5000 })); return; }
+      if (data.type === "wealth_get") {
+        const record = this.wealth.get(data.name, data.uuid as string | undefined, now, data.refresh === true);
+        if (record) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record })); return; }
+        const own = session.wealthUploads.find(grant => grant.name === (data.name as string).toLowerCase() &&
+          (!grant.uuid || grant.uuid === data.uuid));
+        if (own) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null, upload: own.token })); return; }
+        // Socket attachments retain leases during hibernation. One client fetches each missing player.
+        const owner = this.ctx.getWebSockets().filter(other => other.readyState === WebSocket.OPEN)
+          .flatMap(other => ((other.deserializeAttachment() as Session).wealthUploads ?? []))
+          .find(grant => grant.name === (data.name as string).toLowerCase() && grant.expires > now);
+        if (owner) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, retryAt: Math.min(owner.expires, now + 5000) })); return; }
+        const grant = { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
+          token: crypto.randomUUID().replaceAll("-", ""), expires: now + 120_000 };
+        session.wealthUploads = [...session.wealthUploads.slice(-3), grant];
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null, upload: grant.token }));
+      } else {
+        const grant = session.wealthUploads.find(it => it.name === (data.name as string).toLowerCase() &&
+          it.token === data.upload && (!it.uuid || it.uuid === data.uuid));
+        const wealth = validateWealth(data.wealth);
+        if (!grant || !wealth || typeof data.uuid !== "string" || !uuid.test(data.uuid) ||
+            !Number.isSafeInteger(data.fetchedAt) || (data.fetchedAt as number) > now + 60_000 || (data.fetchedAt as number) <= now - WEALTH_TTL) {
+          ws.send(JSON.stringify({ type: "wealth_result", id: data.id, error: "invalid_upload" })); return;
+        }
+        session.wealthUploads = session.wealthUploads.filter(it => it !== grant);
+        ws.serializeAttachment(session);
+        const stored = this.wealth.put({ name: data.name, uuid: data.uuid, wealth, fetchedAt: Math.min(data.fetchedAt as number, now) }, now);
+        // Only the requesting client receives totals; avoid broadcasting a wealth update to the entire room.
+        ws.send(JSON.stringify({ type: "wealth_result", id: data.id, stored }));
+      }
       return;
     }
 

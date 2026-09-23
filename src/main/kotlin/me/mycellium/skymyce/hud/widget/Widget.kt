@@ -1,8 +1,17 @@
 package me.mycellium.skymyce.hud.widget
 
-import me.mycellium.skymyce.hud.HudContext
-import me.mycellium.skymyce.hud.HudElement
+import io.wispforest.owo.ui.container.FlowLayout
+import io.wispforest.owo.ui.core.OwoUIAdapter
+import io.wispforest.owo.ui.core.OwoUIGraphics
+import io.wispforest.owo.ui.core.Sizing
+import io.wispforest.owo.ui.core.UIComponent
+import me.mycellium.skymyce.hud.replaceContent
 import me.mycellium.skymyce.hud.widget.WidgetManager.register
+import me.mycellium.skymyce.utils.MC
+import net.minecraft.client.gui.GuiGraphicsExtractor
+import net.minecraft.client.input.MouseButtonEvent
+import kotlin.math.ceil
+import kotlin.math.floor
 
 class Widget(
     val id: String,
@@ -11,14 +20,19 @@ class Widget(
     var y: Int = 0,
     var scale: Float = 1f,
     var anchor: Anchor = Anchor.TOP_LEFT,
-    val builder: Widget.() -> HudElement? = { null }
+    /** Update and return retained owo components; null hides the widget without discarding its UI state. */
+    val builder: Widget.() -> UIComponent? = { null }
 ) {
     var sinceActive: Long = 0L
 
-    var lastRenderable: HudElement? = null
+    var lastRenderable: UIComponent? = null
         private set
 
     var isRenderable: Boolean = false
+        private set
+
+    internal var adapter: OwoUIAdapter<FlowLayout>? = null
+        private set
 
     val renderX: Int
         get() = x - (anchor.x * width).toInt()
@@ -27,10 +41,10 @@ class Widget(
         get() = y - (anchor.y * height).toInt()
 
     val width: Int
-        get() = ((lastRenderable?.width ?: 0) * scale).toInt()
+        get() = ceil((adapter?.rootComponent?.width() ?: 0) * scale).toInt()
 
     val height: Int
-        get() = ((lastRenderable?.height ?: 0) * scale).toInt()
+        get() = ceil((adapter?.rootComponent?.height() ?: 0) * scale).toInt()
 
     init {
         this.register()
@@ -52,22 +66,67 @@ class Widget(
 
     fun toConfig(): WidgetConfig = WidgetConfig(x, y, scale, anchor)
 
-    fun inBounds(selX: Int, selY: Int): Boolean = selX in renderX..renderX + width && selY in renderY..renderY + height
+    fun inBounds(selX: Int, selY: Int): Boolean = selX >= renderX && selX < renderX + width && selY >= renderY && selY < renderY + height
 
-    fun render(ctx: HudContext) {
+    internal fun localX(mouseX: Double) = (mouseX - renderX) / scale
+    internal fun localY(mouseY: Double) = (mouseY - renderY) / scale
+    internal fun localClick(click: MouseButtonEvent) = MouseButtonEvent(localX(click.x), localY(click.y), click.buttonInfo())
+
+    fun render(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTicks: Float) {
         val element = builder()
         isRenderable = (element != null)
 
-        if (!isRenderable) return
-        lastRenderable = element
+        if (element == null) return
         sinceActive = System.currentTimeMillis()
 
-        ctx.graphics.pose().pushMatrix()
-        ctx.graphics.pose().translate(renderX.toFloat(), renderY.toFloat())
-        ctx.graphics.pose().scale(scale)
+        val window = MC.instance.window
+        val availableWidth = ceil(window.guiScaledWidth / scale).toInt()
+        val availableHeight = ceil(window.guiScaledHeight / scale).toInt()
+        val ui = adapter ?: OwoUIAdapter.createWithoutScreen<FlowLayout>(0, 0, availableWidth, availableHeight) { _, _ ->
+            object : FlowLayout(Sizing.content(), Sizing.content(), Algorithm.VERTICAL) {
+                init { allowOverflow(true) }
+                override fun draw(graphics: OwoUIGraphics, mouseX: Int, mouseY: Int, partialTicks: Float, delta: Float) {
+                    // Owo updates animations first; apply the anchor using this frame's measured size.
+                    transformed(graphics) { super.draw(graphics, mouseX, mouseY, partialTicks, delta) }
+                }
+            }
+        }.also { adapter = it }
+        if (lastRenderable !== element) {
+            ui.rootComponent.replaceContent(element)
+            lastRenderable = element
+            ui.inflateAndMount()
+        }
+        if (ui.width() != availableWidth || ui.height() != availableHeight) {
+            ui.moveAndResize(0, 0, availableWidth, availableHeight)
+        }
 
-        lastRenderable?.renderAll(ctx, 0, 0)
+        ui.extractRenderState(graphics, floor(localX(mouseX.toDouble())).toInt(), floor(localY(mouseY.toDouble())).toInt(), partialTicks)
+    }
 
-        ctx.graphics.pose().popMatrix()
+    fun drawTooltip(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, partialTicks: Float) {
+        if (!isRenderable || !inBounds(mouseX, mouseY)) return
+        transformed(graphics) {
+            adapter?.drawTooltip(graphics, floor(localX(mouseX.toDouble())).toInt(), floor(localY(mouseY.toDouble())).toInt(), partialTicks)
+        }
+    }
+
+    private inline fun transformed(graphics: GuiGraphicsExtractor, draw: () -> Unit) {
+        graphics.pose().pushMatrix()
+        try {
+            graphics.pose().translate(renderX.toFloat(), renderY.toFloat())
+            graphics.pose().scale(scale)
+            draw()
+        } finally {
+            graphics.pose().popMatrix()
+        }
+    }
+
+    fun dispose() {
+        adapter?.rootComponent?.clearChildren()
+        adapter?.dispose()
+        adapter = null
+        lastRenderable = null
+        isRenderable = false
+        sinceActive = 0L
     }
 }

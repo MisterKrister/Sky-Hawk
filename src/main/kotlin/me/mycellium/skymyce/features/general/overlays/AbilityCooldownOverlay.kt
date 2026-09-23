@@ -2,11 +2,11 @@ package me.mycellium.skymyce.features.general.overlays
 
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.config.misc.GeneralConfig
-import me.mycellium.skymyce.hud.HudElement
-import me.mycellium.skymyce.hud.elements.LayoutAxis
-import me.mycellium.skymyce.hud.elements.LayoutType
-import me.mycellium.skymyce.hud.elements.StackElement
-import me.mycellium.skymyce.hud.elements.TextElement
+import io.wispforest.owo.ui.core.HorizontalAlignment
+import me.mycellium.skymyce.hud.hudColumn
+import me.mycellium.skymyce.hud.hudLabel
+import me.mycellium.skymyce.hud.updateText
+import me.mycellium.skymyce.hud.updateTextLines
 import me.mycellium.skymyce.hud.widget.Anchor
 import me.mycellium.skymyce.hud.widget.Widget
 import me.mycellium.skymyce.utils.PlayerUtils
@@ -24,6 +24,8 @@ import kotlin.time.Duration.Companion.seconds
 
 object AbilityCooldownOverlay : SkyMyceModule() {
     private val cooldowns: MutableMap<SkyBlockId, Triple<Duration, Duration, Duration>> = mutableMapOf()
+    private val cooldownLabel by lazy { hudLabel() }
+    private val notifications by lazy { hudColumn().apply { horizontalAlignment(HorizontalAlignment.CENTER) } }
 
     val widget = Widget("ability_cooldown_display", "Ability Cooldown Display", 480, 270, anchor = Anchor.CENTER) {
         if (!GeneralConfig.displayAbilityCooldown) return@Widget null
@@ -35,30 +37,31 @@ object AbilityCooldownOverlay : SkyMyceModule() {
         val time = now - cooldown.first
         val duration = maxOf(cooldown.second, cooldown.third)
 
-        return@Widget if (time < duration) {
-            TextElement("§cCooldown: ${(duration - time).inWholeSeconds.seconds}")
+        cooldownLabel.updateText(if (time < duration) {
+            "§cCooldown: ${(duration - time).inWholeSeconds.seconds}"
         } else {
-            TextElement("§aAbility Ready!")
-        }
+            "§aAbility Ready!"
+        })
+        cooldownLabel
     }
 
     val notiWidget = Widget("ability_reset_display", "Ability Reset Display", 480, 270, 1.5f, anchor = Anchor.CENTER) {
         if (!GeneralConfig.displayAbilityNotification) return@Widget null
         val now = System.currentTimeMillis().milliseconds
 
-        val lines: MutableList<HudElement> = mutableListOf()
+        val lines = mutableListOf<String>()
         for ((id, cooldown) in cooldowns) {
             val time = now - cooldown.first
             val duration = maxOf(cooldown.second, cooldown.third)
 
             if ((time - duration) !in 0.seconds..5.seconds) continue
 
-            lines += TextElement("§a${id.toItem().hoverName.stripped}")
+            lines += "§a${id.toItem().hoverName.stripped}"
         }
 
         if (lines.isEmpty()) return@Widget null
 
-        return@Widget StackElement(LayoutAxis.VERTICAL, LayoutType.CENTER, children = lines)
+        notifications.updateTextLines(lines)
     }
 
     @Subscription

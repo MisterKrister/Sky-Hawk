@@ -58,7 +58,7 @@ object DungeonFriends : SkyMyceModule() {
     private val receivedOffers = mutableMapOf<String, DungeonLfgOffer>()
     private var lastJoinStatus = ""
     private var nextJoinStatsCheck = 0L
-    private val joinedTitles = mutableMapOf<String, Long>()
+    private val joinedTitles = mutableMapOf<String, DungeonJoinedTitle>()
     var partyFloor: DungeonFloor? = null
         private set
     val hostingFloor: DungeonFloor get() = partyFloor ?: DungeonFriendsSettings.availability.floor
@@ -118,7 +118,8 @@ object DungeonFriends : SkyMyceModule() {
     override fun init() {
         DungeonFriendsSettings.load()
         DungeonFriendStatsCache.initialize(SkyMyce.configPath.resolve("dungeon_friend_stats.json"))
-        ClientLifecycleEvents.CLIENT_STOPPING.register { saveFriends(true); DungeonFriendStatsCache.save(true); DungeonFriendRelay.disconnect() }
+        FriendWealthCache.initialize(SkyMyce.configPath.resolve("friend_wealth.json"))
+        ClientLifecycleEvents.CLIENT_STOPPING.register { saveFriends(true); DungeonFriendStatsCache.save(true); FriendWealthCache.save(true); DungeonFriendRelay.disconnect() }
         ClientTickEvents.END_CLIENT_TICK.register { tick() }
         ClientSendMessageEvents.ALLOW_COMMAND.register { command ->
             if (!sendingPartyAction) partyNotices.command(command, automatic = false, now())
@@ -129,6 +130,15 @@ object DungeonFriends : SkyMyceModule() {
                 !relayReply(reply.groupValues[1], reply.groupValues[2])
             } else true
         }
+    }
+
+    fun refreshFriends(automatic: Boolean = false, full: Boolean = false) {
+        if (!LocationAPI.onHypixel || MC.instance.player == null) return
+        loadFriends()
+        if (automatic) {
+            if (!scanner.refreshOnOpen(now(), full)) return
+        } else scanner.refresh(now(), full)
+        DungeonFriendStatsCache.refresh()
     }
 
     override fun tick() {
@@ -143,7 +153,6 @@ object DungeonFriends : SkyMyceModule() {
         loadFriends()
         partyBorders.tick(now()) { it.send() }
         replies.prune(now())
-        joinedTitles.entries.removeIf { it.value <= now() }
         sentOffers.entries.removeIf { it.value.expires <= now() }
         receivedOffers.entries.removeIf { it.value.expires <= now() }
         joining.prune(now())
@@ -154,19 +163,31 @@ object DungeonFriends : SkyMyceModule() {
             nextPartyRequest = now() + if (sent) 60000 else 5000
         }
         val active = DungeonFriendsConfig.enabled && LocationAPI.isOnSkyBlock
-        if (active || MC.screen is DungeonFriendsScreen) {
+        if (active || MC.screen is DungeonFriendsScreen || MC.screen is FriendsSocialScreen) {
             scanner.tick(now())?.let { command ->
                 sendingScan = true
                 try { sendCommand(command) } finally { sendingScan = false }
             }
             DungeonFriendStatsCache.request(MC.player.name.string, MC.player.uuid)
             scanner.online.values.forEach { friend ->
-                DungeonFriendStatsCache.request(friend.name, FriendsAPI.getFriend(friend.name)?.uuid)
+                if (FriendWealthCache.get(friend.name)?.hasProfile != false)
+                    DungeonFriendStatsCache.request(friend.name, FriendsAPI.getFriend(friend.name)?.uuid)
             }
             PartyAPI.members.forEach { member -> member.name?.let { DungeonFriendStatsCache.request(it, member.uuid) } }
         } else if (scanner.scanning) scanner.manualCommand()
         saveFriends()
+        FriendWealthCache.tick(scanner.all.values, scanner.online.keys)
         DungeonFriendStatsCache.tick()
+        joinedTitles.entries.removeIf { (name, title) ->
+            !DungeonFriendsSettings.titleNotifications || name !in party.members || (title.shownUntil != 0L && title.shownUntil <= now())
+        }
+        for ((name, title) in joinedTitles) {
+            val stats = DungeonFriendStatsCache.get(name)
+            val clazz = party.classes[name] ?: stats?.selectedClass ?: joining.classFor(name)
+            title.subtitle(now(), stats, clazz, party.classLevel(name, clazz), DungeonFriendStatsCache.isPending(name))?.let {
+                showPartyTitle(title.name, "joined your party", it, title.source)
+            }
+        }
         if (LocationAPI.isOnSkyBlock && now() >= nextAction && MC.connection != null) {
             val self = MC.player
             val context = JoinPartyContext(DungeonFriendsSettings.availability, solo, canAct, partySize,
@@ -257,6 +278,7 @@ object DungeonFriends : SkyMyceModule() {
         if (!event.inParty) {
             if (party.members.size > 1) partyRevision++
             party = DungeonFriendParty()
+            joinedTitles.clear()
             currentLeader = null
             partyFloor = null
             restoredParty = false
@@ -285,11 +307,12 @@ object DungeonFriends : SkyMyceModule() {
         message.lines().mapNotNull(::bestFriendChange).forEach { (name, best) -> scanner.bestFriend(name, best) }
         message.lines().mapNotNull(::newlyAddedFriend).forEach { name ->
             scanner.notification(name, true, dungeonPlayerNameStyle(event.component, name))
+            FriendWealthCache.checkNewFriend(name)
             DungeonFriendStatsCache.request(name, FriendsAPI.getFriend(name)?.uuid, force = true, bypassShared = true)
         }
         if (message.startsWith("You removed ") && message.endsWith(" from your friends list!")) {
             val name = message.substringAfter("You removed ").substringBefore(" from your friends list!").substringAfterLast(' ')
-            scanner.notification(name, false)
+            scanner.remove(name)
         }
         syncParty()
         if (party.chat(message, MC.player.name.string)) {
@@ -299,6 +322,7 @@ object DungeonFriends : SkyMyceModule() {
             restoredParty = false
             joining.clear()
             partyNotices.clear()
+            joinedTitles.clear()
             partyRevision++
             nextPartyRequest = 0
         }
@@ -311,13 +335,18 @@ object DungeonFriends : SkyMyceModule() {
         }
         DungeonFriendParty.joinedPlayer(message)?.let { name ->
             if (DungeonFriendsSettings.titleNotifications && !name.equals(MC.player.name.string, true) && name.lowercase() !in joinedTitles) {
-                joinedTitles[name.lowercase()] = now() + 5000
+                joinedTitles[name.lowercase()] = DungeonJoinedTitle(name, event.component, now())
                 val stats = DungeonFriendStatsCache.get(name)
                 val clazz = party.classes[name.lowercase()] ?: stats?.selectedClass ?: joining.classFor(name)
-                showPartyTitle(name, "joined your party", dungeonJoinedDetails(stats, clazz), event.component)
+                val missing = stats?.catacombs == null || clazz == null ||
+                    (party.classLevel(name, clazz) ?: stats.classes[clazz]) == null
+                val uuid = PartyAPI.members.firstOrNull { it.name.equals(name, true) }?.uuid
+                    ?: FriendsAPI.getFriend(name)?.uuid ?: MC.connection?.getPlayerInfo(name)?.profile?.id
+                DungeonFriendStatsCache.request(name, uuid, force = stats != null && missing, priority = true)
             }
         }
         joinedPartyLeader(message)?.let { leader ->
+            joinedTitles.clear()
             currentLeader = leader
             awaitingRoster = true
             restoredParty = true
@@ -551,6 +580,7 @@ object DungeonFriends : SkyMyceModule() {
 
     @Subscription
     fun onDisconnect(event: ServerDisconnectEvent) {
+        FriendWealthCache.save(true)
         scanner.cancel()
         saveFriends(true)
         party = DungeonFriendParty()
@@ -592,14 +622,16 @@ object DungeonFriends : SkyMyceModule() {
         scannerAccount = account
         scannerStore = FriendListStore(SkyMyce.configPath.resolve("friend_lists/$account.json"))
         scanner = try {
-            FriendListScanner(scannerStore!!.load())
+            FriendListScanner(scannerStore!!.load(), scannerStore!!.loadAll()).also {
+                if (!it.hasScannedAll) it.refresh(now(), full = true)
+            }
         } catch (_: Exception) {
             scannerStore = null // Preserve an unreadable cache instead of overwriting it or starting another scan.
             SkyMyce.logger.warn("Could not read saved friend list; click Refresh to scan for this session")
             FriendListScanner(emptyList())
         }
         savedScannerVersion = scanner.version
-        scanner.online.values.toList().filter { FriendsAPI.isBestFriend(it.name) }.forEach { scanner.bestFriend(it.name, true) }
+        scanner.all.values.toList().filter { FriendsAPI.isBestFriend(it.name) }.forEach { scanner.bestFriend(it.name, true) }
         nextScannerSave = 0L
     }
 
@@ -609,7 +641,7 @@ object DungeonFriends : SkyMyceModule() {
             (!force && (scanner.scanning || now() < nextScannerSave))) return
         nextScannerSave = now() + 5000
         try {
-            store.save(scanner.savedFriends)
+            store.save(scanner.savedFriends, scanner.savedAllFriends)
             savedScannerVersion = scanner.version
         } catch (_: Exception) {
             SkyMyce.logger.warn("Could not save friend list; will retry saving")

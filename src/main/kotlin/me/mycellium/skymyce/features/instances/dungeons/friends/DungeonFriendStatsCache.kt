@@ -46,6 +46,7 @@ object DungeonFriendStatsCache {
 
     val stats: Map<String, DungeonFriendStats> get() = cache.mapValues { it.value.stats }
     fun get(name: String): DungeonFriendStats? = cache[name.lowercase()]?.stats
+    fun isPending(name: String): Boolean = name.lowercase().let { it == inFlight || it in pending }
     fun liveClass(name: String): DungeonClass? = name.lowercase().let { key ->
         liveClasses[key]?.takeIf { it.first == cache[key]?.uuid }?.second
     }

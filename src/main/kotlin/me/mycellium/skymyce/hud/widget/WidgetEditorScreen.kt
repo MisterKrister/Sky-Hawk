@@ -1,8 +1,13 @@
 package me.mycellium.skymyce.hud.widget
 
+import io.wispforest.owo.ui.component.UIComponents
+import io.wispforest.owo.ui.container.FlowLayout
+import io.wispforest.owo.ui.container.UIContainers
+import io.wispforest.owo.ui.core.OwoUIAdapter
+import io.wispforest.owo.ui.core.Positioning
+import io.wispforest.owo.ui.core.Sizing
 import me.mycellium.skymyce.utils.MC
 import net.minecraft.client.gui.GuiGraphicsExtractor
-import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.KeyEvent
 import net.minecraft.client.input.MouseButtonEvent
@@ -21,23 +26,40 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
     private var mouseRelY = 0
     private var snapPosition = false
     private var anchorSelect = false
+    private var ui: OwoUIAdapter<FlowLayout>? = null
 
     override fun init() {
+        ui?.dispose()
+        selectedWidget = null
+        clickedWidget = null
+        selectedAnchor = null
+        snapPosition = false
+        anchorSelect = false
         screenWidgets = WidgetManager.getActiveWidgets()
 
-        val resetButton = Button.builder(
-            Component.literal("Reset HUD Positions")
-        ) {
+        val adapter = OwoUIAdapter.create(this, UIContainers::verticalFlow)
+        ui = adapter
+        val resetButton = UIComponents.button(Component.literal("Reset HUD Positions")) {
             screenWidgets.forEach { widget ->
                 widget.x = width / 2
                 widget.y = height / 2
                 widget.scale = 1f
                 widget.anchor = Anchor.CENTER
             }
-        }.bounds(width / 2 - 75, height - 30, 150, 20).build()
+        }.apply {
+            sizing(Sizing.fixed(150), Sizing.fixed(20))
+            positioning(Positioning.absolute(width / 2 - 75, height - 30))
+        }
 
-        addRenderableWidget(resetButton)
+        adapter.rootComponent.child(resetButton)
+        adapter.inflateAndMount()
         super.init()
+    }
+
+    override fun removed() {
+        ui?.dispose()
+        ui = null
+        super.removed()
     }
 
     override fun onClose() {
@@ -79,7 +101,7 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
 
 
     override fun mouseMoved(mouseX: Double, mouseY: Double) {
-        selectedWidget = screenWidgets.firstOrNull {
+        selectedWidget = screenWidgets.asReversed().firstOrNull {
             it.inBounds(mouseX.toInt(), mouseY.toInt())
         }
 
@@ -93,14 +115,15 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
     }
 
     override fun mouseClicked(button: MouseButtonEvent, doubled: Boolean): Boolean {
-        clickedWidget = screenWidgets.firstOrNull {
+        if (super.mouseClicked(button, doubled)) return true
+        clickedWidget = screenWidgets.asReversed().firstOrNull {
             it.inBounds(button.x.toInt(), button.y.toInt())
         }
 
         mouseRelX = button.x.toInt() - (clickedWidget?.x ?: 0)
         mouseRelY = button.y.toInt() - (clickedWidget?.y ?: 0)
 
-        return super.mouseClicked(button, doubled)
+        return clickedWidget != null
     }
 
     override fun mouseReleased(button: MouseButtonEvent): Boolean {

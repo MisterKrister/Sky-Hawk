@@ -3,8 +3,8 @@ package me.mycellium.skymyce.features.mining
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.api.events.ChatChannel
 import me.mycellium.skymyce.config.mining.MiningConfig
-import me.mycellium.skymyce.hud.HudElement
-import me.mycellium.skymyce.hud.elements.*
+import me.mycellium.skymyce.hud.hudPanel
+import me.mycellium.skymyce.hud.updateTextLines
 import me.mycellium.skymyce.hud.widget.Anchor
 import me.mycellium.skymyce.hud.widget.Widget
 import me.mycellium.skymyce.utils.MC
@@ -31,6 +31,7 @@ object MiningFeatures : SkyMyceModule() {
 
     const val CH_LOCK_DAY = 20.5
     const val CH_CLOSE_DAY = 35
+    private val crystalHollowsContent by lazy { hudPanel(decorated = false) }
 
     val crystalHollowsWidget = Widget("crystal_hollows_info", "CH Info", 200, 200, 1f, Anchor.TOP_LEFT) {
         if (!MiningConfig.crystalHollowsInfo) return@Widget null
@@ -47,24 +48,20 @@ object MiningFeatures : SkyMyceModule() {
             else -> "§a${floor(day * 100) / 100}"
         }
 
-        val lines: MutableList<HudElement> = mutableListOf()
-        lines += TextElement("§7Day: §e$dayFormatted")
-        lines += TextElement("§7Player count: (§e${LocationAPI.playerCount}§7/§a${LocationAPI.maxPlayercount}§7)")
-        lines += TextElement("§7Lobby Time: §e${(System.currentTimeMillis() - timeSince).milliseconds.inWholeSeconds.seconds}")
-        lines += TextElement("§7Session Time: §e${(totalTime + System.currentTimeMillis() - timeSince).milliseconds.inWholeSeconds.seconds}")
+        val lines = mutableListOf<String>()
+        lines += "§7Day: §e$dayFormatted"
+        lines += "§7Player count: (§e${LocationAPI.playerCount}§7/§a${LocationAPI.maxPlayercount}§7)"
+        lines += "§7Lobby Time: §e${(System.currentTimeMillis() - timeSince).milliseconds.inWholeSeconds.seconds}"
+        lines += "§7Session Time: §e${(totalTime + System.currentTimeMillis() - timeSince).milliseconds.inWholeSeconds.seconds}"
         if (lockTimeRemaining > 0.seconds) {
-            lines += TextElement("§7Time to lock: §e${lockTimeRemaining.inWholeSeconds.seconds}")
+            lines += "§7Time to lock: §e${lockTimeRemaining.inWholeSeconds.seconds}"
         } else if (closeTimeRemaining > 0.seconds && LocationAPI.playerCount > 3) {
-            lines += TextElement("§7Time to close: §e${closeTimeRemaining.inWholeSeconds.seconds}")
+            lines += "§7Time to close: §e${closeTimeRemaining.inWholeSeconds.seconds}"
         } else {
-            lines += TextElement("§cLobby Closing!")
+            lines += "§cLobby Closing!"
         }
 
-        return@Widget PanelElement(
-            StackElement(LayoutAxis.VERTICAL, LayoutType.START, children = lines),
-            accent = null,
-            border = null
-        )
+        crystalHollowsContent.updateTextLines(lines)
     }
 
     @Subscription

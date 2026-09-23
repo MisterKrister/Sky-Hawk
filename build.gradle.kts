@@ -113,8 +113,18 @@ val dungeonFriendsCheck by tasks.registering(JavaExec::class) {
     mainClass = "me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsCheckKt"
 }
 
-tasks.check { dependsOn(dungeonFriendsCheck) }
-// Assertions run via dungeonFriendsCheck; this project does not use a test framework.
+val hudCheck by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Checks dynamic owo HUD layout and saved widget configuration"
+    dependsOn(tasks.testClasses)
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass = "me.mycellium.skymyce.hud.HudCheckKt"
+    workingDir = layout.buildDirectory.dir("hud-check").get().asFile
+    doFirst { workingDir.mkdirs() }
+}
+
+tasks.check { dependsOn(dungeonFriendsCheck, hudCheck) }
+// Assertions run via the check tasks; this project does not use a test framework.
 tasks.test { failOnNoDiscoveredTests = false }
 
 // configure the maven publication

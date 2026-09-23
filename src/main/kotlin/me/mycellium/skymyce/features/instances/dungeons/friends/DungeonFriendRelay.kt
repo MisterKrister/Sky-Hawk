@@ -107,6 +107,8 @@ object DungeonFriendRelay {
     private var nextPolicyUpdate = 0L
     var sharedStatsAvailable = false
         private set
+    var sharedWealthAvailable = false
+        private set
     private var socket: WebSocket? = null
     private var sending: CompletableFuture<*> = CompletableFuture.completedFuture(null)
     @Volatile private var generation = 0L
@@ -218,6 +220,7 @@ object DungeonFriendRelay {
                                         check(json.get("name").asString.equals(user.name, true))
                                         connected = true
                                         sharedStatsAvailable = json.get("statsCache")?.asBoolean == true
+                                        sharedWealthAvailable = json.get("wealthCache")?.asBoolean == true
                                         policiesAvailable = json.get("partyPolicies")?.asBoolean == true
                                         retry.reset()
                                         stage = "connected"
@@ -242,7 +245,7 @@ object DungeonFriendRelay {
                                             } else SkyMyce.logger.info("[Dungeon relay] Rejected delivery {}", id)
                                         }
                                     }
-                                    "stats_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
+                                    "stats_result", "wealth_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
                                     "stats_update" -> {
                                         check(connected)
                                         val record = json.getAsJsonObject("record")
@@ -341,11 +344,21 @@ object DungeonFriendRelay {
     }
 
     fun lookupStats(name: String, uuid: String?): CompletableFuture<JsonObject?>? {
-        if (!sharedStatsAvailable || statsRequests.size >= 8) return null
+        if (!sharedStatsAvailable) return null
+        return lookupCache("stats_get", name, uuid)
+    }
+
+    fun lookupWealth(name: String, uuid: String?, refresh: Boolean): CompletableFuture<JsonObject?>? {
+        if (!sharedWealthAvailable) return null
+        return lookupCache("wealth_get", name, uuid, refresh)
+    }
+
+    private fun lookupCache(type: String, name: String, uuid: String?, refresh: Boolean = false): CompletableFuture<JsonObject?>? {
+        if (statsRequests.size >= 8) return null
         val id = UUID.randomUUID().toString().replace("-", "")
         val future = CompletableFuture<JsonObject?>()
         statsRequests[id] = DungeonFriends.now() + 5000 to future
-        packet(buildMap { put("type", "stats_get"); put("id", id); put("name", name); uuid?.let { put("uuid", it) } })
+        packet(buildMap { put("type", type); put("id", id); put("name", name); uuid?.let { put("uuid", it) }; if (refresh) put("refresh", true) })
         return future
     }
 
@@ -394,6 +407,12 @@ object DungeonFriendRelay {
             "uuid" to uuid, "stats" to stats, "fetchedAt" to fetchedAt, "upload" to upload))
     }
 
+    fun publishWealth(name: String, wealth: FriendWealth, upload: String) {
+        if (!sharedWealthAvailable || wealth.uuid == null) return
+        packet(mapOf("type" to "wealth_put", "id" to UUID.randomUUID().toString().replace("-", ""), "name" to name,
+            "uuid" to wealth.uuid.replace("-", ""), "wealth" to wealth, "fetchedAt" to wealth.fetchedAt, "upload" to upload))
+    }
+
     private fun packet(data: Any) {
         val ws = socket ?: return
         val token = generation
@@ -414,6 +433,7 @@ object DungeonFriendRelay {
         socket = null
         connected = false
         sharedStatsAvailable = false
+        sharedWealthAvailable = false
         policiesAvailable = false
         partyPolicies.clear()
         policyRequest = null
