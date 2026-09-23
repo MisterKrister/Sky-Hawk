@@ -2,13 +2,8 @@ package me.mycellium.skymyce.config.instances
 
 import com.teamresourceful.resourcefulconfig.api.types.options.TranslatableValue
 import com.teamresourceful.resourcefulconfigkt.api.CategoryKt
-import me.mycellium.skymyce.config.instances.dungeons.DungeonsConfig
 
 object InstancesConfig : CategoryKt("Instances") {
-    init {
-        category(DungeonsConfig)
-    }
-
     val missingPlayers by boolean(true) {
         name = TranslatableValue.literal("Notify Missing Players")
         description = TranslatableValue.literal("Notifies you if you are missing players in your instance")
