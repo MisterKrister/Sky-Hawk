@@ -3,6 +3,7 @@ package me.mycellium.skymyce.config
 import com.teamresourceful.resourcefulconfig.api.types.options.TranslatableValue
 import com.teamresourceful.resourcefulconfigkt.api.ConfigKt
 import me.mycellium.skymyce.config.instances.InstancesConfig
+import me.mycellium.skymyce.config.instances.dungeons.DungeonsConfig
 import me.mycellium.skymyce.config.mining.MiningConfig
 import me.mycellium.skymyce.config.misc.GeneralConfig
 import org.lwjgl.glfw.GLFW
@@ -13,6 +14,7 @@ object Config : ConfigKt("SkyMyce Config") {
     init {
         category(GeneralConfig)
         category(InstancesConfig)
+        category(DungeonsConfig)
         category(MiningConfig)
     }
 
