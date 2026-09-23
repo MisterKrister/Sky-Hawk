@@ -164,8 +164,26 @@ fun dungeonPlayerTitle(name: String, suffix: String, rankColor: Int?): Component
     .append(Component.literal(" $suffix").withStyle { it.withColor(0xFFFFFF) })
 
 fun dungeonJoinedDetails(stats: DungeonFriendStats?, clazz: DungeonClass?): String =
-    "§bCata ${stats?.catacombs ?: "?"} §8| " +
-        (clazz?.let { "${coloredDungeonClass(it)} §f${stats?.classes?.get(it) ?: "?"}" } ?: "§7Class ?")
+    "§fCata ${coloredDungeonLevel(stats?.catacombs)} §8| " +
+        (clazz?.let { "${coloredDungeonClass(it)} ${coloredDungeonLevel(stats?.classes?.get(it))}" } ?: "§7Class ?")
+
+private fun coloredDungeonLevel(level: Int?): String {
+    // Match the SkyHanni dungeon level bands shown in Party Finder, including bold red at 50+.
+    val color = when {
+        level == null || level < 5 -> "§7"
+        level < 10 -> "§f"
+        level < 15 -> "§e"
+        level < 20 -> "§a"
+        level < 25 -> "§2"
+        level < 30 -> "§b"
+        level < 35 -> "§9"
+        level < 40 -> "§d"
+        level < 45 -> "§6"
+        level < 50 -> "§c"
+        else -> "§c§l"
+    }
+    return "$color${level ?: "?"}"
+}
 
 fun bestFriendChange(message: String): Pair<String, Boolean>? =
     Regex("^(?:\\[[^]]+]\\s*)?([A-Za-z0-9_]{1,16}) is (now|no longer) a best friend!$")
@@ -295,6 +313,14 @@ class DungeonFriendParty {
     val full: Boolean get() = size >= 5
     val canInvite: Boolean get() = ready && !full
     val openClasses: Set<DungeonClass> get() = DungeonClass.entries.filter { it !in classes.values }.toSet()
+
+    fun restoreClasses(saved: Map<String, DungeonClass>, liveClass: (String) -> DungeonClass?) {
+        // A saved roster cannot undo class changes received since that party last existed.
+        for (name in members) {
+            (liveClass(name) ?: classes[name] ?: saved[name])?.let { classes[name] = it }
+        }
+        advance()
+    }
 
     fun roster(names: Collection<String>, count: Int, confirmed: Boolean = ready, completeNames: Boolean = true) {
         val normalized = names.map { it.lowercase() }.toSet() + if (completeNames) emptySet() else members

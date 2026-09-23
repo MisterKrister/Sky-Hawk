@@ -17,6 +17,35 @@ import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionStage
+import java.util.concurrent.TimeUnit
+
+internal class RelayRetry {
+    var nextAttempt = 0L
+        private set
+    var delay = 1000L
+        private set
+    fun failed(now: Long, pause: Boolean) {
+        nextAttempt = if (pause) Long.MAX_VALUE else now + delay
+        delay = (delay * 2).coerceAtMost(60000)
+    }
+    fun reset() { nextAttempt = 0; delay = 1000 }
+}
+
+internal fun relayNeedsReconnect(code: Int) = code == 4001 || code == 4004
+
+/** Exception messages can contain URLs, tokens or response bodies. Keep types and call sites only. */
+internal fun relayErrorDetail(error: Throwable?): String = generateSequence(error) { it.cause }
+    .take(8).joinToString(" <- ") { cause ->
+        cause.javaClass.name + (cause.stackTrace.firstOrNull()?.let { " at ${it.className}.${it.methodName}:${it.lineNumber}" } ?: "")
+    }
+
+internal fun closeRelaySocket(ws: WebSocket, sending: CompletableFuture<*>, timeoutMillis: Long = 2000) {
+    sending.handle { _, _ -> null }.thenCompose { ws.sendClose(WebSocket.NORMAL_CLOSURE, "Client disconnected") }
+        .orTimeout(timeoutMillis, TimeUnit.MILLISECONDS).whenComplete { _, error -> if (error != null) ws.abort() }
+    CompletableFuture.delayedExecutor(timeoutMillis, TimeUnit.MILLISECONDS).execute {
+        if (!ws.isInputClosed || !ws.isOutputClosed) ws.abort()
+    }
+}
 
 fun relayUri(text: String): URI? = runCatching {
     require(text.length <= 512)
@@ -80,12 +109,12 @@ object DungeonFriendRelay {
         private set
     private var socket: WebSocket? = null
     private var sending: CompletableFuture<*> = CompletableFuture.completedFuture(null)
-    private var generation = 0L
+    @Volatile private var generation = 0L
     private var identity = ""
     private var connecting = false
     private var authenticating = false
-    private var nextAttempt = 0L
-    private var retryDelay = 1000L
+    private val retry = RelayRetry()
+    private var stage = "idle"
     private var deadline = 0L
     private var nextPing = 0L
     var connected = false
@@ -109,12 +138,13 @@ object DungeonFriendRelay {
         statsRequests.filterValues { it.first <= now }.keys.toList().forEach { statsRequests.remove(it)?.second?.complete(null) }
         if ((connecting || socket != null) && now >= deadline) failed("Relay timed out; reconnecting")
         if (connected && now >= nextPing) { packet("ping"); nextPing = now + 45000 }
-        if (socket != null || connecting || now < nextAttempt) return
+        if (socket != null || connecting || now < retry.nextAttempt) return
         val uri = relayUri(url) ?: run { status = "Invalid relay URL in Settings"; return }
         connecting = true
         authenticating = false
         deadline = now + 35000
         status = "Connecting to relay..."
+        stage = "websocket_upgrade"
         val token = generation
         val sessionService = MC.instance.services().sessionService()
         val keyManager = MC.instance.profileKeyPairManager
@@ -122,7 +152,8 @@ object DungeonFriendRelay {
             private val text = StringBuilder()
             override fun onOpen(webSocket: WebSocket) {
                 MC.instance.execute {
-                    if (token != generation) webSocket.abort() else { socket = webSocket; connecting = false }
+                    if (token != generation) closeRelaySocket(webSocket, CompletableFuture.completedFuture(null))
+                    else { socket = webSocket; connecting = false; stage = "challenge" }
                 }
                 webSocket.request(1)
             }
@@ -146,16 +177,20 @@ object DungeonFriendRelay {
                                         val serverId = json.get("serverId").asString
                                         check(serverId.matches(Regex("[a-f0-9]{32}")))
                                         authenticating = true
+                                        stage = "account_proof"
                                         status = "Verifying Minecraft account..."
+                                        var proofStage = "account_key"
                                         keyManager.prepareKeyPair().thenApplyAsync { optional ->
                                             val pair = optional.orElseThrow { IllegalStateException("Minecraft account key unavailable") }
                                             val certificate = pair.publicKey().data()
                                             check(!certificate.hasExpired())
+                                            proofStage = "signed_profile"
                                             val profile = sessionService.fetchProfile(user.profileId, true)?.profile()
                                                 ?: error("Signed Minecraft profile unavailable")
                                             check(profile.id() == user.profileId && profile.name().equals(user.name, true))
                                             val textures = sessionService.getPackedTextures(profile)
                                             check(textures != null && textures.hasSignature())
+                                            proofStage = "sign_challenge"
                                             // Minecraft manages the private key. Only public, signed proof leaves the client.
                                             val uuid = user.profileId.toString().replace("-", "")
                                             val proof = Signature.getInstance("SHA256withRSA").run {
@@ -172,8 +207,8 @@ object DungeonFriendRelay {
                                                 "profile" to textures.value(), "profileSignature" to textures.signature())
                                         }.whenComplete { proof, error -> MC.instance.execute {
                                             if (token == generation) {
-                                                if (error != null) failed("Minecraft signed proof unavailable; restart Minecraft and reconnect")
-                                                else packet(proof)
+                                                if (error != null) failed("Minecraft account verification unavailable; retrying (restart Minecraft if it persists)", error, failingStage = proofStage)
+                                                else { stage = "authentication"; packet(proof) }
                                             }
                                         } }
                                     }
@@ -184,11 +219,12 @@ object DungeonFriendRelay {
                                         connected = true
                                         sharedStatsAvailable = json.get("statsCache")?.asBoolean == true
                                         policiesAvailable = json.get("partyPolicies")?.asBoolean == true
-                                        retryDelay = 1000
+                                        retry.reset()
+                                        stage = "connected"
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
                                         status = "Relay connected"
-                                        SkyMyce.logger.info("[Dungeon relay] Connected to {} ({})", uri.host, uri.query ?: "room=friends")
+                                        SkyMyce.logger.info("[Dungeon relay] Connected")
                                     }
                                     "message", "ack" -> {
                                         check(connected)
@@ -248,7 +284,7 @@ object DungeonFriendRelay {
                                     }
                                     else -> error("Unknown relay packet")
                                 }
-                            }.onFailure { failed("Invalid relay response; reconnecting") }
+                            }.onFailure { failed("Invalid relay response; reconnecting", it) }
                         }
                     }
                 }
@@ -261,20 +297,22 @@ object DungeonFriendRelay {
             }
             override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletionStage<*>? {
                 MC.instance.execute { if (token == generation) {
-                    val detail = reason.filter { it >= ' ' && it != '\u007f' && it != '§' }.take(120)
-                    failed(if (statusCode == 4001) "Relay account connected elsewhere; use Reconnect"
-                        else "Relay closed ($statusCode): ${detail.ifEmpty { "connection lost" }}")
-                    if (statusCode == 4001) nextAttempt = Long.MAX_VALUE
+                    SkyMyce.logger.info("[Dungeon relay] Close code={} authenticated={} stage={}", statusCode, connected, stage)
+                    failed(when (statusCode) {
+                        4001 -> "Account connected elsewhere; use Reconnect in Settings"
+                        4004 -> "Minecraft proof rejected; restart Minecraft or update the mod, then use Reconnect in Settings"
+                        else -> "Relay closed ($statusCode); reconnecting"
+                    }, pause = relayNeedsReconnect(statusCode), graceful = true)
                 } }
                 return null
             }
             override fun onError(webSocket: WebSocket, error: Throwable) {
-                MC.instance.execute { if (token == generation) failed("Relay unavailable; reconnecting") }
+                MC.instance.execute { if (token == generation) failed("Relay unavailable; reconnecting", error) }
             }
         }
         client.newWebSocketBuilder().connectTimeout(Duration.ofSeconds(10)).buildAsync(uri, listener)
             .whenComplete { _, error -> if (error != null) MC.instance.execute {
-                if (token == generation) failed("Relay unavailable; reconnecting")
+                if (token == generation) failed("Relay unavailable; reconnecting", error)
             } }
     }
 
@@ -360,14 +398,19 @@ object DungeonFriendRelay {
         val ws = socket ?: return
         val token = generation
         val text = if (data is String) data else gson.toJson(data)
-        sending = sending.thenCompose { ws.sendText(text, true) }.whenComplete { _, error ->
-            if (error != null) MC.instance.execute { if (token == generation) failed("Relay send failed; reconnecting") }
+        sending = sending.thenCompose {
+            if (token == generation) ws.sendText(text, true) else CompletableFuture.completedFuture(ws)
+        }.whenComplete { _, error ->
+            if (error != null) MC.instance.execute { if (token == generation) failed("Relay send failed; reconnecting", error) }
         }
     }
 
-    private fun failed(message: String) {
+    private fun failed(message: String, error: Throwable? = null, pause: Boolean = false, graceful: Boolean = false, failingStage: String = stage) {
+        if (message != "Relay disconnected") SkyMyce.logger.warn(
+            "[Dungeon relay] {} stage={} authenticated={} retry={} exception={}",
+            message, failingStage, connected, if (pause) "paused" else "${retry.delay}ms", relayErrorDetail(error))
         generation++
-        socket?.abort()
+        socket?.let { if (graceful) closeRelaySocket(it, sending) else it.abort() }
         socket = null
         connected = false
         sharedStatsAvailable = false
@@ -381,19 +424,25 @@ object DungeonFriendRelay {
         statsRequests.values.forEach { it.second.complete(null) }
         statsRequests.clear()
         connecting = false
+        authenticating = false
+        stage = "idle"
         sending = CompletableFuture.completedFuture(null)
-        nextAttempt = DungeonFriends.now() + retryDelay
-        retryDelay = (retryDelay * 2).coerceAtMost(60000)
+        retry.failed(DungeonFriends.now(), pause)
         status = message
-        if (message != "Relay disconnected") SkyMyce.logger.warn("{}", message)
         deliveries.connectionFailed()
     }
 
     fun disconnect() {
         deliveries.clear()
-        failed("Relay disconnected")
+        failed("Relay disconnected", graceful = true)
         identity = ""
-        retryDelay = 1000
-        nextAttempt = 0
+        retry.reset()
+    }
+
+    fun reconnect() {
+        deliveries.clear(failed = true)
+        DungeonFriends.joining.reconnect()
+        disconnect()
+        status = "Reconnecting..."
     }
 }

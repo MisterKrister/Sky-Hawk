@@ -20,7 +20,7 @@ async function rejectUnauthenticated(authenticate) {
     });
     socket.addEventListener("close", event => {
       clearTimeout(timer);
-      try { assert.equal(event.code, authenticate ? 4003 : 1008); resolve(); } catch (error) { reject(error); }
+      try { assert.equal(event.code, authenticate ? 4004 : 1008); resolve(); } catch (error) { reject(error); }
     });
     socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("Live WebSocket connection failed")); });
   });

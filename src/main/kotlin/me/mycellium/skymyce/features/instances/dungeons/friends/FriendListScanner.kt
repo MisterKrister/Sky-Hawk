@@ -7,6 +7,8 @@ import tech.thatgravyboat.skyblockapi.utils.text.TextUtils.splitLines
 /** Only suppresses recognizable responses to a scan we actually requested. All times are monotonic milliseconds. */
 class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
     val online = cached.orEmpty().associateByTo(linkedMapOf()) { it.name.lowercase() }
+    private val completed = online.toMutableMap()
+    val savedFriends: Collection<OnlineDungeonFriend> get() = completed.values
     var hasScanned = cached != null
         private set
     var version = 0L
@@ -45,8 +47,6 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         if (!scanning) {
             if (!requested) return null
             requested = false
-            hasScanned = true
-            version++
             scanning = true
             page = 1
             lastPage = 1
@@ -69,8 +69,6 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         stopAfterResponse = waiting
         if (!waiting) scanning = false
         requested = false
-        hasScanned = true
-        version++
     }
 
     fun cancel() {
@@ -90,6 +88,9 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
             online.remove(key)
             seen.remove(key)
         }
+        if (hasScanned) {
+            if (joined) completed[key] = online.getValue(key) else completed.remove(key)
+        }
         version++
     }
 
@@ -98,6 +99,7 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         val friend = online[key] ?: return
         if (friend.bestFriend == best) return
         online[key] = friend.copy(bestFriend = best)
+        completed[key]?.let { completed[key] = it.copy(bestFriend = best) }
         version++
     }
 
@@ -162,6 +164,9 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         // Drain this response's footer, but never request another page after the first offline entry.
         if (offlineSeen || page >= lastPage) {
             online.keys.retainAll(seen)
+            completed.clear()
+            completed.putAll(online)
+            hasScanned = true
             version++
             scanning = false
             status = "${online.size} friends online"
