@@ -2,12 +2,13 @@ package me.mycellium.skymyce.features.general.overlays
 
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.config.misc.GeneralConfig
-import me.mycellium.skymyce.hud.elements.ItemElement
-import me.mycellium.skymyce.hud.elements.LayoutAxis
-import me.mycellium.skymyce.hud.elements.LayoutType
-import me.mycellium.skymyce.hud.elements.StackElement
+import io.wispforest.owo.ui.component.UIComponents
+import io.wispforest.owo.ui.container.UIContainers
+import io.wispforest.owo.ui.core.Sizing
+import io.wispforest.owo.ui.core.VerticalAlignment
+import me.mycellium.skymyce.hud.hudLabel
+import me.mycellium.skymyce.hud.updateText
 import me.mycellium.skymyce.hud.widget.Widget
-import me.mycellium.skymyce.hud.elements.TextElement
 import me.mycellium.skymyce.hud.widget.Anchor
 import net.minecraft.world.item.Item
 import net.minecraft.world.item.ItemStack
@@ -27,6 +28,15 @@ object SkillXpOverlay : SkyMyceModule() {
     private var display = ""
     private var skill: Skill? = null
     private var timeSince: Duration = 0.milliseconds
+    private val icon by lazy { UIComponents.item(ItemStack(Items.BARRIER)) }
+    private val label by lazy { hudLabel() }
+    private val content by lazy {
+        UIContainers.horizontalFlow(Sizing.content(), Sizing.content()).gap(5).apply {
+            verticalAlignment(VerticalAlignment.CENTER)
+            allowOverflow(true)
+            children(listOf(icon, label))
+        }
+    }
 
     val widget = Widget("skill_xp_display", "Skill Xp Display", 480, 290, anchor = Anchor.CENTER) {
         if (!GeneralConfig.displayXp) return@Widget null
@@ -34,12 +44,10 @@ object SkillXpOverlay : SkyMyceModule() {
         val now = System.currentTimeMillis().milliseconds
         if (now - timeSince > 5.seconds) return@Widget null
 
-        return@Widget StackElement(LayoutAxis.HORIZONTAL, LayoutType.CENTER, 5,
-            listOf(
-                ItemElement(ItemStack(skill?.skillItem() ?: Items.BARRIER)),
-                TextElement(display)
-            )
-        )
+        val item = skill?.skillItem() ?: Items.BARRIER
+        if (icon.stack().item != item) icon.stack(ItemStack(item))
+        label.updateText(display)
+        content
     }
 
     @Subscription
