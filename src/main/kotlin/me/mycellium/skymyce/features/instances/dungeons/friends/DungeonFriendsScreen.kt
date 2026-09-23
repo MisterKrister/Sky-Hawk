@@ -18,6 +18,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private val floor get() = DungeonFriends.hostingFloor
     private var sort = FriendSort.CATACOMBS
     private var ascending = false
+    private var opened = false
     private var missingClasses: Set<DungeonClass>? = null
     private var settingsOpen = false
     private var editingFriend: String? = null
@@ -45,6 +46,13 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private val compact get() = panelWidth < 600
 
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
+
+    override fun init() {
+        if (!opened) { opened = true; DungeonFriends.refreshFriends(automatic = true) }
+        super.init()
+    }
+
+    override fun removed() { opened = false; super.removed() }
 
     override fun build(root: FlowLayout) {
         sortHeaders.clear()
@@ -209,8 +217,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun toolbarActions(row: FlowLayout) {
         row.child(button(if (DungeonFriendsSettings.availability.enabled) "§aAvailable" else "Available", 76) { openSettings(null) })
         refreshButton = button("Refresh", 82) {
-            DungeonFriends.scanner.refresh(DungeonFriends.now())
-            DungeonFriendStatsCache.refresh()
+            DungeonFriends.refreshFriends()
             it.active(false)
         }
         row.child(refreshButton)
@@ -259,7 +266,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         joinActions.clear()
         results.child(UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
             gap(3)
-            if (friends.isEmpty()) child(label("No matching friends. Try another floor or clear Missing.", MUTED)
+            if (friends.isEmpty()) child(label("No matching friends. Change floor or clear Missing.", MUTED)
                 .horizontalSizing(Sizing.fill()).margins(Insets.of(8)))
             friends.forEach { friend -> child(friendRow(friend, stats[friend.name.lowercase()])) }
         })
@@ -274,16 +281,22 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             val reply = DungeonFriends.replies.get(friend.name)
             val pendingInvite = reply?.status in setOf(LfgReplyStatus.WAITING, LfgReplyStatus.INVITED)
             val declined = reply?.status == LfgReplyStatus.DECLINED
-            surface(if (pendingInvite || declined) Surface.flat(if (declined) 0xFF2D1B20.toInt() else 0xFF29231C.toInt()).and(Surface { graphics, component ->
+            val activity = friend.activity
+            surface(Surface.flat(when {
+                declined -> 0xFF2D1B20.toInt()
+                pendingInvite -> 0xFF29231C.toInt()
+                else -> 0xFF17212A.toInt()
+            }).and(Surface { graphics, component ->
                 graphics.fill(component.x(), component.y(), component.x() + 2, component.y() + component.height(),
-                    if (declined) 0xFFFF5555.toInt() else 0xFFFFAA00.toInt())
-            }) else Surface.flat(0xFF17212A.toInt()))
+                    0xFF000000.toInt() or activity.color)
+            }))
             val accepted = reply?.status == LfgReplyStatus.ACCEPTED
             val availability = stats?.state?.takeIf { it != StatsState.AVAILABLE }?.label
                 ?: if (stats == null) "Waiting for SkyBlock stats" else "SkyBlock profile stats"
             val identity = UIContainers.verticalFlow(Sizing.expand(), Sizing.content()).apply {
                 gap(3)
                 child(label(if (friend.bestFriend) "§l${friend.name}" else friend.name).horizontalSizing(Sizing.fill()))
+                child(label(activity.label, activity.color).horizontalSizing(Sizing.fill()))
                 child(label(stats?.selectedClass?.displayName ?: "Unknown", if (stats?.selectedClass != null) CYAN else MUTED)
                     .horizontalSizing(Sizing.fill()))
                 if (reply != null) child(label(reply.status.label).horizontalSizing(Sizing.fill()))

@@ -79,7 +79,7 @@ try {
   async function cache(client, data) {
     client.ws.send(JSON.stringify({ id: (cacheId++).toString(16).padStart(32, "0"), ...data }));
     const response = await client.next();
-    assert.equal(response.type, "stats_result");
+    assert.equal(response.type, data.type.startsWith("wealth_") ? "wealth_result" : "stats_result");
     return response;
   }
   const stats = { state: "AVAILABLE", catacombs: 52, classes: { ARCHER: 52, MAGE: 2 },
@@ -101,6 +101,51 @@ try {
   assert.equal((await cache(bob, { ...lookup, uuid: identities.get("Alice") })).record, null);
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   assert.deepEqual((await cache(bob, lookup)).record.stats, stats); // SQLite survives hibernation.
+  const wealthLookup = { type: "wealth_get", name: "Bob", uuid: identities.get("Bob") };
+  const wealthGrant = await cache(alice, wealthLookup);
+  assert.match(wealthGrant.upload, /^[a-f0-9]{32}$/);
+  assert.ok((await cache(bob, wealthLookup)).retryAt > Date.now()); // Only one client calls the provider on a miss.
+  assert.equal((await cache(alice, wealthLookup)).upload, wealthGrant.upload); // Reuse a lease after local API backoff.
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.ok((await cache(bob, wealthLookup)).retryAt > Date.now());
+  const wealth = { hasProfile: true, networth: 2000000000, purse: 1000000, bank: 5000000, wardrobe: 200000,
+    profile: "Apple", status: "", inventory: "must not persist" };
+  const wealthEntry = { type: "wealth_put", name: "Bob", uuid: identities.get("Bob"),
+    wealth, fetchedAt: Date.now(), upload: wealthGrant.upload };
+  assert.equal((await cache(alice, { ...wealthEntry, upload: "0".repeat(32) })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...wealthEntry, wealth: { ...wealth, purse: -1 } })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...wealthEntry, fetchedAt: Date.now() - 900001 })).error, "invalid_upload");
+  assert.equal((await cache(alice, wealthEntry)).stored, true);
+  const wealthHit = await cache(bob, wealthLookup);
+  assert.equal(wealthHit.record.wealth.networth, wealth.networth);
+  assert.equal(wealthHit.record.wealth.inventory, undefined);
+  assert.equal(wealthHit.upload, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(wealthHit.record)) < 1024);
+  assert.equal((await cache(carol, wealthLookup)).record, null); // No wealth data crosses rooms.
+  alice.ws.send("ping"); assert.equal(await alice.next(), "pong"); // No room-wide wealth broadcasts.
+  const absentLookup = { type: "wealth_get", name: "NoProfile", uuid: "e".repeat(32) };
+  const absentGrant = await cache(bob, absentLookup);
+  assert.equal((await cache(bob, { ...absentLookup, type: "wealth_put", upload: absentGrant.upload,
+    wealth: { hasProfile: false }, fetchedAt: Date.now() })).stored, true);
+  assert.equal((await cache(bob, absentLookup)).record.wealth.hasProfile, false);
+  const olderLookup = { type: "wealth_get", name: "Older", uuid: "f".repeat(32) };
+  const olderGrant = await cache(carol, olderLookup);
+  assert.equal((await cache(carol, { ...olderLookup, type: "wealth_put", upload: olderGrant.upload,
+    wealth, fetchedAt: Date.now() - 120000 })).stored, true);
+  assert.equal((await cache(carol, olderLookup)).record.wealth.networth, wealth.networth);
+  const manualGrant = await cache(carol, { ...olderLookup, refresh: true });
+  assert.match(manualGrant.upload, /^[a-f0-9]{32}$/); // Manual refresh can replace an older shared result.
+  assert.equal((await cache(carol, { ...olderLookup, type: "wealth_put", upload: manualGrant.upload,
+    wealth: { ...wealth, networth: 3000000000 }, fetchedAt: Date.now() })).stored, true);
+  let wealthLimited = false;
+  for (let i = 0; i < 8 && !wealthLimited; i++) wealthLimited = (await cache(alice, wealthLookup)).error === "rate_limited";
+  assert.ok(wealthLimited);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  const freshManual = await cache(alice, { ...wealthLookup, refresh: true });
+  assert.equal(freshManual.record.wealth.networth, wealth.networth);
+  assert.equal(freshManual.upload, undefined); // Repeated Refresh clicks reuse very recent results.
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  assert.equal((await cache(bob, wealthLookup)).record.wealth.networth, wealth.networth);
   async function policies(client, names) {
     client.ws.send(JSON.stringify({ type: "party_get", id: (cacheId++).toString(16).padStart(32, "0"), names }));
     const response = await client.next();
@@ -243,7 +288,7 @@ try {
   const cleanClose = closeEvent(carol.ws);
   carol.ws.close(1000, "Diagnostic complete");
   assert.equal((await cleanClose).code, 1000);
-  console.log("Relay checks passed: signed account proof, shared stats persistence/deduplication/expiry validation, hibernation, receipts, isolation, and limits.");
+  console.log("Relay checks passed: signed account proof, shared stats and wealth, refresh leases, bounded payloads, hibernation, receipts, isolation, and limits.");
 } finally {
   for (const ws of sockets) { try { ws.close(); } catch {} }
   await mf.dispose();

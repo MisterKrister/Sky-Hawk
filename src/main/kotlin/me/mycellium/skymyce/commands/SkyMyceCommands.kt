@@ -10,6 +10,7 @@ import me.mycellium.skymyce.features.general.AuctionHouseScreen
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
+import me.mycellium.skymyce.features.instances.dungeons.friends.FriendsSocialScreen
 import me.mycellium.skymyce.hud.widget.WidgetEditorScreen
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.Utils.displayMessage
@@ -40,6 +41,14 @@ object SkyMyceCommands : SkyMyceModule() {
             .then(dungeon())
             .then(literal("pf").executes {
                 MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
+                1
+            })
+            .then(literal("friends").executes {
+                MC.instance.execute { MC.instance.setScreen(FriendsSocialScreen()) }
+                1
+            })
+            .then(literal("loans").executes {
+                MC.instance.execute { MC.instance.setScreen(FriendsSocialScreen(FriendsSocialScreen.Tab.LENDING)) }
                 1
             })
             .then(literal("relaymsg").then(argument("name", StringArgumentType.word())

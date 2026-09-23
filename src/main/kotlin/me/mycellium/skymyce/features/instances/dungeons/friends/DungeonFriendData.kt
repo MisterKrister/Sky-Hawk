@@ -133,13 +133,29 @@ private fun JsonObject.number(key: String): Double? = get(key)?.takeIf { it.isJs
     ?.let { runCatching { it.asDouble }.getOrNull() }?.takeIf { it.isFinite() && it >= 0 }
 
 data class OnlineDungeonFriend(val name: String, val location: String, val rankColor: Int? = null, val bestFriend: Boolean = false) {
-    val badge: String get() = when {
-        location.contains("Dungeon Hub", true) -> "§aIdle"
-        location.contains("Dungeons", true) || location.contains("Catacombs", true) -> "§cIn Run"
-        location.contains("Hub", true) || location.contains("Island", true) -> "§aIdle"
-        else -> "§7Unknown"
-    }
+    val activity: FriendActivity get() = friendActivity(location)
+    val badge: String get() = "${activity.format}${activity.label}"
 }
+
+enum class FriendActivity(val label: String, val color: Int, val format: String) {
+    OFFLINE("Offline", 0x91A2AF, "§7"),
+    IN_RUN("In Run", 0xF18C8C, "§c"), LIMBO("Limbo", 0xF18C8C, "§c"),
+    IDLE("Idle", 0x7DDCA0, "§a"), SKYBLOCK("SkyBlock", 0xE8BF71, "§e"),
+    OTHER_GAME("Other game", 0x67CCF2, "§b"), UNKNOWN("Unknown", 0x91A2AF, "§7"),
+}
+
+fun friendActivity(location: String): FriendActivity = when {
+    location.contains("offline", true) -> FriendActivity.OFFLINE
+    location.contains("limbo", true) -> FriendActivity.LIMBO
+    location.contains("Dungeon Hub", true) -> FriendActivity.IDLE
+    Regex("(?i)\\b(?:dungeons?|catacombs)\\b").containsMatchIn(location) -> FriendActivity.IN_RUN
+    Regex("(?i)\\b(?:hub|private island)\\b").containsMatchIn(location) || location.equals("in Island", true) -> FriendActivity.IDLE
+    location.contains("SkyBlock", true) || Regex("(?i)\\b(?:mines|hollows|garden|crimson|end|park|rift|spider)\\b").containsMatchIn(location) -> FriendActivity.SKYBLOCK
+    location.isBlank() || location.equals("Unknown", true) || location.contains("offline", true) -> FriendActivity.UNKNOWN
+    else -> FriendActivity.OTHER_GAME
+}
+
+fun matchesFriendName(name: String, query: String): Boolean = name.contains(query.trim(), ignoreCase = true)
 
 /** Read the name's rendered style, including inherited component styles and legacy formatting codes. */
 fun dungeonPlayerNameStyle(component: Component, name: String): Style? {
@@ -163,9 +179,23 @@ fun dungeonPlayerTitle(name: String, suffix: String, rankColor: Int?): Component
     .append(Component.literal(name).withStyle { it.withColor(rankColor ?: 0xFFFFFF) })
     .append(Component.literal(" $suffix").withStyle { it.withColor(0xFFFFFF) })
 
-fun dungeonJoinedDetails(stats: DungeonFriendStats?, clazz: DungeonClass?): String =
+fun dungeonJoinedDetails(stats: DungeonFriendStats?, clazz: DungeonClass?, classLevel: Int? = null): String =
     "§fCata ${coloredDungeonLevel(stats?.catacombs)} §8| " +
-        (clazz?.let { "${coloredDungeonClass(it)} ${coloredDungeonLevel(stats?.classes?.get(it))}" } ?: "§7Class ?")
+        (clazz?.let { "${coloredDungeonClass(it)} ${coloredDungeonLevel(classLevel ?: stats?.classes?.get(it))}" } ?: "§7Class ?")
+
+/** Keep the announcement until its async lookup completes, including the second Party Finder chat line. */
+internal class DungeonJoinedTitle(val name: String, val source: Component, private val receivedAt: Long) {
+    var shownUntil = 0L
+        private set
+
+    fun subtitle(now: Long, stats: DungeonFriendStats?, clazz: DungeonClass?, classLevel: Int?, loading: Boolean): String? {
+        if (shownUntil != 0L || now < receivedAt + 150) return null
+        val complete = stats?.catacombs != null && clazz != null && (classLevel ?: stats.classes[clazz]) != null
+        if (!complete && loading && now < receivedAt + 60000) return null
+        shownUntil = now + 5000
+        return dungeonJoinedDetails(stats, clazz, classLevel)
+    }
+}
 
 private fun coloredDungeonLevel(level: Int?): String {
     // Match the SkyHanni dungeon level bands shown in Party Finder, including bold red at 50+.
@@ -304,6 +334,8 @@ class DungeonLfgReplies {
 class DungeonFriendParty {
     val members = mutableSetOf<String>()
     val classes = mutableMapOf<String, DungeonClass>()
+    private val classLevels = mutableMapOf<String, Pair<DungeonClass, Int>>()
+    fun classLevel(name: String, clazz: DungeonClass?): Int? = classLevels[name.lowercase()]?.takeIf { it.first == clazz }?.second
     var size = 1
         private set
     var ready = false
@@ -326,6 +358,7 @@ class DungeonFriendParty {
         val normalized = names.map { it.lowercase() }.toSet() + if (completeNames) emptySet() else members
         members.clear()
         classes.keys.retainAll(normalized)
+        classLevels.keys.retainAll(normalized)
         members.addAll(normalized)
         size = maxOf(count, normalized.size, 1)
         ready = confirmed
@@ -339,11 +372,13 @@ class DungeonFriendParty {
         if (leftParty) {
             members.clear()
             classes.clear()
+            classLevels.clear()
             roster(listOf(self), 1, true)
         }
         OWN_JOIN.matchEntire(message)?.let {
             members.clear()
             classes.clear()
+            classLevels.clear()
             // Joining only names the leader; wait for the full roster before enabling invites.
             roster(listOf(self, it.groupValues[1]), 2, false)
         }
@@ -352,12 +387,16 @@ class DungeonFriendParty {
             if (members.add(joined.groupValues[1].lowercase())) size++
             if (joined.groupValues.size > 2) parseDungeonClass(joined.groupValues[2])?.let {
                 classes[joined.groupValues[1].lowercase()] = it
+                joined.groupValues[3].toIntOrNull()?.let { level ->
+                    classLevels[joined.groupValues[1].lowercase()] = it to level
+                }
             }
         }
         LEFT.matchEntire(message)?.let {
             val name = it.groupValues[1].lowercase()
             if (members.remove(name)) size = (size - 1).coerceAtLeast(1)
             classes.remove(name)
+            classLevels.remove(name)
         }
         advance()
         return leftParty
@@ -368,7 +407,7 @@ class DungeonFriendParty {
         private val JOIN = Regex("^(?:\\[Party] )?$PLAYER joined the party\\.$")
         private val OWN_JOIN = Regex("^You have joined $PLAYER's? party!$")
         private val LEFT = Regex("^(?:\\[Party] )?$PLAYER (?:has left|has been removed from) the party\\.$")
-        private val CLASS_JOIN = Regex("^Party Finder > $PLAYER joined the dungeon group! \\((\\w+) Level \\d+\\)$")
+        private val CLASS_JOIN = Regex("^Party Finder > $PLAYER joined the dungeon group! \\((\\w+) Level (\\d+)\\)$")
         fun joinedPlayer(message: String): String? = (JOIN.matchEntire(message) ?: CLASS_JOIN.matchEntire(message))?.groupValues?.get(1)
         private val LEAVE = Regex("^(?:You left the party\\.|You have been kicked from the party by .+|You are not (?:currently )?in a party\\.|The party was disbanded.*|(?:\\[[^]]+] )?[A-Za-z0-9_]{1,16} has disbanded the party!)$")
     }
