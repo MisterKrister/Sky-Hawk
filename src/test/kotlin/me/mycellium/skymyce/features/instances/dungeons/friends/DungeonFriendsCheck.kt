@@ -1235,10 +1235,42 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(manualClient.nextCommand(manualContext, 106) { null } == null)
     check(manualClient.invited("Host", 107)) // Yes already supplied consent; the matching server invite is silent.
     check(manualClient.nextCommand(manualContext, 108) { null } == "party accept host")
+    // Joining, leaving, then accepting a fresh invitation must work inside the old 60-second cooldown.
+    for (joinedSize in listOf(2, 5)) {
+        val reinviteHost = DungeonFriendJoining()
+        check(reinviteHost.receiveRequest("Self", request, 0))
+        check(reinviteHost.nextCommand(hostContext, 1) { known } != null)
+        reinviteHost.acknowledged("Self", request.token)
+        check(reinviteHost.nextCommand(hostContext, 2) { known } == "party invite self")
+        check(reinviteHost.nextCommand(manualHostContext.copy(partySize = joinedSize, members = setOf("host", "self")), 1000) { null } == null)
+        check(!reinviteHost.receiveRequest("SELF", secondRequest, 21000)) // Unsolicited Join keeps its cooldown.
+        check(!reinviteHost.receiveRequest("SELF", request, 21000, manual = true)) // A completed token cannot be reused.
+        check(reinviteHost.receiveRequest("SELF", secondRequest, 21000, manual = true))
+        check(!reinviteHost.receiveRequest("Self", secondRequest, 21001, manual = true))
+        check(!reinviteHost.failed("Self", request.token)) // The old exchange cannot cancel the fresh invitation.
+        val reinviteOffer = reinviteHost.nextCommand(manualHostContext, 21002) { null }!!.removePrefix("msg self ")
+        manualClient.clear()
+        manualClient.request("Host", secondRequest, 21000, manual = true)
+        check(manualClient.receiveOffer("Host", reinviteOffer, 21003))
+        reinviteHost.acknowledged("Self", request.token)
+        check(reinviteHost.nextCommand(manualHostContext, 21004) { null } == null)
+        reinviteHost.acknowledged("Self", secondRequest.token)
+        check(reinviteHost.nextCommand(manualHostContext, 21005) { null } == "party invite self")
+        check(manualClient.invited("Host", 21006))
+        check(manualClient.nextCommand(manualContext, 21007) { null } == "party accept host")
+    }
+    val fullQueue = DungeonFriendJoining()
+    repeat(5) { check(fullQueue.receiveRequest("Friend$it", request, 0)) }
+    check(fullQueue.receiveRequest("Friend0", secondRequest, 1, manual = true)) // Replacement uses the same queue slot.
+    check(!fullQueue.receiveRequest("Extra", secondRequest, 2, manual = true))
     val privateReply = DungeonFriendJoining()
     privateReply.receiveAcceptedReply("Self", request, 0)
     check(privateReply.nextCommand(manualHostContext, 1) { null } == "party invite self")
     check(privateReply.nextCommand(manualHostContext, 2) { null } == null)
+    privateReply.receiveAcceptedReply("Self", secondRequest, 21000)
+    check(privateReply.nextCommand(manualHostContext, 21001) { null } == "party invite self")
+    privateReply.receiveAcceptedReply("Self", secondRequest, 21002)
+    check(privateReply.nextCommand(manualHostContext, 21003) { null } == null)
     val guarded = DungeonFriendJoining()
     guarded.request("Host", request, 0, manual = true)
     check(!guarded.invited("Host", 1)) // Do not hide an invitation before the relay agreement.

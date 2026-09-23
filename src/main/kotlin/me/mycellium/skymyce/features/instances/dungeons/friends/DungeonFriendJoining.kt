@@ -205,7 +205,7 @@ class DungeonFriendJoining {
         var received: Boolean = false, var invited: Boolean = false, val manual: Boolean = false)
     private val incoming = linkedMapOf<String, Request>()
     private val invitations = linkedMapOf<String, Long>()
-    private val recent = mutableMapOf<String, Long>()
+    private val recent = mutableMapOf<String, Request>()
     private var outgoing: Pair<String, Request>? = null
     private var acceptingUntil = 0L
     var accepted: Pair<String, Pair<DungeonFloor, DungeonClass>>? = null
@@ -233,9 +233,13 @@ class DungeonFriendJoining {
     fun receiveRequest(name: String, data: DungeonJoinRequest, now: Long, manual: Boolean = false): Boolean {
         prune(now)
         val key = name.lowercase()
-        if (key in incoming || (recent[key] ?: 0) > now || incoming.size >= 5) return false
-        incoming[key] = Request(data, now + 60000, manual = manual)
-        recent[key] = now + 60000
+        val previous = recent[key]
+        // A fresh, explicitly sent invitation supersedes the previous exchange, but never its own duplicate.
+        if (previous != null && (!manual || previous.data.token == data.token)) return false
+        if (key !in incoming && incoming.size >= 5) return false
+        val request = Request(data, now + 60000, manual = manual)
+        incoming[key] = request
+        recent[key] = request
         return true
     }
 
@@ -337,7 +341,7 @@ class DungeonFriendJoining {
     fun prune(now: Long) {
         incoming.entries.removeIf { it.value.expires <= now }
         invitations.entries.removeIf { it.value <= now }
-        recent.entries.removeIf { it.value <= now }
+        recent.entries.removeIf { it.value.expires <= now }
         if (outgoing?.second?.expires?.let { it <= now } == true) { statusPlayer = outgoing!!.first; outgoing = null; status = "Join request expired" }
         if (now >= acceptingUntil) accepted = null
     }
