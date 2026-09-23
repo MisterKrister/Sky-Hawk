@@ -76,11 +76,11 @@ object LoadoutKeybinds : SkyMyceModule() {
             return
         }
 
-        previousSlot = event.containerSlots.first {
+        previousSlot = event.containerSlots.firstOrNull {
             it.item.hoverName.stripped == "Previous Page"
         }
 
-        nextSlot = event.containerSlots.first {
+        nextSlot = event.containerSlots.firstOrNull {
             it.item.hoverName.stripped == "Next Page"
         }
 
@@ -101,7 +101,7 @@ object LoadoutKeybinds : SkyMyceModule() {
 
     @Subscription
     fun onClose(event: ContainerCloseEvent) {
-
+        clearState()
     }
 
     @Subscription

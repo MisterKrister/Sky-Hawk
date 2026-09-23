@@ -29,24 +29,35 @@ fun relayUri(text: String): URI? = runCatching {
 
 /** Only a receipt from the addressed player's mod cancels the fallback. */
 class RelayDeliveries {
-    private data class Pending(val name: String, val deadline: Long, val received: () -> Unit, val failed: () -> Unit)
+    private data class Pending(val name: String, var deadline: Long, val received: () -> Unit,
+        val failed: (String) -> Unit, var transmit: (() -> Boolean)?)
     private val pending = linkedMapOf<String, Pending>()
     val full get() = pending.size >= 16
-    fun add(id: String, name: String, now: Long, received: () -> Unit, failed: () -> Unit) {
+    fun add(id: String, name: String, now: Long, received: () -> Unit, failed: (String) -> Unit,
+            transmit: (() -> Boolean)? = null) {
         check(!full && id !in pending)
-        pending[id] = Pending(name, now + 5000, received, failed)
+        pending[id] = Pending(name, now + 5000, received, failed, transmit)
     }
     fun acknowledge(id: String, from: String) {
-        val item = pending[id]?.takeIf { it.name.equals(from, true) } ?: return
+        val item = pending[id]?.takeIf { it.transmit == null && it.name.equals(from, true) } ?: return
         pending.remove(id)
         item.received()
     }
-    fun fail(id: String) { pending.remove(id)?.failed?.invoke() }
-    fun tick(now: Long) { pending.filterValues { now >= it.deadline }.keys.toList().forEach(::fail) }
+    fun fail(id: String, reason: String = "receipt_timeout") { pending.remove(id)?.failed?.invoke(reason) }
+    fun tick(now: Long) {
+        for ((id, item) in pending.toMap()) {
+            if (now >= item.deadline) fail(id, if (item.transmit != null) "connection_not_ready" else "receipt_timeout")
+            else if (item.transmit?.invoke() == true) {
+                item.transmit = null
+                item.deadline = now + 5000
+            }
+        }
+    }
+    fun connectionFailed() { pending.filterValues { it.transmit == null }.keys.toList().forEach { fail(it, "connection_lost") } }
     fun clear(failed: Boolean = false) {
         val old = pending.values.toList()
         pending.clear()
-        if (failed) old.forEach { it.failed() }
+        if (failed) old.forEach { it.failed("connection_lost") }
     }
 }
 
@@ -88,7 +99,7 @@ object DungeonFriendRelay {
         val key = "$url|${user.profileId}"
         if (!active || url.isBlank()) {
             if (identity.isNotEmpty()) disconnect()
-            status = if (url.isBlank()) "Relay not configured" else "Relay connects in SkyBlock"
+            status = if (url.isBlank()) "Relay not configured" else "Relay connects on Hypixel"
             return
         }
         if (key != identity) { disconnect(); identity = key }
@@ -177,6 +188,7 @@ object DungeonFriendRelay {
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
                                         status = "Relay connected"
+                                        SkyMyce.logger.info("[Dungeon relay] Connected to {} ({})", uri.host, uri.query ?: "room=friends")
                                     }
                                     "message", "ack" -> {
                                         check(connected)
@@ -188,7 +200,10 @@ object DungeonFriendRelay {
                                         else {
                                             val body = json.get("text").asString
                                             check(body.length in 1..256 && body.none { it < ' ' || it == '\u007f' || it == '§' })
-                                            if (DungeonFriends.onRelayMessage(from, uuid, body)) packet(mapOf("type" to "ack", "to" to from, "id" to id))
+                                            if (DungeonFriends.onRelayMessage(from, uuid, body)) {
+                                                packet(mapOf("type" to "ack", "to" to from, "id" to id))
+                                                SkyMyce.logger.info("[Dungeon relay] Accepted delivery {}", id)
+                                            } else SkyMyce.logger.info("[Dungeon relay] Rejected delivery {}", id)
                                         }
                                     }
                                     "stats_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
@@ -226,7 +241,11 @@ object DungeonFriendRelay {
                                             }
                                         }
                                     }
-                                    "error" -> { check(connected); deliveries.fail(json.get("id").asString) }
+                                    "error" -> {
+                                        check(connected)
+                                        val reason = json.get("code")?.asString?.takeIf { it.matches(Regex("[a-z_]{1,32}")) } ?: "rejected"
+                                        deliveries.fail(json.get("id").asString, reason)
+                                    }
                                     else -> error("Unknown relay packet")
                                 }
                             }.onFailure { failed("Invalid relay response; reconnecting") }
@@ -260,11 +279,26 @@ object DungeonFriendRelay {
     }
 
     fun send(name: String, text: String, received: () -> Unit = {}, failed: () -> Unit = {}): Boolean {
-        if (!connected || deliveries.full || !name.matches(Regex("[A-Za-z0-9_]{1,16}")) ||
-            text.length !in 1..256 || text.any { it < ' ' || it == '\u007f' || it == '§' }) return false
+        if (deliveries.full || relayUri(DungeonFriendsSettings.relayUrl) == null || !name.matches(Regex("[A-Za-z0-9_]{1,16}")) ||
+            text.length !in 1..256 || text.any { it < ' ' || it == '\u007f' || it == '§' }) {
+            SkyMyce.logger.info("[Dungeon relay] Send rejected: invalid message/configuration or full delivery queue")
+            return false
+        }
         val id = UUID.randomUUID().toString().replace("-", "")
-        deliveries.add(id, name, DungeonFriends.now(), received, failed)
-        packet(mapOf("type" to "message", "id" to id, "to" to name, "text" to text))
+        deliveries.add(id, name, DungeonFriends.now(), {
+            SkyMyce.logger.info("[Dungeon relay] Delivery {} to {} acknowledged", id, name)
+            received()
+        }, { reason ->
+            SkyMyce.logger.info("[Dungeon relay] Delivery {} to {} failed: {}", id, name, reason)
+            failed()
+        }, {
+            if (!connected) false else {
+                packet(mapOf("type" to "message", "id" to id, "to" to name, "text" to text))
+                SkyMyce.logger.info("[Dungeon relay] Sent delivery {} to {}", id, name)
+                true
+            }
+        })
+        deliveries.tick(DungeonFriends.now())
         return true
     }
 
@@ -352,7 +386,7 @@ object DungeonFriendRelay {
         retryDelay = (retryDelay * 2).coerceAtMost(60000)
         status = message
         if (message != "Relay disconnected") SkyMyce.logger.warn("{}", message)
-        deliveries.clear(failed = true)
+        deliveries.connectionFailed()
     }
 
     fun disconnect() {

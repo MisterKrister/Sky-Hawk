@@ -1,5 +1,9 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
+import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.Style
+import tech.thatgravyboat.skyblockapi.utils.text.TextUtils.splitLines
+
 /** Only suppresses recognizable responses to a scan we actually requested. All times are monotonic milliseconds. */
 class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
     val online = cached.orEmpty().associateByTo(linkedMapOf()) { it.name.lowercase() }
@@ -75,10 +79,12 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         requested = !hasScanned
     }
 
-    fun notification(name: String, joined: Boolean) {
+    fun notification(name: String, joined: Boolean, style: Style? = null) {
         val key = name.lowercase()
         if (joined) {
-            online[key] = OnlineDungeonFriend(name, "Unknown")
+            val previous = online[key]
+            online[key] = OnlineDungeonFriend(name, "Unknown", style?.color?.value ?: previous?.rankColor,
+                previous?.bestFriend == true || style?.isBold == true)
             seen += key
         } else {
             online.remove(key)
@@ -87,12 +93,22 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
         version++
     }
 
-    fun receive(message: String, now: Long): Boolean {
+    fun bestFriend(name: String, best: Boolean) {
+        val key = name.lowercase()
+        val friend = online[key] ?: return
+        if (friend.bestFriend == best) return
+        online[key] = friend.copy(bestFriend = best)
+        version++
+    }
+
+    fun receive(message: String, now: Long, component: Component = Component.literal(message)): Boolean {
         if (!waiting || now >= deadline) return false
-        val lines = message.replace(Regex("§."), "").lines().map { it.trim() }
+        val lines = message.replace(Regex("§."), "").trim().replace(Regex("\\s+\\(x\\d+\\)$"), "")
+            .lines().map { it.trim() }
         // Never swallow a mixed packet containing unrelated chat.
         if (lines.any { !recognized(it) }) return false
         if (!headerSeen && lines.none { HEADER.containsMatchIn(it) } && lines.any { ENTRY.matches(it) }) return false
+        val styledLines = component.splitLines()
         for (line in lines) {
             val header = HEADER.find(line)
             if (header != null) {
@@ -117,7 +133,13 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null) {
                         online.remove(key)
                     } else if (!offlineSeen) {
                         seen += key
-                        online[key] = OnlineDungeonFriend(name, location)
+                        val source = styledLines.firstOrNull { ENTRY.matchEntire(it.string.replace(Regex("§."), "").trim())?.groupValues?.get(1) == name }
+                            ?: component
+                        val style = dungeonPlayerNameStyle(source, name)
+                        // Chat restylers can flatten the whole line to one color; that is not a rank color.
+                        val color = style?.color?.value?.takeIf { it != dungeonPlayerNameStyle(source, location)?.color?.value }
+                        online[key] = OnlineDungeonFriend(name, location, color ?: online[key]?.rankColor,
+                            style?.isBold == true || online[key]?.bestFriend == true)
                     }
                     version++
                 } else if (SEPARATOR.matches(line) && headerSeen) {
