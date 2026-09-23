@@ -149,7 +149,7 @@ try {
   alice.ws.send(JSON.stringify({ type: "message", id: "2".repeat(32), to: "Carol", text: "must not cross rooms" }));
   assert.equal((await alice.next()).code, "offline");
   carol.ws.send("ping"); assert.equal(await carol.next(), "pong"); // No leaked message preceded the pong.
-  for (const mutate of [
+  for (const [index, mutate] of [
     (data, challenge) => ({ ...data, proof: Buffer.alloc(256).toString("base64") }),
     data => ({ ...data, uuid: identities.get("Bob") }),
     () => proof("Alice", alice.challenge), // Valid proof from another socket cannot be replayed.
@@ -158,11 +158,13 @@ try {
     (data, challenge) => proof("Alice", challenge, { timestamp: Date.now() - 2 * 86400000 }),
     data => ({ ...data, keySignature: data.profileSignature }),
     data => ({ ...data, profileSignature: data.keySignature }),
-  ]) {
+  ].entries()) {
     const fake = await connect("Alice", "testing");
     const rejected = closeEvent(fake.ws);
     fake.authenticate(mutate(proof("Alice", fake.challenge), fake.challenge));
-    assert.equal((await rejected).code, 4003);
+    const rejection = await rejected;
+    assert.equal(rejection.code, index === 4 || index === 5 ? 4003 : 4004);
+    assert.match(rejection.reason, /^(certificate|challenge|profile)_/);
   }
   const unauth = await connect("Bob", "testing");
   const blocked = closeEvent(unauth.ws);
@@ -210,6 +212,31 @@ try {
   const classClosed = closeEvent(invalidClass.ws);
   invalidClass.ws.send(JSON.stringify({ type: "party_set", floor: "F7", open: true, selectedClass: "FARMER" }));
   assert.equal((await classClosed).code, 1008);
+  const burstSender = await connect("Alice", "testing"); burstSender.authenticate(); await burstSender.next();
+  const burstRecipient = await connect("Bob", "testing"); burstRecipient.authenticate(); await burstRecipient.next();
+  const burstIds = Array.from({ length: 9 }, (_, i) => (200 + i).toString(16).padStart(32, "0"));
+  for (const id of burstIds) burstSender.ws.send(JSON.stringify({ type: "message", id, to: "Bob", text: "burst" }));
+  for (const id of burstIds) assert.equal((await burstRecipient.next()).id, id);
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "testing", webSockets: "hibernate" });
+  for (const id of burstIds) {
+    burstRecipient.ws.send(JSON.stringify({ type: "ack", id, to: "Alice" }));
+    assert.equal((await burstSender.next()).id, id);
+  }
+  const delayedId = "e".repeat(32);
+  burstSender.ws.send(JSON.stringify({ type: "message", id: delayedId, to: "Bob", text: "delayed" }));
+  await burstRecipient.next();
+  burstRecipient.ws.send(JSON.stringify({ type: "ack", id: delayedId, to: "Carol" }));
+  assert.equal((await burstRecipient.next()).code, "invalid_receipt"); // Wrong sender must never receive a receipt.
+  carol.ws.send("ping"); assert.equal(await carol.next(), "pong");
+  await new Promise(resolve => setTimeout(resolve, 10100));
+  for (const id of [delayedId, "f".repeat(32), burstIds[0]]) {
+    burstRecipient.ws.send(JSON.stringify({ type: "ack", id, to: "Alice" }));
+    assert.equal((await burstRecipient.next()).code, "invalid_receipt"); // Expired, forged, and duplicate.
+  }
+  burstSender.ws.send("ping"); assert.equal(await burstSender.next(), "pong"); // None was forwarded.
+  const displaced = closeEvent(burstRecipient.ws);
+  const replacement = await connect("Bob", "testing"); replacement.authenticate(); await replacement.next();
+  assert.equal((await displaced).code, 4001);
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

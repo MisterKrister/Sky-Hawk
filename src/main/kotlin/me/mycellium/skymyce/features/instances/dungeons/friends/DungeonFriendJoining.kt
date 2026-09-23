@@ -2,8 +2,19 @@ package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.HoverEvent
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
+
+internal fun dungeonCanInvite(inParty: Boolean, allInvite: Boolean, leader: Boolean, moderator: Boolean) =
+    !inParty || allInvite || leader || moderator
+
+internal fun lfgAcceptanceUnavailable(solo: Boolean, busy: Boolean, coolingDown: Boolean): String? = when {
+    !solo -> "Leave your current party before joining"
+    busy -> "A join request is already pending"
+    coolingDown -> "Wait a moment, then reply Yes again"
+    else -> null
+}
 
 data class DungeonAvailability(
     val floor: DungeonFloor = DungeonFloor.F7,
@@ -71,6 +82,18 @@ data class DungeonJoinRequest(val floor: DungeonFloor, val classes: Set<DungeonC
 /** The request token binds Yes to the invitation that was actually shown. */
 data class DungeonLfgOffer(val request: DungeonJoinRequest, val text: String, val expires: Long) {
     fun message(): String = "[SkyMyce LFG ${request.floor.name} ${request.classes.joinToString("/") { it.displayName }} ${request.token}] $text".take(256)
+    fun chatMessage(name: String): Component {
+        val classes = request.classes.joinToString("/") { it.displayName }
+        return Component.literal("§b$name §7wants you to join §b${request.floor.name} §7as §f$classes")
+            .append("  ").append(Component.literal("§a[Yes]").withStyle {
+                it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${request.token}"))
+                    .withHoverEvent(HoverEvent.ShowText(Component.literal("Click to join $name's party")))
+            })
+            .append("  ").append(Component.literal("§c[No]").withStyle {
+                it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${request.token}"))
+                    .withHoverEvent(HoverEvent.ShowText(Component.literal("Click to decline the invitation")))
+            })
+    }
     companion object {
         fun parse(text: String, now: Long): DungeonLfgOffer? {
             val match = Regex("^\\[SkyMyce LFG ([FM][1-7]) ([A-Za-z/]+) ([a-f0-9]{16})] (.+)$").matchEntire(text) ?: return null
@@ -220,22 +243,26 @@ class DungeonFriendJoining {
         if (receiveRequest(name, data, now, manual = true)) incoming.getValue(name.lowercase()).received = true
     }
 
-    fun receiveOffer(name: String, message: String, now: Long) {
+    fun receiveOffer(name: String, message: String, now: Long): Boolean {
         prune(now)
-        val (target, request) = outgoing ?: return
-        if (!target.equals(name, true)) return
+        val (target, request) = outgoing ?: return false
+        if (!target.equals(name, true)) return false
         val match = Regex("^Inviting you for ([FM][1-7]) as ([A-Za-z]+) \\[SkyMyce Ready ([a-f0-9]{16})]$")
-            .matchEntire(message) ?: return
-        val clazz = parseDungeonClass(match.groupValues[2]) ?: return
+            .matchEntire(message) ?: return false
+        val clazz = parseDungeonClass(match.groupValues[2]) ?: return false
         if (match.groupValues[1] == request.data.floor.name && match.groupValues[3] == request.data.token && clazz in request.data.classes) {
             request.offered = clazz
+            return true
         }
+        return false
     }
 
-    fun invited(name: String, now: Long) {
+    fun invited(name: String, now: Long): Boolean {
         prune(now)
         // Available classes alone never authorize an unsolicited or manual party invitation.
-        if (expectsInvite(name, now)) invitations.putIfAbsent(name.lowercase(), now + 55000)
+        if (!expectsInvite(name, now)) return false
+        invitations.putIfAbsent(name.lowercase(), now + 55000)
+        return true
     }
 
     fun acknowledged(name: String, token: String) {
@@ -244,10 +271,16 @@ class DungeonFriendJoining {
 
     fun failed(name: String, token: String): Boolean {
         val removed = incoming[name.lowercase()]?.takeIf { it.data.token == token }?.let { incoming.remove(name.lowercase()); true } == true
+        if (removed) recent.remove(name.lowercase())
         val requested = outgoing?.first.equals(name, true) && outgoing?.second?.data?.token == token
-        if (requested) outgoing = null
+        if (requested) { outgoing = null; invitations.remove(name.lowercase()) }
         if (removed || requested) { statusPlayer = name; status = "Could not reach $name" }
         return removed || requested
+    }
+
+    fun reconnect() {
+        outgoing?.let { failed(it.first, it.second.data.token) }
+        incoming.toMap().filterValues { !it.invited }.forEach { (name, request) -> failed(name, request.data.token) }
     }
 
     fun nextCommand(context: JoinPartyContext, now: Long, stats: (String) -> DungeonFriendStats?): String? {
@@ -280,8 +313,10 @@ class DungeonFriendJoining {
             val otherReservations = incoming.filter { it.key != name && it.value.offered != null }
             if (context.partySize + otherReservations.size >= 5) continue
             val reservedClasses = otherReservations.values.mapNotNull { it.offered }.toSet()
-            val clazz = request.offered ?: request.data.classes.firstOrNull { it in context.missing && it !in reservedClasses } ?: continue
-            if (clazz !in context.missing || clazz in reservedClasses) continue
+            val availableClasses = request.data.classes.filter { it in context.missing && it !in reservedClasses }
+            val clazz = request.offered ?: playerStats?.selectedClass?.takeIf { it in availableClasses }
+                ?: availableClasses.firstOrNull() ?: continue
+            if (clazz !in availableClasses) continue
             if (request.offered == null) {
                 request.offered = clazz
                 statusPlayer = name

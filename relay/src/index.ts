@@ -5,6 +5,7 @@ import { classes, SharedStats, STATS_TTL, validateStats, type StatsGrant } from 
 type RelayEnv = Env;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
 type Session = {
+  started?: number;
   challenge: string;
   expires: number;
   ip: string;
@@ -64,7 +65,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     const [client, server] = Object.values(new WebSocketPair());
     const now = Date.now();
     const session: Session = {
-      challenge: crypto.randomUUID().replaceAll("-", ""), expires: now + 30000, ip,
+      challenge: crypto.randomUUID().replaceAll("-", ""), expires: now + 30000, started: now, ip,
       credits: 12, updated: now, seen: [], inbox: [],
     };
     this.ctx.acceptWebSocket(server);
@@ -87,14 +88,17 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     if (!session.name) {
       if (session.checking || Date.now() > session.expires || data.type !== "authenticate" ||
           typeof data.name !== "string" || !username.test(data.name) || typeof data.uuid !== "string" || !uuid.test(data.uuid)) {
+        console.warn({ event: "authentication_rejected", category: Date.now() > session.expires ? "challenge_expired" : "invalid_authentication", retryable: true });
         ws.close(1008, "Authentication required"); return;
       }
       session.checking = true;
       ws.serializeAttachment(session);
       try {
         const profile = await verifyAccount(data, session.challenge);
-        if (profile === null || Date.now() > session.expires) {
-          ws.close(4003, "Invalid or expired Minecraft proof; update mod or restart Minecraft"); return;
+        if ("error" in profile || Date.now() > session.expires) {
+          const rejection = "error" in profile ? profile : { error: "challenge_expired", retryable: true };
+          console.warn({ event: "authentication_rejected", category: rejection.error, retryable: rejection.retryable });
+          ws.close(rejection.retryable ? 4003 : 4004, rejection.error); return;
         }
         if (ws.readyState !== WebSocket.OPEN) return;
         for (const other of this.ctx.getWebSockets()) {
@@ -209,10 +213,13 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     if (session.credits < 1) { ws.close(1008, "Message rate exceeded"); return; }
     session.credits--;
     if (data.type === "ack") {
-      if (!session.inbox.some(it => it.id === data.id && it.from.toLowerCase() === (data.to as string).toLowerCase() && it.expires > now)) {
-        ws.close(1008, "Unsolicited acknowledgement"); return;
+      const receipt = session.inbox.find(it => it.id === data.id && it.from.toLowerCase() === (data.to as string).toLowerCase());
+      if (!receipt || receipt.expires <= now) {
+        // Late/duplicate receipts cannot be distinguished from invented IDs. Never forward either.
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "error", id: data.id, code: "invalid_receipt" })); return;
       }
-      session.inbox = session.inbox.filter(it => it.id !== data.id);
+      session.inbox = session.inbox.filter(it => it !== receipt);
     } else {
       if (session.seen.includes(data.id)) { ws.close(1008, "Duplicate message"); return; }
       session.seen = [...session.seen.slice(-7), data.id];
@@ -229,7 +236,11 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     try {
       if (data.type === "message") {
         const recipient = target.deserializeAttachment() as Session;
-        recipient.inbox = [...recipient.inbox.filter(it => it.expires > now).slice(-7), { id: data.id, from: session.name, expires: now + 10000 }];
+        recipient.inbox = [...recipient.inbox.filter(it => it.expires > now), { id: data.id, from: session.name, expires: now + 10000 }];
+        // Reject before delivery rather than evicting a still-valid receipt. Attachments are limited to 2 KiB.
+        if (recipient.inbox.length > 16 || encoder.encode(JSON.stringify(recipient)).length > 2048) {
+          ws.send(JSON.stringify({ type: "error", id: data.id, code: "recipient_busy" })); return;
+        }
         target.serializeAttachment(recipient);
       }
       target.send(JSON.stringify({ type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
@@ -257,12 +268,24 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     for (const ws of this.ctx.getWebSockets()) {
       const session = ws.deserializeAttachment() as Session;
       if (session.name) continue;
-      if (session.expires <= Date.now()) ws.close(1008, "Authentication timed out");
+      if (session.expires <= Date.now()) {
+        console.warn({ event: "authentication_rejected", category: "challenge_timeout", retryable: true });
+        ws.close(1008, "Authentication timed out");
+      }
       else next = Math.min(next, session.expires);
     }
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next);
   }
 
-  webSocketClose(ws: WebSocket): void { ws.close(1000, "Client disconnected"); }
-  webSocketError(ws: WebSocket): void { console.error({ event: "websocket_error" }); ws.close(1011, "Connection error"); }
+  webSocketClose(ws: WebSocket, code: number, _reason: string, wasClean: boolean): void {
+    const session = ws.deserializeAttachment() as Session;
+    console.info({ event: "websocket_close", code, clean: wasClean, authenticated: !!session.name,
+      lifetimeMs: session.started === undefined ? undefined : Date.now() - session.started });
+    // Safe with automatic close replies; also completes the handshake in local runtimes.
+    ws.close(1000, "Client disconnected");
+  }
+  webSocketError(ws: WebSocket): void {
+    console.error({ event: "websocket_error", authenticated: !!(ws.deserializeAttachment() as Session).name });
+    ws.close(1011, "Connection error");
+  }
 }

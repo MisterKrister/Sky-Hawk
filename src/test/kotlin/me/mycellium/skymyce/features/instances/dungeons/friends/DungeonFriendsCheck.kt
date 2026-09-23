@@ -9,6 +9,7 @@ import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.HoverEvent
 import net.minecraft.network.chat.Style
+import net.minecraft.util.StringDecomposer
 import net.minecraft.ChatFormatting
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass.*
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor.*
@@ -19,6 +20,50 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    val retry = RelayRetry()
+    retry.failed(100, false)
+    check(retry.nextAttempt == 1100L)
+    repeat(20) { retry.failed(100, false) }
+    check(retry.delay == 60000L && retry.nextAttempt == 60100L)
+    for (code in listOf(4001, 4004)) {
+        check(relayNeedsReconnect(code))
+        retry.failed(100, relayNeedsReconnect(code))
+        check(retry.nextAttempt == Long.MAX_VALUE)
+        retry.reset()
+        check(retry.nextAttempt == 0L && retry.delay == 1000L)
+    }
+    for (code in listOf(1000, 1006, 1008, 1013, 4003)) check(!relayNeedsReconnect(code))
+    val safeError = relayErrorDetail(java.util.concurrent.CompletionException(java.io.IOException("secret-token private-message 192.0.2.1")))
+    check("java.io.IOException" in safeError && "secret" !in safeError && "192.0.2.1" !in safeError)
+    for (peerCloses in listOf(true, false)) {
+        val closed = java.util.concurrent.CountDownLatch(1)
+        val aborted = java.util.concurrent.CountDownLatch(1)
+        val ws = java.lang.reflect.Proxy.newProxyInstance(java.net.http.WebSocket::class.java.classLoader,
+            arrayOf(java.net.http.WebSocket::class.java)) { proxy, method, _ ->
+            when (method.name) {
+                "sendClose" -> { closed.countDown(); CompletableFuture.completedFuture(proxy as java.net.http.WebSocket) }
+                "isInputClosed" -> peerCloses
+                "isOutputClosed" -> closed.count == 0L
+                "abort" -> { aborted.countDown(); null }
+                else -> error("Unexpected WebSocket call: ${method.name}")
+            }
+        } as java.net.http.WebSocket
+        val pendingSend = CompletableFuture<Void>()
+        closeRelaySocket(ws, pendingSend, 100)
+        check(closed.count == 1L) // Wait for the current send before closing.
+        pendingSend.complete(null)
+        check(closed.await(1, java.util.concurrent.TimeUnit.SECONDS))
+        check(aborted.await(200, java.util.concurrent.TimeUnit.MILLISECONDS) != peerCloses)
+    }
+    check(!dungeonCanInvite(true, false, false, false))
+    check(dungeonCanInvite(false, false, false, false))
+    check(dungeonCanInvite(true, true, false, false))
+    check(dungeonCanInvite(true, false, true, false))
+    check(dungeonCanInvite(true, false, false, true))
+    check(lfgAcceptanceUnavailable(true, false, false) == null)
+    check(lfgAcceptanceUnavailable(true, false, true)?.contains("reply Yes again") == true)
+    check(lfgAcceptanceUnavailable(true, true, false)?.contains("pending") == true)
+    check(lfgAcceptanceUnavailable(false, false, false)?.contains("Leave") == true)
     val progress = DungeonRefreshProgress()
     check(progress.update(0, 100, 0, 0) == 0)
     check(progress.update(3, 97, 0, 0) == 3)
@@ -101,6 +146,39 @@ fun main() {
     check(hoverFix.invoke(mixin, textStyle) === textStyle)
 
     val scanner = FriendListScanner()
+    for (failure in listOf("timeout", "rejected", "disconnect", "paused")) {
+        val firstScan = FriendListScanner()
+        check(firstScan.tick(0) == "friend list 1")
+        when (failure) {
+            "timeout" -> firstScan.tick(10000)
+            "rejected" -> firstScan.receive("You are sending commands too fast!", 1)
+            "disconnect" -> {
+                firstScan.receive("Friends (Page 1 of 2)\nPartial is in Hub\n--------------------", 1)
+                firstScan.cancel()
+            }
+            "paused" -> {
+                firstScan.manualCommand()
+                firstScan.receive("Friends (Page 1 of 1)\nPartial is in Hub\n--------------------", 1)
+            }
+        }
+        check(!firstScan.hasScanned && firstScan.savedFriends.isEmpty())
+        if (failure != "disconnect") check(firstScan.tick(20000) == null) // No unbounded retries.
+        firstScan.cancel()
+        check(firstScan.tick(21000) == "friend list 1") // A failed first load retries next session.
+    }
+    val savedScan = FriendListScanner(listOf(OnlineDungeonFriend("Saved", "in Hub")))
+    savedScan.refresh(0)
+    savedScan.tick(0)
+    savedScan.receive("Friends (Page 1 of 2)\nPartial is in Hub\n--------------------", 1)
+    savedScan.tick(1201)
+    savedScan.tick(11201)
+    check(savedScan.savedFriends.map { it.name } == listOf("Saved"))
+    savedScan.cancel()
+    check(savedScan.savedFriends.map { it.name } == listOf("Saved"))
+    savedScan.refresh(12000)
+    savedScan.tick(12000)
+    savedScan.receive("You don't have any friends!", 12001)
+    check(savedScan.hasScanned && savedScan.savedFriends.isEmpty())
     scanner.notification("Dave", true)
     check(!scanner.receive("Friends (Page 1 of 1)", 0))
     check(scanner.tick(0) == "friend list 1")
@@ -256,9 +334,30 @@ fun main() {
     check(DungeonFriendStatsCache.receiveShared(improved, "Alice", "a".repeat(32), 1000100))
     check(DungeonFriendStatsCache.get("Alice")?.selectedClass == TANK) // A late stats result cannot undo the live class.
     DungeonFriendStatsCache.forgetLiveClass("Alice")
+    check(DungeonFriendStatsCache.liveClass("Alice") == null)
     check(DungeonFriendStatsCache.receiveShared(improved.deepCopy().apply { addProperty("fetchedAt", 1000075) }, "Alice", "a".repeat(32), 1000100))
     check(DungeonFriendStatsCache.get("Alice")?.selectedClass == ARCHER) // A profile change releases the live override.
+    // Rejoining the same party must not restore Healer over the Mage update received while solo.
+    check(DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), HEALER))
+    val rejoinedParty = DungeonFriendParty()
+    rejoinedParty.roster(listOf("Self", "Alice"), 2, true)
+    val oldClasses = mapOf("self" to MAGE, "alice" to HEALER)
+    rejoinedParty.restoreClasses(oldClasses, DungeonFriendStatsCache::liveClass)
+    check(rejoinedParty.classes["alice"] == HEALER)
+    check(DungeonFriendStatsCache.updateClass("Alice", "a".repeat(32), MAGE))
+    check(DungeonFriendStatsCache.liveClass("ALICE") == MAGE)
+    rejoinedParty.roster(listOf("Self"), 1, true)
+    rejoinedParty.roster(listOf("Self", "Alice"), 2, true)
+    rejoinedParty.restoreClasses(oldClasses, DungeonFriendStatsCache::liveClass)
+    check(rejoinedParty.classes["alice"] == MAGE) { "Saved party restored ${rejoinedParty.classes["alice"]} over live Mage" }
+    check(HEALER in rejoinedParty.openClasses && MAGE !in rejoinedParty.openClasses)
+    check(dungeonJoinedDetails(DungeonFriendStatsCache.get("Alice"), rejoinedParty.classes["alice"]).contains("Mage"))
+    DungeonFriendStatsCache.forgetLiveClass("Alice")
+    rejoinedParty.chat("Party Finder > Alice joined the dungeon group! (Tank Level 45)", "Self")
+    rejoinedParty.restoreClasses(oldClasses + ("absent" to ARCHER), DungeonFriendStatsCache::liveClass)
+    check(rejoinedParty.classes["alice"] == TANK && "absent" !in rejoinedParty.classes)
     DungeonFriendStatsCache.clear()
+    check(DungeonFriendStatsCache.liveClass("Alice") == null)
     check(sharedDungeonFriend(sharedJson, "Bob", null, 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", "b".repeat(32), 1000100) == null)
     check(sharedDungeonFriend(sharedJson, "Alice", null, 1600000) == null)
@@ -328,6 +427,25 @@ fun main() {
     )))).asJsonObject
     fun pollCache(time: Long = cacheTime) = DungeonFriendStatsCache.pollShared(time) { name, _ ->
         CompletableFuture<com.google.gson.JsonObject?>().also { sharedReplies[name] = it }
+    }
+    // Profile switches retain a forced follow-up and reject old provider responses in either order.
+    val inFlightField = DungeonFriendStatsCache::class.java.getDeclaredField("inFlight").apply { isAccessible = true }
+    for (oldFirst in listOf(true, false)) {
+        DungeonFriendStatsCache.clear()
+        check(DungeonFriendStatsCache.storeFetched("alice", 0, known, "a".repeat(32), cacheTime, cacheTime))
+        inFlightField.set(null, "alice")
+        try {
+            DungeonFriendStatsCache.invalidateProfile("ALICE")
+            DungeonFriendStatsCache.request("Alice", force = true, bypassShared = true)
+            check(DungeonFriendStatsCache.pendingCount == 2)
+            check(DungeonFriendStatsCache.get("Alice") == null && DungeonFriendStatsCache.verified("Alice") == null)
+            check(!DungeonFriendStatsCache.receiveShared(sharedReply("alice").getAsJsonObject("record"), "Alice", null, cacheTime))
+            val replacement = known.copy(selectedClass = MAGE, sPlusTimes = mapOf(F7 to 123000L))
+            if (oldFirst) check(!DungeonFriendStatsCache.storeFetched("alice", 0, known, "a".repeat(32), cacheTime, cacheTime + 1))
+            check(DungeonFriendStatsCache.storeFetched("alice", 2, replacement, "a".repeat(32), cacheTime + 2, cacheTime + 3))
+            if (!oldFirst) check(!DungeonFriendStatsCache.storeFetched("alice", 0, known, "a".repeat(32), cacheTime, cacheTime + 4))
+            check(DungeonFriendStatsCache.verified("Alice") == replacement)
+        } finally { inFlightField.set(null, null); DungeonFriendStatsCache.clear() }
     }
     listOf("Slow", "Alice", "Bob", "Carol").forEach { DungeonFriendStatsCache.request(it) }
     repeat(4) { pollCache() }
@@ -475,9 +593,19 @@ fun main() {
         dungeonTitleDetails(M7, listOf(TANK, BERSERKER, ARCHER, HEALER))
     }
     check(dungeonTitleDetails(null, emptyList()) == "to their party")
-    check(dungeonJoinedDetails(known, MAGE) == "§bCata 52 §8| §bMage §f2")
-    check(dungeonJoinedDetails(null, TANK) == "§bCata ? §8| §aTank §f?")
-    check(dungeonJoinedDetails(null, null) == "§bCata ? §8| §7Class ?")
+    check(dungeonJoinedDetails(known, MAGE) == "§fCata §c§l52 §8| §bMage §72")
+    check(dungeonJoinedDetails(null, TANK) == "§fCata §7? §8| §aTank §7?")
+    check(dungeonJoinedDetails(null, null) == "§fCata §7? §8| §7Class ?")
+    val levelBands = listOf(0..4 to "§7", 5..9 to "§f", 10..14 to "§e", 15..19 to "§a", 20..24 to "§2",
+        25..29 to "§b", 30..34 to "§9", 35..39 to "§d", 40..44 to "§6", 45..49 to "§c", 50..60 to "§c§l")
+    for ((levels, color) in levelBands) for (level in listOf(levels.first, levels.last)) {
+        val subtitle = dungeonJoinedDetails(known.copy(catacombs = level, classes = mapOf(MAGE to level)), MAGE)
+        check(subtitle == "§fCata $color$level §8| §bMage $color$level") { subtitle }
+    }
+    val joinedTitle = Component.literal(dungeonJoinedDetails(known, MAGE))
+    check(dungeonPlayerNameStyle(joinedTitle, "Cata")?.color?.value == 0xFFFFFF)
+    check(dungeonPlayerNameStyle(joinedTitle, "52")?.let { it.color?.value == 0xFF5555 && it.isBold } == true)
+    check(dungeonPlayerNameStyle(joinedTitle, "Mage")?.let { it.color?.value == 0x55FFFF && !it.isBold } == true)
 
     val replies = DungeonLfgReplies()
     replies.receive("Alice", "yes", 0)
@@ -532,13 +660,18 @@ fun main() {
         val friendStore = FriendListStore(savedFriends)
         check(friendStore.load() == null)
         check(FriendListScanner(friendStore.load()).tick(0) == "friend list 1")
-        friendStore.save(firstOffline.online.values)
+        val failedFirstScan = FriendListScanner()
+        failedFirstScan.tick(0)
+        failedFirstScan.tick(10000)
+        if (failedFirstScan.hasScanned) friendStore.save(failedFirstScan.savedFriends)
+        check(FriendListScanner(friendStore.load()).tick(20000) == "friend list 1")
+        friendStore.save(firstOffline.savedFriends)
         val restoredScanner = FriendListScanner(FriendListStore(savedFriends).load())
         check(restoredScanner.hasScanned && restoredScanner.online == firstOffline.online)
         check(restoredScanner.tick(0) == null && restoredScanner.tick(86400000) == null)
         restoredScanner.notification("aryanepstein", true)
         restoredScanner.notification("Cessna808", false)
-        friendStore.save(restoredScanner.online.values)
+        friendStore.save(restoredScanner.savedFriends)
         val updatedScanner = FriendListScanner(friendStore.load())
         check(updatedScanner.online.keys == setOf("aryanepstein") && updatedScanner.tick(0) == null)
         updatedScanner.refresh(1)
@@ -707,6 +840,18 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
 
     val request = DungeonJoinRequest(F7, setOf(ARCHER, TANK), "0123456789abcdef")
     val lfg = DungeonLfgOffer(request, "Want to join?", 60000)
+    val prompt = lfg.chatMessage("Host")
+    val promptText = StringDecomposer.getPlainText(prompt)
+    val promptStyles = mutableListOf<Style>()
+    StringDecomposer.iterateFormatted(prompt, Style.EMPTY) { _, style, _ -> promptStyles.add(style); true }
+    val yesRange = promptText.indexOf("[Yes]").let { it until it + 5 }
+    val noRange = promptText.indexOf("[No]").let { it until it + 4 }
+    for ((index, style) in promptStyles.withIndex()) {
+        val reply = when (index) { in yesRange -> "yes"; in noRange -> "no"; else -> null }
+        check((style.clickEvent as? ClickEvent.RunCommand)?.command == reply?.let { "/skymyce relaymsg Host $it ${request.token}" })
+        val hint = when (reply) { "yes" -> "Click to join Host's party"; "no" -> "Click to decline the invitation"; else -> null }
+        check((style.hoverEvent as? HoverEvent.ShowText)?.value?.string == hint)
+    }
     check(DungeonLfgOffer.parse(lfg.message(), 0) == lfg)
     check(DungeonLfgOffer.parse("yes", 0) == null)
     check(DungeonLfgOffer.parse(lfg.message().replace("F7", "F8"), 0) == null)
@@ -718,6 +863,58 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val host = DungeonFriendJoining()
     val clientContext = JoinPartyContext(available, true, true, 1, F7, setOf(HEALER, ARCHER, TANK), setOf("self"))
     val hostContext = clientContext.copy(solo = false, partySize = 4, missing = setOf(TANK), members = setOf("host", "bob", "carol", "dave"))
+    // Recording: the F4 requester meets a 7-minute PB limit, but cannot join a host advertising another floor.
+    val f4Stats = known.copy(catacombs = 28, completionTimes = mapOf(F4 to 353925L), sPlusTimes = mapOf(F4 to 353925L))
+    val f4Request = request.copy(floor = F4)
+    check(!hostContext.policy.accepts(f4Stats, F4))
+    val f4Context = hostContext.copy(availability = available.copy(floor = F4), floor = F4)
+    check(f4Context.policy.accepts(f4Stats, F4))
+    check(!f4Context.policy.accepts(f4Stats.copy(sPlusTimes = mapOf(F4 to 420001L)), F4))
+    val f4Host = DungeonFriendJoining()
+    check(f4Host.receiveRequest("Self", f4Request, 0))
+    check(f4Host.nextCommand(hostContext, 1) { f4Stats } == null)
+    check(f4Host.nextCommand(f4Context, 2) { f4Stats } ==
+        "msg self Inviting you for F4 as Tank [SkyMyce Ready ${request.token}]")
+    f4Host.acknowledged("Self", request.token)
+    check(f4Host.nextCommand(f4Context, 3) { f4Stats } == "party invite self")
+    // All classes enabled must not make a Healer join as Archer just because Archer serializes first.
+    val healerStats = f4Stats.copy(selectedClass = HEALER, classes = mapOf(HEALER to 45, ARCHER to 46))
+    val flexibleRequest = DungeonJoinRequest.parse(f4Request.copy(classes = setOf(HEALER, TANK, ARCHER)).message())!!
+    check(flexibleRequest.classes.first() == ARCHER)
+    val flexibleHost = DungeonFriendJoining()
+    val flexibleContext = f4Context.copy(partySize = 1, missing = setOf(ARCHER, HEALER, TANK), members = setOf("host"))
+    check(flexibleHost.receiveRequest("Self", flexibleRequest, 0))
+    val healerOffer = flexibleHost.nextCommand(flexibleContext, 1) { healerStats }!!
+    check(healerOffer == "msg self Inviting you for F4 as Healer [SkyMyce Ready ${request.token}]") { healerOffer }
+    flexibleHost.acknowledged("Self", request.token)
+    check(flexibleHost.nextCommand(flexibleContext, 2) { healerStats.copy(selectedClass = ARCHER) } == "party invite self")
+    check(flexibleHost.classFor("Self") == HEALER)
+    check(flexibleHost.receiveRequest("Other", flexibleRequest, 3))
+    check(flexibleHost.nextCommand(flexibleContext, 4) { healerStats } ==
+        "msg other Inviting you for F4 as Archer [SkyMyce Ready ${request.token}]") // Do not reuse a reserved Healer slot.
+    val retryHost = DungeonFriendJoining()
+    val retryClient = DungeonFriendJoining()
+    retryClient.request("Host", request, 0)
+    check(retryHost.receiveRequest("Self", request, 0))
+    check(retryHost.nextCommand(hostContext, 1) { known }!!.startsWith("msg self "))
+    check(retryHost.failed("Self", request.token))
+    retryClient.reconnect() // The original request may already have a delivery receipt.
+    check(!retryClient.busy(1000))
+    check(!retryClient.receiveOffer("Host", "Inviting you for F7 as Tank [SkyMyce Ready ${request.token}]", 1000))
+    val secondRequest = request.copy(token = "fedcba9876543210")
+    retryClient.request("Host", secondRequest, 1000)
+    check(retryHost.receiveRequest("Self", secondRequest, 1000))
+    check(!retryHost.failed("Self", request.token))
+    check(!retryHost.receiveRequest("Self", secondRequest, 1001))
+    val retriedOffer = retryHost.nextCommand(hostContext, 1002) { known }!!.removePrefix("msg self ")
+    retryClient.receiveOffer("Host", retriedOffer, 1003)
+    retryHost.acknowledged("Self", secondRequest.token)
+    check(retryHost.nextCommand(hostContext, 1004) { known } == "party invite self")
+    check(retryHost.nextCommand(hostContext, 1005) { known } == null)
+    retryClient.invited("Host", 1006)
+    check(retryClient.nextCommand(clientContext, 1007) { known } == "party accept host")
+    retryHost.reconnect()
+    check(!retryHost.receiveRequest("Self", request, 1008)) // Successful exchanges retain duplicate protection.
     check(client.request("Host", request, 100) == "msg Host ${request.message()}")
     check(host.receiveRequest("Self", request, 200))
     check(!host.receiveRequest("SELF", request, 300))
@@ -779,7 +976,7 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     client.receiveOffer("Host", offer.removePrefix("msg self "), 0)
     client.invited("Host", 0)
     check(client.nextCommand(clientContext, 55000) { known } == null)
-    client.invited("Host", 60000)
+    check(!client.invited("Host", 60000)) // Expired agreements stay visible as ordinary invitations.
     check(client.nextCommand(clientContext, 60001) { known } == null) // Expired consent is not reusable.
     host.prune(62000)
     check(host.classFor("Self") == null)
@@ -798,9 +995,9 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(manualHost.nextCommand(manualHostContext, 104) { null } == null)
     manualHost.acknowledged("Self", request.token)
     check(manualHost.nextCommand(manualHostContext, 105) { null } == "party invite self")
-    manualClient.invited("Stranger", 105)
+    check(!manualClient.invited("Stranger", 105))
     check(manualClient.nextCommand(manualContext, 106) { null } == null)
-    manualClient.invited("Host", 107)
+    check(manualClient.invited("Host", 107)) // Yes already supplied consent; the matching server invite is silent.
     check(manualClient.nextCommand(manualContext, 108) { null } == "party accept host")
     val privateReply = DungeonFriendJoining()
     privateReply.receiveAcceptedReply("Self", request, 0)
@@ -808,7 +1005,7 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(privateReply.nextCommand(manualHostContext, 2) { null } == null)
     val guarded = DungeonFriendJoining()
     guarded.request("Host", request, 0, manual = true)
-    guarded.invited("Host", 1)
+    check(!guarded.invited("Host", 1)) // Do not hide an invitation before the relay agreement.
     check(guarded.nextCommand(clientContext, 2) { hidden } == null) // Yes alone does not approve an unrelated/manual invite.
     guarded.receiveOffer("Host", offer.removePrefix("msg self "), 3)
     guarded.invited("Host", 4)
@@ -819,7 +1016,7 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val clickingJoin = DungeonFriendJoining()
     clickingJoin.request("Host", request, 0, manual = true)
     clickingJoin.receiveOffer("Host", offer.removePrefix("msg self "), 1)
-    clickingJoin.invited("Host", 1)
+    check(clickingJoin.invited("Host", 1)) // Join's internal server invite is consumed without an invitation notice.
     check(clickingJoin.nextCommand(manualContext, 2) { null } == "party accept host") // Join works with Available off.
 
     val listing = partyListingFromLore(10, null, listOf("§7Dungeon: §bMaster Mode", "§7Floor: §bFloor VII", "Members:",
