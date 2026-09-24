@@ -53,7 +53,8 @@ object GearLending : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock) { capture.clear(); screenId = -1; return }
         val screen = MC.instance.screen as? AbstractContainerScreen<*> ?: run { screenId = -1; return }
         val friend = tradePartner(screen.title.stripped) ?: run { capture.clear(); screenId = -1; return }
-        if (!FriendsAPI.isFriend(friend) && friend.lowercase() !in DungeonFriends.scanner.online) return
+        // The chest title can truncate names to ten characters. Confirm friendship using the
+        // full name in the server's completion message before storing anything locally.
         ledger ?: return
         if (screenId != screen.menu.containerId) {
             screenId = screen.menu.containerId
@@ -63,7 +64,7 @@ object GearLending : SkyMyceModule() {
         if (slots.size < 36) return
         val sent = (0..3).flatMap { row -> (0..3).map { col -> slots[row * 9 + col].item } }
         val received = (0..3).flatMap { row -> (5..8).map { col -> slots[row * 9 + col].item } }
-        capture.observe(GearTrade(tradeId, System.currentTimeMillis(), friend, FriendsAPI.getFriend(friend)?.uuid?.toString(),
+        capture.observe(GearTrade(tradeId, System.currentTimeMillis(), friend, null,
             ProfileAPI.profileName, sent.mapNotNull(::item), received.mapNotNull(::item),
             sent.firstNotNullOfOrNull(::coins), received.firstNotNullOfOrNull(::coins)), System.currentTimeMillis())
     }
@@ -84,8 +85,9 @@ object GearLending : SkyMyceModule() {
         if (!LocationAPI.isOnSkyBlock) return
         val friend = completedTradePartner(event.text) ?: return
         val trade = capture.complete(friend, System.currentTimeMillis()) ?: return
+        if (!FriendsAPI.isFriend(friend) && friend.lowercase() !in DungeonFriends.scanner.all) return
         val store = ledger ?: return
-        if (!store.record(trade)) {
+        if (!store.record(trade.copy(friendUuid = FriendsAPI.getFriend(friend)?.uuid?.toString()))) {
             Component.literal("§c[SkyMyce] ${store.error}").send()
             return
         }
