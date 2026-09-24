@@ -256,7 +256,7 @@ object DungeonFriendRelay {
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
                                         status = "Relay connected"
-                                        SkyMyce.logger.info("[Dungeon relay] Connected")
+                                        SkyMyce.logger.info("[Dungeon relay] Connected (shared wealth={})", sharedWealthAvailable)
                                         onDigestReady?.invoke()
                                     }
                                     "message", "ack" -> {

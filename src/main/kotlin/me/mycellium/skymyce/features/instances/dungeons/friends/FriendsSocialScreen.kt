@@ -104,7 +104,7 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
         refreshButton.active(!wealth || (LocationAPI.onHypixel && !refreshing && FriendWealthCache.available))
         refreshButton.message = Component.literal(if (refreshing) "Refreshing" else "Refresh")
         refreshButton.tooltip(Component.literal(if (wealth && !LocationAPI.onHypixel) "Join Hypixel to refresh" else
-            if (wealth) "Check missing or expired wealth one friend at a time, including offline friends. Estimates updated within 24 hours are reused from local or shared cache."
+            if (wealth) "Retry missing values or expired wealth one friend at a time, including offline friends. Complete estimates are cached for 24 hours; API cooldowns still apply."
             else "Redraw the saved friends and lending history. This does not request the friends list."))
         val status = if (!LocationAPI.onHypixel) "Join Hypixel to refresh friends"
             else if (wealth) FriendWealthCache.refreshStatus()
@@ -225,7 +225,7 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                 if (status.isNotEmpty()) child(label(status, MUTED).horizontalSizing(Sizing.fill()))
                 data?.takeIf { it.hasProfile != null }?.let {
                     child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)
-                        .tooltip(Component.literal("Original update time, preserved in the shared Cloudflare cache. Refresh cannot update this estimate again for 24 hours.")))
+                        .tooltip(Component.literal("Original update time, preserved in the shared Cloudflare cache. Complete estimates stay cached for 24 hours; Refresh can retry missing values.")))
                 }
             })
         }

@@ -346,6 +346,36 @@ try {
   const updatedWealth = await cache(alice, { ...releaseLookup, canFetch: false });
   assert.equal(updatedWealth.record.wealth.wardrobe, 300000);
   assert.equal(updatedWealth.record.fetchedAt, updatedAt); // The next day's update and its timestamp reach other players together.
+  // The 24h rule protects complete snapshots, but a manual refresh can repair missing values.
+  const partialLookup = { type: "wealth_get", name: "Partial", uuid: "9".repeat(32), refresh: true };
+  const partialWealth = { ...wealth, wardrobe: null, inventory: undefined };
+  const partialAt = Date.now() - 120000;
+  await testingStorage.exec("INSERT INTO player_wealth (uuid, name, wealth, fetched_at) VALUES (?, ?, ?, ?)",
+    partialLookup.uuid, partialLookup.name, JSON.stringify(partialWealth), Date.now());
+  assert.equal((await cache(replacement, partialLookup)).upload, undefined); // No immediate repeat API fetch.
+  await testingStorage.exec("UPDATE player_wealth SET fetched_at = ? WHERE uuid = ?", partialAt, partialLookup.uuid);
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  const savedPartial = await cache(replacement, { ...partialLookup, canFetch: false });
+  assert.equal(savedPartial.record.fetchedAt, partialAt); // Cache-only clients keep the usable partial data.
+  assert.equal(savedPartial.upload, undefined);
+  const fillGrant = await cache(replacement, partialLookup);
+  assert.match(fillGrant.upload, /^[a-f0-9]{32}$/);
+  const contender = await cache(carol, partialLookup);
+  assert.ok(contender.retryAt > Date.now()); // Only one client fills the missing value.
+  assert.equal(contender.upload, undefined);
+  assert.equal((await cache(replacement, { ...partialLookup, type: "wealth_put", upload: fillGrant.upload,
+    wealth: { ...wealth, networth: null }, fetchedAt: Date.now() })).stored, false); // Filling wardrobe cannot drop networth.
+  await new Promise(resolve => setTimeout(resolve, 2200));
+  const retryFill = await cache(replacement, partialLookup);
+  assert.match(retryFill.upload, /^[a-f0-9]{32}$/);
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "testing", webSockets: "hibernate" });
+  const filledAt = Date.now();
+  assert.equal((await cache(replacement, { ...partialLookup, type: "wealth_put", upload: retryFill.upload,
+    wealth, fetchedAt: filledAt })).stored, true);
+  const filled = await cache(carol, { ...partialLookup, canFetch: false });
+  assert.equal(filled.record.wealth.wardrobe, wealth.wardrobe);
+  assert.equal(filled.record.fetchedAt, filledAt);
+  assert.equal((await cache(carol, partialLookup)).upload, undefined); // Complete again: no bypass.
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

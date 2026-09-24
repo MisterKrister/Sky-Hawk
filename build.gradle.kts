@@ -55,6 +55,10 @@ dependencies {
 		capabilities { requireCapability("tech.thatgravyboat:skyblock-api-26.1") }
 	}
 
+	// Pin the 26.1 release by Modrinth version ID; it also bundles its own runtime libraries.
+	runtimeOnly("maven.modrinth:skyblock-profile-viewer:${providers.gradleProperty("skyblockpv_version").get()}")
+	include("maven.modrinth:skyblock-profile-viewer:${providers.gradleProperty("skyblockpv_version").get()}")
+
 	// Resourceful Config
 	implementation("com.teamresourceful.resourcefulconfig:resourcefulconfig-fabric-26.1:${providers.gradleProperty("resourceful_config_version").get()}")
 	include("com.teamresourceful.resourcefulconfig:resourcefulconfig-fabric-26.1:${providers.gradleProperty("resourceful_config_version").get()}")

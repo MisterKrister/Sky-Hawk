@@ -24,6 +24,9 @@ data class FriendWealth(
 ) {
     fun isFresh(now: Long): Boolean = hasProfile != null && now < fetchedAt + FRIEND_WEALTH_TTL
 
+    fun canRefreshManually(now: Long): Boolean = hasProfile != false &&
+        (!isFresh(now) || networth == null || purse == null || bank == null || wardrobe == null)
+
     fun shouldRefresh(now: Long, online: Boolean, skyBlockLocation: Boolean): Boolean = !isFresh(now) && when (hasProfile) {
         false -> skyBlockLocation
         true -> (online || expires == 0L) && now >= expires
@@ -106,7 +109,7 @@ object FriendWealthCache {
         busy -> "Updating $loading • ${manualRefresh.size} queued"
         manualRefresh.isNotEmpty() -> "Waiting for API/cache cooldown • ${manualRefresh.size} queued"
         now < nextManualRefresh -> "Refresh requested • available again in ${(nextManualRefresh - now + 999) / 1000}s"
-        else -> "Cached for 24h • refresh checks missing or expired estimates"
+        else -> "Cached for 24h • refresh retries missing values or expired estimates"
     }
 
     fun initialize(file: Path) {
@@ -133,18 +136,27 @@ object FriendWealthCache {
     fun refresh(friends: Collection<String>, now: Long = System.currentTimeMillis()) {
         if (!canRefresh(now)) return
         nextManualRefresh = now + 60000
-        manualRefresh += friends.map { it.lowercase() }.filter { get(it)?.let { entry -> entry.hasProfile != false && !entry.isFresh(now) } != false }
+        manualRefresh += friends.map { it.lowercase() }.filter { get(it)?.canRefreshManually(now) != false }
         version++
     }
 
-    internal fun finishAttempt(name: String, retryable: Boolean, now: Long) {
+    internal fun finishAttempt(name: String, retryable: Boolean, now: Long, retryAt: Long = 0L) {
         val key = name.lowercase()
+        // A miss/failure only delays this player. The provider enforces its own API cooldown.
+        nextRequest = now + 1000
         waiting.remove(key)
+        if (retryAt > now) {
+            waiting[key] = retryAt
+            return // A cooldown has deferred this attempt, not completed the manual refresh.
+        }
         if (retryable) waiting[key] = now + 60000
         // One pass per click: a broken profile must not keep jumping ahead of the remaining friends.
         newFriends.remove(key)
         manualRefresh.remove(key)
     }
+
+    internal fun canLookup(name: String, now: Long): Boolean =
+        now >= nextRequest && now >= (waiting[name.lowercase()] ?: 0L)
 
     fun tick(friends: Collection<OnlineDungeonFriend>, online: Set<String>) {
         save()
@@ -154,7 +166,7 @@ object FriendWealthCache {
         val roster = friends.mapTo(mutableSetOf()) { it.name.lowercase() }
         manualRefresh.retainAll(roster)
         newFriends.retainAll(roster)
-        val candidates = friends.filter { it.name.matches(Regex("[A-Za-z0-9_]{1,16}")) && now >= (waiting[it.name.lowercase()] ?: 0L) }
+        val candidates = friends.filter { it.name.matches(Regex("[A-Za-z0-9_]{1,16}")) && canLookup(it.name, now) }
         candidates.forEach { friend ->
             val key = friend.name.lowercase()
             val uuid = FriendsAPI.getFriend(friend.name)?.uuid?.toString()
@@ -162,7 +174,7 @@ object FriendWealthCache {
             if (entry?.uuid != null && uuid != null && uuid != entry.uuid) { entries.remove(key); dirty = true; version++ }
         }
         newFriends.removeAll { get(it)?.isFresh(now) == true }
-        manualRefresh.removeAll { get(it)?.isFresh(now) == true }
+        manualRefresh.removeAll { get(it)?.canRefreshManually(now) == false }
         val friend = candidates.firstOrNull { it.name.lowercase() in newFriends }
             ?: candidates.firstOrNull { it.name.lowercase() in manualRefresh }
             ?: candidates.firstOrNull { get(it.name) == null }
@@ -192,7 +204,15 @@ object FriendWealthCache {
                 if (retryAt > System.currentTimeMillis()) return@runCatching null
                 val shared = response?.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
                     ?.let { sharedFriendWealth(it, name, knownUuid, System.currentTimeMillis()) }
-                if (shared != null) { sharedHit = true; return@runCatching shared }
+                if (shared != null) {
+                    sharedHit = true
+                    if (manual && shared.canRefreshManually(System.currentTimeMillis()) && providerAvailable) {
+                        // Keep the partial result visible and the manual retry queued during provider/cache cooldowns.
+                        retryAt = maxOf(System.currentTimeMillis() + 5000,
+                            DungeonFriendProfileProvider.nextViewerRequest, shared.fetchedAt + 60000)
+                    }
+                    return@runCatching shared
+                }
                 upload = response?.get("upload")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }
                     ?.asString?.takeIf { it.matches(Regex("[a-f0-9]{32}")) }
                 if (!providerAvailable) return@runCatching FriendWealth(status = "No shared estimate yet; install SkyBlockPv for local lookup")
@@ -220,16 +240,18 @@ object FriendWealthCache {
             }
             MC.instance.execute {
                 loading = null
+                val completedAt = System.currentTimeMillis()
+                val retryable = result?.hasProfile == null || result.status == "SkyBlock profile found; wealth data unavailable"
+                finishAttempt(name, retryable, completedAt,
+                    if (result == null) maxOf(retryAt, completedAt + 1000) else retryAt)
                 if (result == null) {
-                    waiting[name.lowercase()] = retryAt
-                    nextRequest = System.currentTimeMillis() + 1000
                     version++
                     return@execute
                 }
-                val retryable = result.hasProfile == null || result.status == "SkyBlock profile found; wealth data unavailable"
-                finishAttempt(name, retryable, System.currentTimeMillis())
-                nextRequest = System.currentTimeMillis() + if (sharedHit) 1000 else if (result.hasProfile == null) 60000 else 10000
                 val previous = entries[name.lowercase()]
+                if (sharedHit && previous?.fetchedAt != result.fetchedAt)
+                    SkyMyce.logger.info("[Friend wealth] Received cached relay estimate (age={}s)",
+                        (completedAt - result.fetchedAt).coerceAtLeast(0) / 1000)
                 entries[name.lowercase()] = if (retryable && previous?.hasProfile != null)
                     previous.copy(hasProfile = result.hasProfile ?: previous.hasProfile, uuid = result.uuid ?: previous.uuid,
                         status = result.status, expires = System.currentTimeMillis() + 60000) else result
