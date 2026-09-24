@@ -224,7 +224,19 @@ object DungeonFriendRelay {
                                                 "profile" to textures.value(), "profileSignature" to textures.signature())
                                         }.whenComplete { proof, error -> MC.instance.execute {
                                             if (token == generation) {
-                                                if (error != null) failed("Minecraft account verification unavailable; retrying (restart Minecraft if it persists)", error, failingStage = proofStage)
+                                                if (error != null) {
+                                                    val accountKeyUnavailable = proofStage == "account_key"
+                                                    failed(
+                                                        if (accountKeyUnavailable) {
+                                                            "Minecraft account verification unavailable; restart Minecraft or use a Microsoft-authenticated account"
+                                                        } else {
+                                                            "Minecraft account verification unavailable; retrying (restart Minecraft if it persists)"
+                                                        },
+                                                        error,
+                                                        pause = accountKeyUnavailable,
+                                                        failingStage = proofStage
+                                                    )
+                                                }
                                                 else { stage = "authentication"; packet(proof) }
                                             }
                                         } }

@@ -22,6 +22,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var missingClasses: Set<DungeonClass>? = null
     private var settingsOpen = false
     private var editingFriend: String? = null
+    private var showLowCata = false
     private var templateDraft = DungeonFriendsSettings.messageTemplate
     private var classesDraft = emptySet<DungeonClass>()
     private var availableDraft = emptySet<DungeonClass>()
@@ -72,7 +73,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         }
         val state = listOf(
             DungeonFriendStatsCache.version, DungeonFriends.scanner.online.toMap(), floor, sort, ascending, wantedClasses(),
-            DungeonFriendsSettings.secondaryClasses, DungeonFriends.replies.version,
+            DungeonFriendsSettings.secondaryClasses, DungeonFriends.replies.version, showLowCata,
         )
         if (state != renderedState) {
             renderedState = state
@@ -177,6 +178,10 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             }
             classButton.tooltip(Component.literal("Check the classes you need. Clear all boxes to show every class."))
             child(classButton)
+            child(button(if (showLowCata) "§aLow Cata" else "Low Cata", 70) {
+                showLowCata = !showLowCata
+                updateResults()
+            }.tooltip(Component.literal("Show friends whose profile is available but does not meet the selected floor's Catacombs or completion requirement.")))
             if (!compact) {
                 child(UIContainers.horizontalFlow(Sizing.expand(), Sizing.fixed(1)))
                 toolbarActions(this)
@@ -257,7 +262,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         val stats = DungeonFriendStatsCache.stats
         val friends = DungeonFriends.scanner.online.values.filter { friend ->
             val data = stats[friend.name.lowercase()]
-            (data?.eligible(floor) != false) && matchesFriendClass(
+            (data?.eligible(floor) != false || (showLowCata && data.state == StatsState.AVAILABLE)) && matchesFriendClass(
                 data, DungeonFriendsSettings.secondaryClasses[friend.name.lowercase()].orEmpty(), wanted,
             )
         }.sortedWith(friendComparator(stats, floor, sort, ascending))
