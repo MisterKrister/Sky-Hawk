@@ -113,7 +113,7 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
         refreshButton.active(LocationAPI.onHypixel && !refreshing && (!wealth || FriendWealthCache.available))
         refreshButton.message = Component.literal(if (refreshing) "Refreshing" else "Refresh")
         refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else
-            if (wealth) "Update this account's SkyBlock friends one at a time, including offline friends. Shared and provider cooldowns apply; the roster is reused."
+            if (wealth) "Check missing or expired wealth one friend at a time, including offline friends. Estimates updated within 24 hours are reused from local or shared cache."
             else "Refresh the full friend list. Opening the menu updates online status at most once per minute and reuses the saved roster."))
         val status = if (!LocationAPI.onHypixel) "Join Hypixel to refresh friends"
             else if (wealth) FriendWealthCache.refreshStatus() else DungeonFriends.scanner.status
@@ -219,7 +219,8 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                         child(UIContainers.verticalFlow(Sizing.fill(25), Sizing.content()).apply {
                             gap(3); child(label(name, MUTED)); child(label(value?.let(::condense) ?: "—"))
                             tooltip(Component.literal("$name: ${value?.let { "%,.0f coins".format(it) } ?: "unavailable"}" +
-                                data?.let { "\nFetched ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}" }.orEmpty()))
+                                (if (name == "Wardrobe") "\nSkyBlockPv's stored armor and equipment estimate; already part of total networth." else "") +
+                                data?.takeIf { it.hasProfile != null }?.let { "\nFetched ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}" }.orEmpty()))
                         })
                     }
                 })
@@ -229,7 +230,10 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                     else -> data?.status ?: if (FriendWealthCache.available) "Queued..." else "No saved estimate"
                 }
                 if (status.isNotEmpty()) child(label(status, MUTED).horizontalSizing(Sizing.fill()))
-                data?.let { child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)) }
+                data?.takeIf { it.hasProfile != null }?.let {
+                    child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)
+                        .tooltip(Component.literal("Original update time, preserved in the shared Cloudflare cache. Refresh cannot update this estimate again for 24 hours.")))
+                }
             })
         }
     }

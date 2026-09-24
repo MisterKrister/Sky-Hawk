@@ -133,6 +133,8 @@ try {
   assert.equal((await cache(alice, wealthEntry)).stored, true);
   const wealthHit = await cache(bob, { ...wealthLookup, name: "OldBobName", canFetch: false });
   assert.equal(wealthHit.record.wealth.networth, wealth.networth);
+  assert.equal(wealthHit.record.wealth.wardrobe, wealth.wardrobe);
+  assert.equal(wealthHit.record.fetchedAt, wealthEntry.fetchedAt);
   assert.equal(wealthHit.record.wealth.inventory, undefined);
   assert.equal(wealthHit.upload, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(wealthHit.record)) < 1024);
@@ -147,13 +149,14 @@ try {
   assert.deepEqual((await users()).map(row => row.name), ["Alice", "Bob"]); // Looking up friends never registers them as mod users.
   const olderLookup = { type: "wealth_get", name: "Older", uuid: "f".repeat(32) };
   const olderGrant = await cache(carol, olderLookup);
+  const olderFetchedAt = Date.now() - 120000;
   assert.equal((await cache(carol, { ...olderLookup, type: "wealth_put", upload: olderGrant.upload,
-    wealth, fetchedAt: Date.now() - 120000 })).stored, true);
+    wealth, fetchedAt: olderFetchedAt })).stored, true);
   assert.equal((await cache(carol, olderLookup)).record.wealth.networth, wealth.networth);
-  const manualGrant = await cache(carol, { ...olderLookup, refresh: true });
-  assert.match(manualGrant.upload, /^[a-f0-9]{32}$/); // Manual refresh can replace an older shared result.
-  assert.equal((await cache(carol, { ...olderLookup, type: "wealth_put", upload: manualGrant.upload,
-    wealth: { ...wealth, networth: 3000000000 }, fetchedAt: Date.now() })).stored, true);
+  const manualHit = await cache(carol, { ...olderLookup, refresh: true });
+  assert.equal(manualHit.upload, undefined); // Even older clients requesting a forced refresh cannot bypass 24h.
+  assert.equal(manualHit.record.fetchedAt, olderFetchedAt);
+  assert.equal(manualHit.record.wealth.networth, wealth.networth);
   let wealthLimited = false;
   for (let i = 0; i < 8 && !wealthLimited; i++) wealthLimited = (await cache(alice, wealthLookup)).error === "rate_limited";
   assert.ok(wealthLimited);
@@ -307,6 +310,12 @@ try {
   const bobUsers = await testingStorage.exec("SELECT * FROM mod_users WHERE uuid = ?", identities.get("Bob"));
   assert.equal(bobUsers.length, 1); // Reconnect updates one row, never adds another user.
   assert.ok(bobUsers[0].last_seen >= bobUsers[0].first_seen);
+  const renamedLookup = { type: "wealth_get", name: "OlderAlias" };
+  const renamedGrant = await cache(replacement, renamedLookup);
+  assert.match(renamedGrant.upload, /^[a-f0-9]{32}$/);
+  assert.equal((await cache(replacement, { ...renamedLookup, type: "wealth_put", uuid: olderLookup.uuid,
+    upload: renamedGrant.upload, wealth, fetchedAt: Date.now() })).stored, false); // A name-only lease cannot overwrite a fresh UUID record.
+  assert.equal((await cache(replacement, olderLookup)).record.fetchedAt, olderFetchedAt);
   const releaseLookup = { type: "wealth_get", name: "RefreshTarget", uuid: "d".repeat(32) };
   const released = await cache(alice, releaseLookup);
   assert.match(released.upload, /^[a-f0-9]{32}$/);
@@ -320,14 +329,23 @@ try {
   assert.equal((await cache(modernBob, { ...releaseLookup, type: "wealth_put", name: "RenamedTarget",
     upload: reassigned.upload, wealth, fetchedAt: sharedFetchedAt })).stored, true);
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
-  const sharedDayHit = await cache(alice, { ...releaseLookup, canFetch: false });
+  const sharedDayHit = await cache(alice, { ...releaseLookup, refresh: true });
   assert.equal(sharedDayHit.record.wealth.networth, wealth.networth);
+  assert.equal(sharedDayHit.record.wealth.wardrobe, wealth.wardrobe);
   assert.equal(sharedDayHit.record.fetchedAt, sharedFetchedAt); // Other players reuse 23-hour-old data without renewing its age.
   assert.equal(sharedDayHit.upload, undefined);
   await storage.exec("UPDATE player_wealth SET fetched_at = ? WHERE uuid = ?", Date.now() - 86400000, releaseLookup.uuid);
   const expiredWealth = await cache(modernBob, { ...releaseLookup, canFetch: false });
   assert.equal(expiredWealth.record, null); // An expired estimate must not be delivered as fresh data.
   assert.equal(expiredWealth.upload, undefined);
+  const expiredGrant = await cache(modernBob, { ...releaseLookup, refresh: true });
+  assert.match(expiredGrant.upload, /^[a-f0-9]{32}$/);
+  const updatedAt = Date.now();
+  assert.equal((await cache(modernBob, { ...releaseLookup, type: "wealth_put", upload: expiredGrant.upload,
+    wealth: { ...wealth, wardrobe: 300000 }, fetchedAt: updatedAt })).stored, true);
+  const updatedWealth = await cache(alice, { ...releaseLookup, canFetch: false });
+  assert.equal(updatedWealth.record.wealth.wardrobe, 300000);
+  assert.equal(updatedWealth.record.fetchedAt, updatedAt); // The next day's update and its timestamp reach other players together.
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

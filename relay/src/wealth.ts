@@ -35,7 +35,7 @@ export class SharedWealth {
     ).toArray()[0];
     if (!row || (uuid && row.uuid !== uuid)) return null;
     const wealth = JSON.parse(row.wealth);
-    const ttl = refresh ? 60_000 : wealth.hasProfile ? WEALTH_TTL : ABSENT_TTL;
+    const ttl = wealth.hasProfile || refresh ? WEALTH_TTL : ABSENT_TTL;
     return row.fetched_at > now - ttl ? { name: row.name, uuid: row.uuid, wealth, fetchedAt: row.fetched_at } : null;
   }
 
@@ -43,7 +43,7 @@ export class SharedWealth {
     const existing = this.sql.exec<{ fetched_at: number }>(
       "SELECT fetched_at FROM player_wealth WHERE uuid = ? OR name = ?", record.uuid, record.name,
     ).toArray();
-    if (existing.some(row => row.fetched_at >= record.fetchedAt || row.fetched_at > now - 60_000)) return false;
+    if (existing.some(row => row.fetched_at >= record.fetchedAt || row.fetched_at > now - WEALTH_TTL)) return false;
     this.sql.exec("DELETE FROM player_wealth WHERE uuid = ? OR name = ?", record.uuid, record.name);
     this.sql.exec("INSERT INTO player_wealth (uuid, name, wealth, fetched_at) VALUES (?, ?, ?, ?)",
       record.uuid, record.name, JSON.stringify(record.wealth), record.fetchedAt);
