@@ -20,6 +20,9 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    me.mycellium.skymyce.features.digest.checkDigestActivities()
+    me.mycellium.skymyce.features.digest.checkDigestRng()
+    me.mycellium.skymyce.features.digest.checkDigestLifecycleAndNews()
     checkJoinLookups()
     checkFullFriendRoster()
     checkMenuRefresh()
