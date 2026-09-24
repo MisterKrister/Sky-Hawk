@@ -50,7 +50,7 @@ object Plane : SkyMyceModule() {
         jumpscareTicksRemaining = JUMPSCARE_TICKS
         schedule(2.seconds) {
             displayMessage(string = "")
-            displayMessage("§b§l[SM] §6Achievement gained: Boo!")
+            displayMessage("§b§l[SM] §6Achievement gained: WTF??!!!")
             displayMessage("§6§l Met a creator :3")
             displayMessage(string = "")
             Minecraft.getInstance().player?.playSound(
