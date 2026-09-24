@@ -118,7 +118,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         .color(Color.ofRgb(color)).shadow(false)
 
     private fun button(text: String, size: Int, onPress: (ButtonComponent) -> Unit) =
-        UIComponents.button(Component.literal(text), onPress).apply {
+        object : ButtonComponent(Component.literal(text), onPress) {
+            // owo's vanilla wrapper suppresses disabled-widget tooltips, including the reason Join is blocked.
+            override fun shouldDrawTooltip(mouseX: Double, mouseY: Double): Boolean =
+                visible && isInBoundingBox(mouseX, mouseY) && !tooltip().isNullOrEmpty()
+        }.apply {
             sizing(Sizing.fixed(size), Sizing.fixed(18))
             themed()
             textShadow(false)

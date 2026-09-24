@@ -87,6 +87,8 @@ Lookups check the shared relay cache first. Local provider lookups remain paced 
 
 In `/sm pf`, **Party** and **Invite** require a confirmed party with space and invitation permission (leader, moderator or All Invite). **Join** requires being solo and the other player's party to be available. The menu displays the invitation restriction above the friend rows and gives the specific reason on each disabled button's tooltip. Pending background stat requests do not lock the roster Refresh button.
 
+Join PB checks can use the shared relay cache even without a local profile-provider mod. Detecting or changing a SkyBlock profile rejects reports fetched before that detection; a newer shared report restores eligibility without requiring a local API lookup. Until that report arrives, Join says it is waiting for fresh PB data rather than claiming the player fails the requirement. Disabled Party Finder controls retain hover explanations.
+
 ## Validation
 
 `gradlew.bat --offline build` runs the existing `dungeonFriendsCheck` and `hudCheck` tasks, including new parser/class/PB boundary checks, normal/Master floor isolation, configuration coverage and tooltips, preserved configuration paths, hex validation, horizontal layout and bounded sharing text. Previous Digest, friends, lending and HUD checks also run.
