@@ -129,7 +129,7 @@ try {
     wealth, fetchedAt: Date.now(), upload: wealthGrant.upload };
   assert.equal((await cache(alice, { ...wealthEntry, upload: "0".repeat(32) })).error, "invalid_upload");
   assert.equal((await cache(alice, { ...wealthEntry, wealth: { ...wealth, purse: -1 } })).error, "invalid_upload");
-  assert.equal((await cache(alice, { ...wealthEntry, fetchedAt: Date.now() - 900001 })).error, "invalid_upload");
+  assert.equal((await cache(alice, { ...wealthEntry, fetchedAt: Date.now() - 86400001 })).error, "invalid_upload");
   assert.equal((await cache(alice, wealthEntry)).stored, true);
   const wealthHit = await cache(bob, { ...wealthLookup, name: "OldBobName", canFetch: false });
   assert.equal(wealthHit.record.wealth.networth, wealth.networth);
@@ -316,9 +316,18 @@ try {
   assert.notEqual(reassigned.upload, released.upload); // Provider backoff releases the slot for another user.
   assert.equal((await cache(alice, { ...releaseLookup, type: "wealth_put", upload: released.upload,
     wealth, fetchedAt: Date.now() })).error, "invalid_upload");
+  const sharedFetchedAt = Date.now() - 23 * 3600000;
   assert.equal((await cache(modernBob, { ...releaseLookup, type: "wealth_put", name: "RenamedTarget",
-    upload: reassigned.upload, wealth, fetchedAt: Date.now() })).stored, true);
-  assert.equal((await cache(alice, { ...releaseLookup, canFetch: false })).record.wealth.networth, wealth.networth);
+    upload: reassigned.upload, wealth, fetchedAt: sharedFetchedAt })).stored, true);
+  await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
+  const sharedDayHit = await cache(alice, { ...releaseLookup, canFetch: false });
+  assert.equal(sharedDayHit.record.wealth.networth, wealth.networth);
+  assert.equal(sharedDayHit.record.fetchedAt, sharedFetchedAt); // Other players reuse 23-hour-old data without renewing its age.
+  assert.equal(sharedDayHit.upload, undefined);
+  await storage.exec("UPDATE player_wealth SET fetched_at = ? WHERE uuid = ?", Date.now() - 86400000, releaseLookup.uuid);
+  const expiredWealth = await cache(modernBob, { ...releaseLookup, canFetch: false });
+  assert.equal(expiredWealth.record, null); // An expired estimate must not be delivered as fresh data.
+  assert.equal(expiredWealth.upload, undefined);
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);

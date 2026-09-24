@@ -793,11 +793,12 @@ private fun checkJoinLookups() {
         "wealth":{"hasProfile":true,"networth":1000000000,"purse":1000,"profile":"Apple","status":""}}""").asJsonObject
     val value = sharedFriendWealth(shared, "ALICE", null, 1000100)!!
     check(value.networth == 1000000000.0 && value.purse == 1000.0 && value.bank == null)
-    check(value.fetchedAt == 1000000L && value.expires == 1900000L)
+    check(value.fetchedAt == 1000000L && value.expires == 87400000L)
     check(sharedFriendWealth(shared, "Bob", null, 1000100) == null)
     check(sharedFriendWealth(shared, "OldAliceName", java.util.UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 1000100) == value)
     check(sharedFriendWealth(shared, "Alice", java.util.UUID(0, 0), 1000100) == null)
-    check(sharedFriendWealth(shared, "Alice", null, 1900000) == null)
+    check(sharedFriendWealth(shared, "Alice", null, 87399999)?.networth == value.networth)
+    check(sharedFriendWealth(shared, "Alice", null, 87400000) == null)
     check(sharedFriendWealth(shared.deepCopy().apply { addProperty("fetchedAt", 1060101) }, "Alice", null, 1000100) == null)
     check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("purse", -1) }, "Alice", null, 1000100) == null)
     check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("purse", "1000") }, "Alice", null, 1000100) == null)
@@ -909,7 +910,8 @@ private fun checkFullFriendRoster() {
         val failed = FriendWealth(fetchedAt = 1000, status = "API unavailable")
         check(!played.shouldRefresh(999999, online = false, skyBlockLocation = false))
         check(!played.shouldRefresh(301000, online = true, skyBlockLocation = true))
-        check(played.shouldRefresh(901000, online = true, skyBlockLocation = true))
+        check(!played.shouldRefresh(86400999, online = true, skyBlockLocation = true))
+        check(played.shouldRefresh(86401000, online = true, skyBlockLocation = true))
         check(!absent.shouldRefresh(Long.MAX_VALUE, online = true, skyBlockLocation = false))
         check(!absent.copy(expires = 0).shouldRefresh(999999, online = false, skyBlockLocation = false))
         check(absent.shouldRefresh(301000, online = true, skyBlockLocation = true)) // They started playing later.
