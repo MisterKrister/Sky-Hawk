@@ -7,6 +7,8 @@ import io.wispforest.owo.ui.core.OwoUIAdapter
 import io.wispforest.owo.ui.core.Positioning
 import io.wispforest.owo.ui.core.Sizing
 import me.mycellium.skymyce.utils.MC
+import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.themed
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.KeyEvent
@@ -47,6 +49,7 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
                 widget.anchor = Anchor.CENTER
             }
         }.apply {
+            themed()
             sizing(Sizing.fixed(150), Sizing.fixed(20))
             positioning(Positioning.absolute(width / 2 - 75, height - 30))
         }
@@ -68,15 +71,15 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
     }
 
     override fun extractBackground(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, a: Float) {
-        graphics.fill(0, 0, width, height, 0x88000000.toInt())
+        HudTheme.rounded(graphics, 0, 0, width, height, HudTheme.alpha(HudTheme.PANEL))
     }
 
     override fun extractRenderState(graphics: GuiGraphicsExtractor, mouseX: Int, mouseY: Int, a: Float) {
         screenWidgets.forEach { widget ->
             val backgroundColor = if (clickedWidget == widget) 0x88FFFF55.toInt() else if (selectedWidget == widget) 0x55FFFFFF.toInt() else 0x55000000.toInt()
-            val outlineColor = if (clickedWidget == widget) 0xFFFFFF55.toInt() else 0xFF55FFFF.toInt()
+            val outlineColor = 0xFF000000.toInt() or if (clickedWidget == widget) HudTheme.SECONDARY else HudTheme.ACCENT
 
-            graphics.fill(widget.renderX, widget.renderY, widget.renderX + widget.width, widget.renderY + widget.height, backgroundColor)
+            HudTheme.rounded(graphics, widget.renderX, widget.renderY, widget.width, widget.height, backgroundColor)
             graphics.outline(widget.renderX, widget.renderY, widget.width, widget.height, outlineColor)
             graphics.centeredText(MC.font, widget.title, widget.renderX + (widget.width / 2), widget.renderY + ((widget.height - MC.font.lineHeight) / 2), outlineColor)
             graphics.centeredText(MC.font, "X: ${widget.x} Y: ${widget.y} Scale: ${widget.scale}", widget.renderX + (widget.width / 2), widget.renderY + (widget.height) + 10, outlineColor)

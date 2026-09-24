@@ -9,6 +9,8 @@ import io.wispforest.owo.ui.container.FlowLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.themed
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import net.minecraft.network.chat.Component
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
@@ -57,7 +59,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     override fun build(root: FlowLayout) {
         sortHeaders.clear()
-        root.surface(Surface.blur(3.0f, 10.0f).and(Surface.flat(0x66090D12)))
+        root.surface(HudTheme.backdrop)
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(if (settingsOpen) settingsPanel() else friendsPanel())
         if (!settingsOpen) updateResults()
@@ -115,7 +117,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun button(text: String, size: Int, onPress: (ButtonComponent) -> Unit) =
         UIComponents.button(Component.literal(text), onPress).apply {
             sizing(Sizing.fixed(size), Sizing.fixed(18))
-            renderer(ButtonComponent.Renderer.flat(0xFF1D2933.toInt(), 0xFF304B5B.toInt(), 0xFF151C23.toInt()))
+            themed()
             textShadow(false)
         }
 
@@ -127,14 +129,14 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         .surface(Surface.flat(0xFF2C3944.toInt()))
 
     private fun panel() = UIContainers.verticalFlow(Sizing.fixed(panelWidth), Sizing.fixed(minOf(430, height - 24))).apply {
-        surface(Surface.flat(0xF510171E.toInt()).and(Surface.outline(0xFF2C3944.toInt())))
+        surface(HudTheme.panel())
         padding(Insets.of(12))
         gap(8)
     }
 
     private fun title(text: String) = row().apply {
         gap(8)
-        child(UIContainers.verticalFlow(Sizing.fixed(3), Sizing.fixed(18)).surface(Surface.flat(0xFF67CCF2.toInt())))
+        child(UIContainers.verticalFlow(Sizing.fixed(3), Sizing.fixed(18)).surface(HudTheme.tintedPanel { HudTheme.ACCENT }))
         child(label("§l$text").horizontalSizing(Sizing.expand()))
     }
 
@@ -287,11 +289,11 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             val pendingInvite = reply?.status in setOf(LfgReplyStatus.WAITING, LfgReplyStatus.INVITED)
             val declined = reply?.status == LfgReplyStatus.DECLINED
             val activity = friend.activity
-            surface(Surface.flat(when {
+            surface(HudTheme.tintedPanel { when {
                 declined -> 0xFF2D1B20.toInt()
                 pendingInvite -> 0xFF29231C.toInt()
                 else -> 0xFF17212A.toInt()
-            }).and(Surface { graphics, component ->
+            } }.and(Surface { graphics, component ->
                 graphics.fill(component.x(), component.y(), component.x() + 2, component.y() + component.height(),
                     0xFF000000.toInt() or activity.color)
             }))
@@ -315,7 +317,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                     margins(Insets.left(ACTIONS_GAP))
                     gap(3)
                     val invite = button("Party", 40) { DungeonFriends.invite(friend) }.active(DungeonFriends.canAct)
-                    if (accepted) invite.renderer(ButtonComponent.Renderer.flat(0xFF246545.toInt(), 0xFF34865C.toInt(), 0xFF151C23.toInt()))
+                    if (accepted) invite.renderer { g, b, _ -> HudTheme.rounded(g, b.x, b.y, b.width, b.height, HudTheme.alpha(if (b.isHovered) 0x34865C else 0x246545)) }
                     val inviteTooltip = "Send ${friend.name} a party invite to accept manually"
                     invite.tooltip(Component.literal(DungeonFriends.actionUnavailable ?: inviteTooltip))
                     val message = button("Invite", 44) { DungeonFriends.message(friend, floor, messageClass(friend)) }.active(DungeonFriends.canAct)
@@ -471,7 +473,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
 
     private fun menu(button: ButtonComponent, entries: (DropdownComponent) -> Unit) {
         DropdownComponent.openContextMenu(this, uiAdapter.rootComponent, { root, dropdown -> root.child(dropdown) },
-            button.x.toDouble(), (button.y + button.height).toDouble(), entries)
+            button.x.toDouble(), (button.y + button.height).toDouble()) { menu -> menu.surface(HudTheme.panel()); entries(menu) }
     }
 
     private fun rebuild() {
@@ -483,7 +485,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     companion object {
         private const val ACTIONS_WIDTH = 157 // Party + Invite + Join + Edit, with three 3px gaps.
         private const val ACTIONS_GAP = 12
-        private const val CYAN = 0x67CCF2
+        private val CYAN get() = HudTheme.ACCENT
         private const val WHITE = 0xEDF3F7
         private const val MUTED = 0x91A2AF
         private val displayedClasses = listOf(

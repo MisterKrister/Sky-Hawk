@@ -6,6 +6,8 @@ import io.wispforest.owo.ui.container.FlowLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.themed
 import me.mycellium.skymyce.api.DungeonChest
 import me.mycellium.skymyce.api.DungeonChest.Companion.formatted
 import me.mycellium.skymyce.utils.NumberUtils
@@ -29,7 +31,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
     override fun build(root: FlowLayout) {
-        root.surface(Surface.blur(3.0f, 10.0f))
+        root.surface(HudTheme.backdrop)
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(mainLayout())
     }
@@ -39,7 +41,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
         val currentIndex = floors.indexOf(DungeonTracker.currentFloor)
 
         return UIContainers.verticalFlow(Sizing.fill(80), Sizing.fill(80)).apply {
-            surface(Surface.DARK_PANEL)
+            surface(HudTheme.panel())
             padding(Insets.of(10))
             gap(5)
             child(
@@ -82,7 +84,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
         val content = UIContainers.verticalFlow(Sizing.content(), Sizing.content()).apply {
             padding(Insets.of(3))
             gap(3)
-            surface(Surface.flat(0xFF333333.toInt()))
+            surface(HudTheme.panel(true))
         }
 
         val stats = DungeonTracker.profitData[DungeonTracker.currentFloor]
@@ -158,7 +160,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
             padding(Insets.of(3))
             scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(0xFFFFFF)))
             scrollbarThiccness(2)
-            surface(Surface.flat(0xFF333333.toInt()))
+            surface(HudTheme.panel(true))
         }
     }
 
@@ -197,7 +199,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
             padding(Insets.of(3))
             scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(0xFFFFFF)))
             scrollbarThiccness(2)
-            surface(Surface.flat(0xFF333333.toInt()))
+            surface(HudTheme.panel(true))
         }
     }
 
@@ -235,7 +237,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>() {
             padding(Insets.of(3))
             scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(0xFFFFFF)))
             scrollbarThiccness(2)
-            surface(Surface.flat(0xFF333333.toInt()))
+            surface(HudTheme.panel(true))
         }
     }
 

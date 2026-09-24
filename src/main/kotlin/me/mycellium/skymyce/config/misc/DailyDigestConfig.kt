@@ -18,8 +18,8 @@ object DailyDigestConfig : CategoryKt("Daily Digest") {
         name = TranslatableValue.literal("Daily news")
         description = TranslatableValue.literal("Fetch public Cowshed updates through the relay; cached updates remain available offline")
     }
-    val gameUpdates by boolean(true) { name = TranslatableValue.literal("Game updates") }
-    val alphaUpdates by boolean(true) { name = TranslatableValue.literal("Alpha updates") }
+    val gameUpdates by boolean(true) { name = TranslatableValue.literal("Game updates"); description = TranslatableValue.literal("Include Cowshed updates for the live SkyBlock server.") }
+    val alphaUpdates by boolean(true) { name = TranslatableValue.literal("Alpha updates"); description = TranslatableValue.literal("Include Cowshed announcements for the Alpha test server.") }
     val receiveRng by boolean(false) {
         name = TranslatableValue.literal("Receive community RNG feed")
         description = TranslatableValue.literal("Show optional, unverified drop reports from other Sky-Hawk users")
@@ -38,9 +38,10 @@ object DailyDigestConfig : CategoryKt("Daily Digest") {
         range = 20..500
         slider = true
     }
-    val accent by enum(Accent.CYAN) { name = TranslatableValue.literal("Digest accent") }
+    val accent by enum(Accent.CYAN) { condition = { false } } // Legacy values migrate to the shared theme.
     val cardOpacity by int(96) {
         name = TranslatableValue.literal("Card opacity")
+        condition = { false }
         range = 75..100
         slider = true
     }

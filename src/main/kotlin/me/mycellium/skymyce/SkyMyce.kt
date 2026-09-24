@@ -7,6 +7,7 @@ import me.mycellium.skymyce.api.DungeonApi
 import me.mycellium.skymyce.api.MiscApi
 import me.mycellium.skymyce.commands.SkyMyceCommands
 import me.mycellium.skymyce.config.Config
+import me.mycellium.skymyce.config.misc.ThemeConfig
 import me.mycellium.skymyce.config.instances.dungeons.PartyFinder
 import me.mycellium.skymyce.features.dev.DevTooltips
 import me.mycellium.skymyce.features.digest.DailyDigest
@@ -52,6 +53,8 @@ object SkyMyce : ClientModInitializer {
 
     override fun onInitializeClient() {
         config = Config.register(configurator)
+        ThemeConfig.migrateDigestTheme()
+        config.save()
 
         ModuleManager.loadModules(
             CheesePizza,

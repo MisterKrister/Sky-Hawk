@@ -42,9 +42,9 @@ fun FlowLayout.updateTextLines(lines: List<String>): FlowLayout = apply {
 
 fun hudPanel(padding: Int = 5, decorated: Boolean = true): FlowLayout = hudColumn().apply {
     padding(Insets.of(padding))
-    surface(Surface.flat(0x88000000.toInt()).let { background ->
-        if (!decorated) background else background.and(Surface.outline(0x55000000 or HudTheme.HUD_ACCENT)).and { graphics, panel ->
-            graphics.fill(panel.x(), panel.y(), panel.x() + 2, panel.y() + panel.height(), 0xFF000000.toInt() or HudTheme.HUD_ACCENT)
+    surface(HudTheme.panel().let { background ->
+        if (!decorated) background else background.and { graphics, panel ->
+            graphics.fill(panel.x(), panel.y() + 3, panel.x() + 2, panel.y() + panel.height() - 3, HudTheme.alpha(HudTheme.HUD_ACCENT))
         }
     })
 }

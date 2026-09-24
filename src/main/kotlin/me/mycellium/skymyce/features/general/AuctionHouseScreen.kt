@@ -10,6 +10,8 @@ import io.wispforest.owo.ui.container.GridLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.themed
 import me.mycellium.skymyce.api.AuctionAPI
 import me.mycellium.skymyce.features.general.auction.AuctionSearch
 import me.mycellium.skymyce.utils.NumberUtils
@@ -35,7 +37,7 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
     override fun build(root: FlowLayout) {
-        root.surface(Surface.blur(3.0f, 10.0f))
+        root.surface(HudTheme.backdrop)
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(mainLayout())
         if (!browserSessionStarted) {
@@ -51,7 +53,7 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
     }
 
     private fun mainLayout(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(80), Sizing.fill(80)).apply {
-        surface(Surface.DARK_PANEL)
+        surface(HudTheme.panel())
         padding(Insets.of(10))
         gap(6)
 
@@ -67,7 +69,7 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
             padding(Insets.of(5))
             scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(0x55FFFF)))
             scrollbarThiccness(2)
-            surface(Surface.PANEL_INSET)
+            surface(HudTheme.panel(true))
         }
         child(scroll)
         child(paginationBar())
@@ -92,7 +94,7 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
                     dropdown.button(Component.literal("§f$category")) { selectCategory(category) }
                 }
             }
-        })
+        }.themed())
         child(UIComponents.button(Component.literal("§7Rarity: §f${search.rarity ?: "All"}")) { button ->
             openMenu(button) { dropdown ->
                 dropdown.button(Component.literal("§fAll rarities")) { selectRarity(null) }
@@ -100,32 +102,32 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
                     dropdown.button(rarity.displayText) { selectRarity(rarity) }
                 }
             }
-        })
+        }.themed())
         child(UIComponents.button(Component.literal("§7Type: §f${search.listingType.label}")) { button ->
             openMenu(button) { dropdown ->
                 AuctionSearch.ListingType.entries.forEach { listingType ->
                     dropdown.button(Component.literal("§f${listingType.label}")) { selectListingType(listingType) }
                 }
             }
-        })
+        }.themed())
         child(UIComponents.button(Component.literal("§7Sort: §f${search.sort.label}")) { button ->
             openMenu(button) { dropdown ->
                 AuctionSearch.Sort.entries.forEach { sort ->
                     dropdown.button(Component.literal("§f${sort.label}")) { selectSort(sort) }
                 }
             }
-        })
-        child(UIComponents.button(Component.literal("§bRefresh cache")) { AuctionAPI.beginBrowserSession() }
+        }.themed())
+        child(UIComponents.button(Component.literal("Refresh cache").withColor(HudTheme.ACCENT)) { AuctionAPI.beginBrowserSession() }.themed()
             .tooltip(Component.literal("§7Discards cached pages and requests page 1 again.")))
     }
 
     private fun paginationBar(): UIComponent = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(5)
         alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-        child(UIComponents.button(Component.literal("§b<")) { changePage(-1) })
+        child(UIComponents.button(Component.literal("<").withColor(HudTheme.ACCENT)) { changePage(-1) }.themed())
         pageLabel = UIComponents.label(Component.empty())
         child(pageLabel)
-        child(UIComponents.button(Component.literal("§b>")) { changePage(1) })
+        child(UIComponents.button(Component.literal(">").withColor(HudTheme.ACCENT)) { changePage(1) }.themed())
     }
 
     private fun updateResults() {
@@ -158,7 +160,7 @@ class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
             { root, dropdown -> root.child(dropdown) },
             button.x.toDouble(),
             (button.y + button.height).toDouble(),
-            entries,
+            { menu -> menu.surface(HudTheme.panel()); entries(menu) },
         )
     }
 

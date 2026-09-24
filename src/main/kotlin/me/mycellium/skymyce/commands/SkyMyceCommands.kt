@@ -2,7 +2,12 @@ package me.mycellium.skymyce.commands
 
 import com.mojang.brigadier.builder.LiteralArgumentBuilder
 import com.mojang.brigadier.arguments.StringArgumentType
-import com.teamresourceful.resourcefulconfig.api.client.ResourcefulConfigScreen
+import me.mycellium.skymyce.config.SettingsScreen
+import me.mycellium.skymyce.config.Config
+import com.mojang.blaze3d.platform.InputConstants
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper
+import net.minecraft.client.KeyMapping
 import me.mycellium.skymyce.ModuleManager
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.SkyMyceModule
@@ -22,7 +27,23 @@ import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource
 
 
 object SkyMyceCommands : SkyMyceModule() {
+    private lateinit var settingsKey: KeyMapping
+
+    fun syncSettingsKey() {
+        if (::settingsKey.isInitialized) Config.openConfigKey = KeyMappingHelper.getBoundKeyOf(settingsKey).value
+    }
+
+    fun updateSettingsKey() {
+        if (!::settingsKey.isInitialized) return
+        settingsKey.setKey(InputConstants.Type.KEYSYM.getOrCreate(Config.openConfigKey))
+        KeyMapping.resetMapping()
+    }
+
     override fun init() {
+        settingsKey = KeyMappingHelper.registerKeyMapping(KeyMapping("Open Sky-Hawk Settings", Config.openConfigKey, KeyMapping.Category.MISC))
+        ClientTickEvents.END_CLIENT_TICK.register { client ->
+            while (settingsKey.consumeClick()) if (client.screen == null && client.player != null) client.setScreen(SettingsScreen())
+        }
         ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
             dispatcher.register(root("skymyce"))
             dispatcher.register(root("sm"))
@@ -34,7 +55,7 @@ object SkyMyceCommands : SkyMyceModule() {
             .executes {
                 MC.instance.execute {
                     MC.instance.setScreen(
-                        ResourcefulConfigScreen.make(SkyMyce.config).build()
+                        SettingsScreen()
                     )
                 }
                 1

@@ -14,6 +14,7 @@ object PartyCommandsConfig : CategoryKt("Party Commands") {
 
     val enabledPartyCommands by select<PartyCommandTypes> {
         name = TranslatableValue.literal("Enabled Commands")
+        description = TranslatableValue.literal("Choose which ! commands party members may use with your mod. Unselected commands are ignored.")
     }
 
     val partyCommandCooldown by double(0.5) {

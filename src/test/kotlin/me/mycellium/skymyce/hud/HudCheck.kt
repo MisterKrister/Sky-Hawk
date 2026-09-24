@@ -9,6 +9,7 @@ import me.mycellium.skymyce.hud.widget.WidgetConfig
 
 /** Exercises retained owo layout without a Minecraft window or a test framework. */
 fun main() {
+    checkSettings()
     me.mycellium.skymyce.features.digest.digestUiCheck()
     val first = UIComponents.box(Sizing.fixed(40), Sizing.fixed(9))
     val second = UIComponents.box(Sizing.fixed(20), Sizing.fixed(9))
