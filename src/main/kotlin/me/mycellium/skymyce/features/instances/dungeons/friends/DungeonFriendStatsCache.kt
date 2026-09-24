@@ -16,12 +16,12 @@ import kotlin.time.Duration.Companion.seconds
 
 /** Cache lookups run independently of the single, rate-limited provider/API request. */
 object DungeonFriendStatsCache {
-    private data class Request(val uuid: UUID?, val force: Boolean, val bypassShared: Boolean)
+    private data class Request(val uuid: UUID?, val force: Boolean)
     private data class SharedLookup(val response: CompletableFuture<JsonObject?>, val expires: Long)
     private val cache = mutableMapOf<String, CachedDungeonFriend>()
     private val liveClasses = mutableMapOf<String, Pair<String, DungeonClass>>()
     private val revisions = mutableMapOf<String, Long>()
-    private val invalidProfiles = mutableSetOf<String>()
+    private val invalidProfiles = mutableMapOf<String, Long>()
     private val pending = linkedMapOf<String, Request>()
     private val sharedLookups = mutableMapOf<String, SharedLookup>()
     private var relayCredits = 20.0 // Leave room below the relay's 30-message burst limit for uploads.
@@ -71,12 +71,12 @@ object DungeonFriendStatsCache {
 
     fun forgetLiveClass(name: String) { liveClasses.remove(name.lowercase()) }
 
-    fun invalidateProfile(name: String) {
+    fun invalidateProfile(name: String, now: Long = System.currentTimeMillis()) {
         val key = name.lowercase()
         forgetLiveClass(key)
         cache.remove(key)
         sharedLookups.remove(key)
-        invalidProfiles += key
+        invalidProfiles[key] = now
         revisions[key] = (revisions[key] ?: 0) + 1
         dirty = true
         version++
@@ -98,8 +98,8 @@ object DungeonFriendStatsCache {
             sharedLookups.remove(key)
         }
         val queued = pending[key]
-        val request = Request(uuid ?: queued?.uuid, force || changedPlayer || queued?.force == true,
-            bypassShared || key in invalidProfiles || queued?.bypassShared == true)
+        if (bypassShared) invalidProfiles.putIfAbsent(key, System.currentTimeMillis())
+        val request = Request(uuid ?: queued?.uuid, force || changedPlayer || queued?.force == true)
         if (priority) {
             pending.remove(key)
             val rest = pending.toMap()
@@ -163,12 +163,14 @@ object DungeonFriendStatsCache {
     /** Live relay reports update eligibility and visible rows without another refresh or API lookup. */
     internal fun receiveShared(json: JsonObject, name: String, uuid: String?, now: Long): Boolean {
         val key = name.lowercase()
-        if (!key.matches(Regex("[a-z0-9_]{1,16}")) || key in invalidProfiles) return false
+        if (!key.matches(Regex("[a-z0-9_]{1,16}"))) return false
         val previous = cache[key]
         val record = sharedDungeonFriend(json, name, uuid ?: previous?.uuid, now)?.let { withLiveClass(key, it) } ?: return false
+        if (!afterProfileChange(key, record)) return false
         if (previous != null && previous.verifiedUntil >= record.verifiedUntil) return false
         cache[key] = record
-        if (pending[key]?.bypassShared == false) {
+        invalidProfiles.remove(key)
+        if (pending.containsKey(key)) {
             pending.remove(key)
             sharedLookups.remove(key)
             completedCount++
@@ -177,6 +179,11 @@ object DungeonFriendStatsCache {
         version++
         return true
     }
+
+    // A profile change rejects older reports, not every future relay report. Clients without a local
+    // API provider must still be able to recover when another client publishes fresh selected-profile data.
+    private fun afterProfileChange(name: String, record: CachedDungeonFriend): Boolean =
+        invalidProfiles[name]?.let { record.verifiedUntil - 600000 > it } ?: true
 
     /** A forced follow-up invalidates the older response, including its eligibility and upload. */
     internal fun storeFetched(name: String, revision: Long, fetched: DungeonFriendStats, uuid: String?, started: Long, time: Long): Boolean {
@@ -207,14 +214,15 @@ object DungeonFriendStatsCache {
                 continue
             }
             val request = pending[name] ?: continue
-            if (request.bypassShared) continue
             val uuid = request.uuid?.toString()?.replace("-", "") ?: cache[name]?.uuid
             val record = response.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
                 ?.let { sharedDungeonFriend(it, name, uuid, now) }?.let { withLiveClass(name, it) } ?: continue
+            if (!afterProfileChange(name, record)) continue
             val previous = cache[name]
             // Refresh clears expires. A valid hit must restore it even if the report is unchanged.
             cache[name] = if (previous != null && previous.verifiedUntil >= record.verifiedUntil)
                 previous.copy(expires = maxOf(previous.expires, previous.verifiedUntil)) else record
+            invalidProfiles.remove(name)
             pending.remove(name)
             sharedLookups.remove(name)
             completedCount++

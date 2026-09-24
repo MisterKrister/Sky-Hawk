@@ -111,6 +111,7 @@ object DungeonFriends : SkyMyceModule() {
             nextJoinStatsCheck = now() + 60000
             checkJoinStats(MC.player.name.string)
         }
+        if (policy.maxPbMillis != null && stats == null) return "Checking your ${floor.name} S+ PB; waiting for fresh stats"
         if (!policy.accepts(stats, floor)) return "Your ${floor.name} S+ PB must be ${formatDungeonTime(policy.maxPbMillis)} or faster"
         return null
     }

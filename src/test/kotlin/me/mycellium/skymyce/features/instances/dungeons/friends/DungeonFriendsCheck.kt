@@ -465,6 +465,31 @@ fun main() {
             check(DungeonFriendStatsCache.verified("Alice") == replacement)
         } finally { inFlightField.set(null, null); DungeonFriendStatsCache.clear() }
     }
+    // Joining must recover through either relay path without a local SkyBlockPv/SkyBlocker provider.
+    for (broadcast in listOf(true, false)) {
+        DungeonFriendStatsCache.clear()
+        sharedReplies.clear()
+        DungeonFriendStatsCache.invalidateProfile("Alice", cacheTime)
+        DungeonFriendStatsCache.request("Alice", force = true)
+        val oldRecord = sharedReply("alice").getAsJsonObject("record")
+        check(!DungeonFriendStatsCache.receiveShared(oldRecord, "Alice", null, cacheTime + 1))
+        val fresh = sharedReply("alice").apply { getAsJsonObject("record").addProperty("fetchedAt", cacheTime + 1) }
+        if (broadcast) {
+            check(DungeonFriendStatsCache.receiveShared(fresh.getAsJsonObject("record"), "Alice", null, cacheTime + 2))
+        } else {
+            pollCache(cacheTime + 2)
+            sharedReplies.getValue("alice").complete(fresh)
+            pollCache(cacheTime + 2)
+        }
+        check(DungeonFriendStatsCache.verified("Alice") == known && DungeonFriendStatsCache.pendingCount == 0)
+        check(DungeonJoinPolicy(F7, known.sPlusTimes.getValue(F7)).accepts(DungeonFriendStatsCache.verified("Alice"), F7))
+        check(!DungeonFriendStatsCache.receiveShared(oldRecord, "Alice", null, cacheTime + 3))
+        DungeonFriendStatsCache.invalidateProfile("Alice", cacheTime + 4)
+        check(!DungeonFriendStatsCache.receiveShared(fresh.getAsJsonObject("record"), "Alice", null, cacheTime + 5))
+        check(DungeonFriendStatsCache.verified("Alice") == null) // A second switch must reapply the freshness barrier.
+    }
+    DungeonFriendStatsCache.clear()
+    sharedReplies.clear()
     listOf("Slow", "Alice", "Bob", "Carol").forEach { DungeonFriendStatsCache.request(it) }
     repeat(4) { pollCache() }
     check(sharedReplies.keys == setOf("slow", "alice", "bob")) // Bounded prefetch preserves upload grants.
