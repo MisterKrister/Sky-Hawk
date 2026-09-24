@@ -34,8 +34,12 @@ internal class TradeCapture {
     fun complete(name: String, now: Long): GearTrade? {
         val trade = pending ?: return null
         pending = null
-        return trade.takeIf { now - seenAt in 0..5000 && it.friend.equals(name, true) }
-            ?.copy(time = now)
+        // Trade window titles can truncate usernames to ten characters.
+        // Only a matching, recent server confirmation can supply the complete name.
+        val matches = trade.friend.equals(name, true) ||
+            (trade.friend.length == 10 && name.length in 11..16 && name.startsWith(trade.friend, true))
+        return trade.takeIf { now - seenAt in 0..5000 && matches }
+            ?.copy(time = now, friend = name)
     }
 }
 

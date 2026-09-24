@@ -928,6 +928,7 @@ private fun checkMenuRefresh() {
 private fun checkSocialFeatures() {
     check(tradePartner("You     [MVP+] Alice_1") == "Alice_1")
     check(tradePartner("You     Bob") == "Bob")
+    check(tradePartner("You                  MisterKris") == "MisterKris")
     check(tradePartner("Trading with Bob") == null)
     check(completedTradePartner("Trade completed with [MVP+] Alice_1!") == "Alice_1")
     check(completedTradePartner("From Bob: Trade completed with Bob!") == null)
@@ -948,6 +949,17 @@ private fun checkSocialFeatures() {
     capture.observe(trade, 1000)
     capture.observe(trade.copy(sent = emptyList()), 1001) // Removed items are not lent.
     check(capture.complete("Bob", 1002)?.sent?.isEmpty() == true)
+    val clippedTrade = trade.copy(id = java.util.UUID.randomUUID().toString(), friend = "MisterKris")
+    capture.observe(clippedTrade, 1000)
+    val completed = capture.complete(completedTradePartner("Trade completed with [MVP+] MisterKrister!")!!, 1001)
+    check(completed?.friend == "MisterKrister" && completed.sent == listOf(item))
+    check(capture.complete("MisterKrister", 1002) == null)
+    capture.observe(clippedTrade, 1000)
+    check(capture.complete("MisterOther", 1001) == null)
+    capture.observe(clippedTrade, 1000)
+    check(capture.complete("MisterKrister", 6001) == null)
+    capture.observe(trade, 1000)
+    check(capture.complete("Bobby", 1001) == null) // Short names are not arbitrary prefixes.
     val folder = Files.createTempDirectory("skymyce-ledger-check")
     val file = folder.resolve("ledger.json")
     try {
@@ -958,6 +970,8 @@ private fun checkSocialFeatures() {
         check(ledger.mark(trade.id, 0, LoanState.RETURNED))
         check(GearLedger(file).trades.single().sent.single().loan == LoanState.RETURNED)
         check(!ledger.mark(trade.id, 1, LoanState.LENT))
+        check(ledger.record(completed))
+        check(GearLedger(file).trades.last().friend == "MisterKrister")
         val otherAccount = GearLedger(folder.resolve("other.json"))
         check(otherAccount.trades.isEmpty())
         Files.writeString(file, "{broken")

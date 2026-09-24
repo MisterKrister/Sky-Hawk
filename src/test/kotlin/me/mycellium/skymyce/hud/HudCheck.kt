@@ -6,11 +6,20 @@ import io.wispforest.owo.ui.core.Size
 import io.wispforest.owo.ui.core.Sizing
 import me.mycellium.skymyce.hud.widget.Anchor
 import me.mycellium.skymyce.hud.widget.WidgetConfig
+import me.mycellium.skymyce.hud.widget.hudEditorControlAt
 
 /** Exercises retained owo layout without a Minecraft window or a test framework. */
 fun main() {
     checkSettings()
     me.mycellium.skymyce.features.digest.digestUiCheck()
+    val editorRoot = io.wispforest.owo.ui.container.UIContainers.verticalFlow(Sizing.fill(), Sizing.fill())
+    val resetControl = UIComponents.box(Sizing.fixed(150), Sizing.fixed(20)).positioning(io.wispforest.owo.ui.core.Positioning.absolute(245, 330))
+    editorRoot.child(resetControl)
+    editorRoot.inflate(Size.of(640, 360)); editorRoot.mount(null, 0, 0)
+    check(!hudEditorControlAt(editorRoot, 100.0, 100.0)) // HUD region must reach widget dragging.
+    check(hudEditorControlAt(editorRoot, 250.0, 335.0)) // Reset control retains native handling.
+    check(!hudEditorControlAt(editorRoot, 395.0, 335.0)) // Right edge is outside the button.
+    check(!hudEditorControlAt(null, 100.0, 100.0))
     val first = UIComponents.box(Sizing.fixed(40), Sizing.fixed(9))
     val second = UIComponents.box(Sizing.fixed(20), Sizing.fixed(9))
     val panel = hudPanel(padding = 6).children(listOf(first, second))

@@ -4,12 +4,14 @@ import io.wispforest.owo.ui.component.UIComponents
 import io.wispforest.owo.ui.container.FlowLayout
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.OwoUIAdapter
+import io.wispforest.owo.ui.core.ParentUIComponent
 import io.wispforest.owo.ui.core.Positioning
 import io.wispforest.owo.ui.core.Sizing
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.hud.HudTheme
 import me.mycellium.skymyce.hud.themed
 import net.minecraft.client.gui.GuiGraphicsExtractor
+import net.minecraft.client.gui.components.events.GuiEventListener
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.input.KeyEvent
 import net.minecraft.client.input.MouseButtonEvent
@@ -17,6 +19,11 @@ import net.minecraft.network.chat.Component
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.round
+import java.util.Optional
+
+/** The full-screen adapter's empty background must not intercept widget clicks. */
+internal fun hudEditorControlAt(root: ParentUIComponent?, x: Double, y: Double): Boolean =
+    root?.childAt(x.toInt(), y.toInt())?.let { it !== root } == true
 
 object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widget Editor")) {
     private var selectedWidget: Widget? = null
@@ -51,7 +58,7 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
         }.apply {
             themed()
             sizing(Sizing.fixed(150), Sizing.fixed(20))
-            positioning(Positioning.absolute(width / 2 - 75, height - 30))
+            positioning(Positioning.absolute(this@WidgetEditorScreen.width / 2 - 75, this@WidgetEditorScreen.height - 72))
         }
 
         adapter.rootComponent.child(resetButton)
@@ -119,6 +126,7 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
 
     override fun mouseClicked(button: MouseButtonEvent, doubled: Boolean): Boolean {
         if (super.mouseClicked(button, doubled)) return true
+        if (button.button() != 0) return false
         clickedWidget = screenWidgets.asReversed().firstOrNull {
             it.inBounds(button.x.toInt(), button.y.toInt())
         }
@@ -130,10 +138,17 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
     }
 
     override fun mouseReleased(button: MouseButtonEvent): Boolean {
-        clickedWidget = null
-
+        if (button.button() == 0 && clickedWidget != null) {
+            clickedWidget = null
+            return true
+        }
         return super.mouseReleased(button)
     }
+
+    // Minecraft 26.1 consumes clicks whenever getChildAt finds a child, even if it declines the click.
+    // Keep vanilla focus/drag handling for actual controls, and pass empty space to HUD hit testing.
+    override fun getChildAt(x: Double, y: Double): Optional<GuiEventListener> =
+        super.getChildAt(x, y).filter { it !== ui || hudEditorControlAt(ui?.rootComponent, x, y) }
 
     override fun mouseDragged(button: MouseButtonEvent, offsetX: Double, offsetY: Double): Boolean {
         if (button.button() == 0) {
