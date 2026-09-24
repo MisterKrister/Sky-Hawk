@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
+import { checkDigest } from "./digest.mjs";
 
 // Replace public trust roots only in this in-memory test bundle. Production has no auth bypass.
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -73,6 +74,9 @@ try {
   assert.equal((await mf.dispatchFetch("http://localhost/websocket?room=unlisted", { headers: { Upgrade: "websocket" } })).status, 403);
   const alice = await connect("Alice"); alice.authenticate({ ...proof("Alice", alice.challenge), liveUpdates: true });
   assert.equal((await alice.next()).liveUpdates, true);
+  alice.ws.send(JSON.stringify({ type: "digest_news_get", id: "f".repeat(32), source: "game" }));
+  const unconfiguredNews = await alice.next();
+  assert.equal(unconfiguredNews.error, "not_configured"); assert.deepEqual(unconfiguredNews.items, []);
   const bob = await connect("Bob"); bob.authenticate(); assert.equal((await bob.next()).type, "ready");
   const carol = await connect("Carol", "testing"); carol.authenticate({ ...proof("Carol", carol.challenge), liveUpdates: true }); await carol.next();
   let cacheId = 100;
@@ -293,3 +297,4 @@ try {
   for (const ws of sockets) { try { ws.close(); } catch {} }
   await mf.dispose();
 }
+await checkDigest(script, proof);
