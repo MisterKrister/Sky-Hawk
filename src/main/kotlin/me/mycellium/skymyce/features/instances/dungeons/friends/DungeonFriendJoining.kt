@@ -30,6 +30,10 @@ data class DungeonAvailability(
 data class DungeonJoinPolicy(val floor: DungeonFloor, val maxPbMillis: Long?, val open: Boolean = true) {
     fun accepts(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean = open && requestedFloor == floor &&
         (maxPbMillis == null || DungeonAvailability(floor, maxPbMillis = maxPbMillis).accepts(stats, floor))
+
+    // The host verifies its own fresh stats before inviting. Missing client-side data may request that check.
+    fun canRequest(stats: DungeonFriendStats?, requestedFloor: DungeonFloor): Boolean = open && requestedFloor == floor &&
+        (stats == null || accepts(stats, requestedFloor))
 }
 
 fun parsePbLimit(text: String): Long? {

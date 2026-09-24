@@ -93,7 +93,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         joinActions.forEach { (button, friend) ->
             val reason = DungeonFriends.joinUnavailable(friend, floor)
             button.active(reason == null)
-            button.tooltip(Component.literal(reason ?: "Request to join ${friend.name} on ${floor.name}"))
+            button.tooltip(Component.literal(reason ?: "Request to join ${friend.name} on ${floor.name}\nThe host verifies PB requirements before inviting"))
         }
         partyStatus.text(Component.literal(DungeonFriends.partyStatus + if (DungeonFriends.partyFull) "  Full" else ""))
         partyStatus.color(Color.ofRgb(if (DungeonFriends.partyFull) 0xF18C8C else CYAN))
