@@ -52,7 +52,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
     override fun init() {
-        if (!opened) { opened = true; DungeonFriends.refreshFriends(automatic = true) }
+        if (!opened) { opened = true; DungeonFriends.refreshPartyFinder(automatic = true) }
         super.init()
     }
 
@@ -233,7 +233,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private fun toolbarActions(row: FlowLayout) {
         row.child(button(if (DungeonFriendsSettings.availability.enabled) "§aAvailable" else "Available", 76) { openSettings(null) })
         refreshButton = button("Refresh", 82) {
-            DungeonFriends.refreshFriends()
+            DungeonFriends.refreshPartyFinder()
             it.active(false)
         }
         row.child(refreshButton)

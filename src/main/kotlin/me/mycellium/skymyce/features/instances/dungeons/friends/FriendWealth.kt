@@ -5,8 +5,6 @@ import com.google.gson.JsonParser
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.utils.MC
 import net.fabricmc.loader.api.FabricLoader
-import net.minecraft.world.item.ItemStack
-import tech.thatgravyboat.skyblockapi.api.item.calculator.getItemValue
 import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
 import tech.thatgravyboat.skyblockapi.utils.Scheduling
 import tech.thatgravyboat.skyblockapi.utils.http.Http
@@ -24,8 +22,10 @@ data class FriendWealth(
     val fetchedAt: Long = System.currentTimeMillis(),
     val hasProfile: Boolean? = null, val uuid: String? = null, val expires: Long = fetchedAt + FRIEND_WEALTH_TTL,
 ) {
-    fun shouldRefresh(now: Long, online: Boolean, skyBlockLocation: Boolean): Boolean = when (hasProfile) {
-        false -> skyBlockLocation && now - fetchedAt >= 300000
+    fun isFresh(now: Long): Boolean = hasProfile != null && now < fetchedAt + FRIEND_WEALTH_TTL
+
+    fun shouldRefresh(now: Long, online: Boolean, skyBlockLocation: Boolean): Boolean = !isFresh(now) && when (hasProfile) {
+        false -> skyBlockLocation
         true -> (online || expires == 0L) && now >= expires
         null -> now - fetchedAt >= 60000
     }
@@ -106,7 +106,7 @@ object FriendWealthCache {
         busy -> "Updating $loading • ${manualRefresh.size} queued"
         manualRefresh.isNotEmpty() -> "Waiting for API/cache cooldown • ${manualRefresh.size} queued"
         now < nextManualRefresh -> "Refresh requested • available again in ${(nextManualRefresh - now + 999) / 1000}s"
-        else -> "Saved wealth • refresh checks SkyBlock friends one at a time"
+        else -> "Cached for 24h • refresh checks missing or expired estimates"
     }
 
     fun initialize(file: Path) {
@@ -133,7 +133,7 @@ object FriendWealthCache {
     fun refresh(friends: Collection<String>, now: Long = System.currentTimeMillis()) {
         if (!canRefresh(now)) return
         nextManualRefresh = now + 60000
-        manualRefresh += friends.map { it.lowercase() }.filter { get(it)?.hasProfile != false }
+        manualRefresh += friends.map { it.lowercase() }.filter { get(it)?.let { entry -> entry.hasProfile != false && !entry.isFresh(now) } != false }
         version++
     }
 
@@ -161,6 +161,8 @@ object FriendWealthCache {
             val entry = get(key)
             if (entry?.uuid != null && uuid != null && uuid != entry.uuid) { entries.remove(key); dirty = true; version++ }
         }
+        newFriends.removeAll { get(it)?.isFresh(now) == true }
+        manualRefresh.removeAll { get(it)?.isFresh(now) == true }
         val friend = candidates.firstOrNull { it.name.lowercase() in newFriends }
             ?: candidates.firstOrNull { it.name.lowercase() in manualRefresh }
             ?: candidates.firstOrNull { get(it.name) == null }
@@ -273,19 +275,20 @@ object FriendWealthCache {
         val bank = publicCoins(bankJson, "banking", "balance")?.let {
             it + (publicCoins(personal, "profile", "bank_account") ?: 0.0)
         }
-        val total = if (inventory != null && bank != null && purse != null) {
-            val result = await(profile, "getNetWorth") as? Pair<*, *>
-            (result?.first as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }
+        val networth = if (inventory != null) await(profile, "getNetWorth") as? Pair<*, *> else null
+        val total = if (bank != null && purse != null) {
+            (networth?.first as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }
         } else null
         val wardrobe = runCatching {
-            inventory?.let { read(it, "getLoadouts") }?.let { loadouts ->
-                val sets = read(loadouts, "getArmorSets") as Map<*, *>
-                val items = sets.values.filterNotNull().flatMap { read(it, "getStacks") as List<*> }
-                    .filterIsInstance<ItemStack>().filterNot { it.isEmpty }
-                val values = items.map { it.getItemValue() }
-                // Missing market prices must not make an unpriced wardrobe appear worthless.
-                if (values.any { it.rawPrice <= 0 }) null else values.sumOf { it.price.toDouble() }
-            }
+            if (inventory == null || read(inventory, "getLoadouts") == null) return@runCatching null
+            // Reuse the provider's priced armor/equipment breakdown; do not price every item again.
+            val categories = networth?.second as? Map<*, *> ?: return@runCatching null
+            val items = categories.entries.firstOrNull { (it.key as? Enum<*>)?.name == "LOADOUT" }?.value as? Map<*, *>
+                ?: return@runCatching null
+            items.values.sumOf {
+                require(it is Number)
+                it.toDouble().also { value -> require(value.isFinite() && value >= 0) }
+            }.takeIf { it.isFinite() && it <= 9007199254740991.0 }
         }.getOrNull()
         val profileName = read(profile, "getId")?.let { read(it, "getName") as? String }.orEmpty()
         return FriendWealth(total, purse, bank, wardrobe, profileName, when {
@@ -295,7 +298,7 @@ object FriendWealthCache {
             bank == null -> "Bank API unavailable or disabled; total unavailable"
             purse == null -> "Purse unavailable; total unavailable"
             total == null -> "Networth calculation unavailable; showing public balances"
-            wardrobe == null -> "Wardrobe or some item prices unavailable"
+            wardrobe == null -> "Wardrobe estimate unavailable"
             else -> ""
         }, hasProfile = true)
     }

@@ -20,7 +20,7 @@ import java.nio.file.StandardCopyOption
 object DungeonFriendsConfig : CategoryKt("Dungeon Friends") {
     val enabled by boolean(true) {
         name = TranslatableValue.literal("Scan Dungeon Friends")
-        description = TranslatableValue.literal("Load friends on joining; opening Friends or Party Finder refreshes at most once per minute")
+        description = TranslatableValue.literal("Load a missing friend cache on joining; only Party Finder refreshes online status, at most once per minute on opening")
     }
 
     init {

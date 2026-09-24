@@ -20,7 +20,6 @@ import java.time.format.DateTimeFormatter
 
 class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<FlowLayout>() {
     enum class Tab(val label: String) { FRIENDS("Friends"), LENDING("Lending log"), WEALTH("Friend wealth") }
-    private var opened = false
     private var search = ""
     private var outstanding = false
     private var historyLimit = 50
@@ -34,13 +33,6 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
 
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
 
-    override fun init() {
-        if (!opened) { opened = true; DungeonFriends.refreshFriends(automatic = true, full = true) }
-        super.init()
-    }
-
-    override fun removed() { opened = false; super.removed() }
-
     override fun build(root: FlowLayout) {
         DungeonFriendsSettings.load()
         root.surface(HudTheme.backdrop)
@@ -53,7 +45,6 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                     .horizontalSizing(Sizing.expand()))
                 refreshButton = button("Refresh", 72) {
                     if (tab == Tab.WEALTH) FriendWealthCache.refresh(DungeonFriends.scanner.all.values.map { it.name })
-                    else DungeonFriends.refreshFriends(full = true)
                     updateRows()
                 }
                 child(refreshButton)
@@ -109,14 +100,16 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
         super.tick()
         val ledger = if (tab == Tab.LENDING) GearLending.ledger else null
         val wealth = tab == Tab.WEALTH
-        val refreshing = if (wealth) !FriendWealthCache.canRefresh() else DungeonFriends.scanner.scanning
-        refreshButton.active(LocationAPI.onHypixel && !refreshing && (!wealth || FriendWealthCache.available))
+        val refreshing = wealth && !FriendWealthCache.canRefresh()
+        refreshButton.active(!wealth || (LocationAPI.onHypixel && !refreshing && FriendWealthCache.available))
         refreshButton.message = Component.literal(if (refreshing) "Refreshing" else "Refresh")
-        refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else
-            if (wealth) "Update this account's SkyBlock friends one at a time, including offline friends. Shared and provider cooldowns apply; the roster is reused."
-            else "Refresh the full friend list. Opening the menu updates online status at most once per minute and reuses the saved roster."))
+        refreshButton.tooltip(Component.literal(if (wealth && !LocationAPI.onHypixel) "Join Hypixel to refresh" else
+            if (wealth) "Check missing or expired wealth one friend at a time, including offline friends. Estimates updated within 24 hours are reused from local or shared cache."
+            else "Redraw the saved friends and lending history. This does not request the friends list."))
         val status = if (!LocationAPI.onHypixel) "Join Hypixel to refresh friends"
-            else if (wealth) FriendWealthCache.refreshStatus() else DungeonFriends.scanner.status
+            else if (wealth) FriendWealthCache.refreshStatus()
+            else if (!DungeonFriends.scanner.hasScannedAll) "Friend cache incomplete • open Party Finder to finish loading it"
+            else "${DungeonFriends.scanner.all.size} cached friends • online status from Party Finder"
         if (scanStatus.text().string != status) scanStatus.text(Component.literal(status))
         val state = listOf(FriendWealthCache.version, DungeonFriends.scanner.all.toMap(), ledger, ledger?.trades, ledger?.error,
             DungeonFriendsSettings.error, LocationAPI.onHypixel, FriendWealthCache.available)
@@ -219,7 +212,8 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                         child(UIContainers.verticalFlow(Sizing.fill(25), Sizing.content()).apply {
                             gap(3); child(label(name, MUTED)); child(label(value?.let(::condense) ?: "—"))
                             tooltip(Component.literal("$name: ${value?.let { "%,.0f coins".format(it) } ?: "unavailable"}" +
-                                data?.let { "\nFetched ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}" }.orEmpty()))
+                                (if (name == "Wardrobe") "\nSkyBlockPv's stored armor and equipment estimate; already part of total networth." else "") +
+                                data?.takeIf { it.hasProfile != null }?.let { "\nFetched ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}" }.orEmpty()))
                         })
                     }
                 })
@@ -229,7 +223,10 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                     else -> data?.status ?: if (FriendWealthCache.available) "Queued..." else "No saved estimate"
                 }
                 if (status.isNotEmpty()) child(label(status, MUTED).horizontalSizing(Sizing.fill()))
-                data?.let { child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)) }
+                data?.takeIf { it.hasProfile != null }?.let {
+                    child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)
+                        .tooltip(Component.literal("Original update time, preserved in the shared Cloudflare cache. Refresh cannot update this estimate again for 24 hours.")))
+                }
             })
         }
     }

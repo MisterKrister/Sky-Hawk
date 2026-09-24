@@ -132,13 +132,13 @@ object DungeonFriends : SkyMyceModule() {
         }
     }
 
-    fun refreshFriends(automatic: Boolean = false, full: Boolean = false) {
+    fun refreshPartyFinder(automatic: Boolean = false) {
         if (!LocationAPI.onHypixel || MC.instance.player == null) return
         loadFriends()
         if (automatic) {
-            if (!scanner.refreshOnOpen(now(), full)) return
-        } else scanner.refresh(now(), full)
-        if (!automatic && !full) DungeonFriendStatsCache.refresh()
+            if (!scanner.refreshOnOpen(now(), full = true)) return
+        } else scanner.refresh(now(), full = !scanner.hasScannedAll)
+        if (!automatic) DungeonFriendStatsCache.refresh()
     }
 
     override fun tick() {
@@ -163,18 +163,21 @@ object DungeonFriends : SkyMyceModule() {
             nextPartyRequest = now() + if (sent) 60000 else 5000
         }
         val active = DungeonFriendsConfig.enabled && LocationAPI.isOnSkyBlock
-        if (active || MC.screen is DungeonFriendsScreen || MC.screen is FriendsSocialScreen) {
+        val statusChecker = active || MC.screen is DungeonFriendsScreen
+        if (statusChecker) {
             scanner.tick(now())?.let { command ->
                 sendingScan = true
                 try { sendCommand(command) } finally { sendingScan = false }
             }
+        } else if (scanner.scanning) scanner.manualCommand()
+        if (statusChecker || MC.screen is FriendsSocialScreen) {
             DungeonFriendStatsCache.request(MC.player.name.string, MC.player.uuid)
             scanner.online.values.forEach { friend ->
                 if (FriendWealthCache.get(friend.name)?.hasProfile != false)
                     DungeonFriendStatsCache.request(friend.name, FriendsAPI.getFriend(friend.name)?.uuid)
             }
             PartyAPI.members.forEach { member -> member.name?.let { DungeonFriendStatsCache.request(it, member.uuid) } }
-        } else if (scanner.scanning) scanner.manualCommand()
+        }
         saveFriends()
         FriendWealthCache.tick(scanner.all.values, scanner.online.keys)
         DungeonFriendStatsCache.tick()
@@ -627,7 +630,7 @@ object DungeonFriends : SkyMyceModule() {
             }
         } catch (_: Exception) {
             scannerStore = null // Preserve an unreadable cache instead of overwriting it or starting another scan.
-            SkyMyce.logger.warn("Could not read saved friend list; click Refresh to scan for this session")
+            SkyMyce.logger.warn("Could not read saved friend list; refresh Party Finder to scan for this session")
             FriendListScanner(emptyList())
         }
         savedScannerVersion = scanner.version

@@ -1,6 +1,7 @@
 package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import com.google.gson.JsonParser
+import com.google.gson.JsonObject
 import com.google.gson.Gson
 import me.mycellium.mixin.LabelComponentMixin
 import me.mycellium.skymyce.config.instances.dungeons.partyListingFromLore
@@ -790,9 +791,10 @@ fun main() {
 
 private fun checkJoinLookups() {
     val shared = JsonParser.parseString("""{"name":"Alice","uuid":"${"a".repeat(32)}","fetchedAt":1000000,
-        "wealth":{"hasProfile":true,"networth":1000000000,"purse":1000,"profile":"Apple","status":""}}""").asJsonObject
+        "wealth":{"hasProfile":true,"networth":1000000000,"purse":1000,"wardrobe":42000,"profile":"Apple","status":""}}""").asJsonObject
     val value = sharedFriendWealth(shared, "ALICE", null, 1000100)!!
     check(value.networth == 1000000000.0 && value.purse == 1000.0 && value.bank == null)
+    check(value.wardrobe == 42000.0)
     check(value.fetchedAt == 1000000L && value.expires == 87400000L)
     check(sharedFriendWealth(shared, "Bob", null, 1000100) == null)
     check(sharedFriendWealth(shared, "OldAliceName", java.util.UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 1000100) == value)
@@ -911,24 +913,31 @@ private fun checkFullFriendRoster() {
         check(!played.shouldRefresh(999999, online = false, skyBlockLocation = false))
         check(!played.shouldRefresh(301000, online = true, skyBlockLocation = true))
         check(!played.shouldRefresh(86400999, online = true, skyBlockLocation = true))
+        check(!played.copy(expires = 0).shouldRefresh(86400999, online = true, skyBlockLocation = true)) // Old caches cannot bypass the original fetch date.
         check(played.shouldRefresh(86401000, online = true, skyBlockLocation = true))
         check(!absent.shouldRefresh(Long.MAX_VALUE, online = true, skyBlockLocation = false))
         check(!absent.copy(expires = 0).shouldRefresh(999999, online = false, skyBlockLocation = false))
-        check(absent.shouldRefresh(301000, online = true, skyBlockLocation = true)) // They started playing later.
+        check(!absent.shouldRefresh(301000, online = true, skyBlockLocation = true))
+        check(absent.shouldRefresh(86401000, online = true, skyBlockLocation = true)) // Recheck newly active players only after 24h.
         check(!failed.shouldRefresh(60999, true, false) && failed.shouldRefresh(61000, true, false))
         val wealth = FriendWealthStore(wealthPath)
-        wealth.save(mapOf("alice" to played, "bob" to absent, "failed" to failed))
-        check(wealth.load() == mapOf("alice" to played, "bob" to absent)) // No negative entry on API failure.
+        val stale = played.copy(fetchedAt = 0, expires = 86400000)
+        wealth.save(mapOf("alice" to played, "bob" to absent, "stale" to stale, "failed" to failed))
+        check(wealth.load() == mapOf("alice" to played, "bob" to absent, "stale" to stale)) // No negative entry on API failure.
         FriendWealthCache.initialize(wealthPath)
-        FriendWealthCache.refresh(listOf("Alice", "Bob", "NewFriend"), 1000)
-        check(FriendWealthCache.isQueued("ALICE") && FriendWealthCache.isQueued("NewFriend"))
+        FriendWealthCache.refresh(listOf("Alice", "Bob", "Stale", "NewFriend"), 86400000)
+        check(!FriendWealthCache.isQueued("ALICE")) // Manual refresh skips estimates under 24h, even without a relay connection.
+        check(FriendWealthCache.isQueued("Stale") && FriendWealthCache.isQueued("NewFriend"))
         check(!FriendWealthCache.isQueued("Bob")) // Confirmed non-SkyBlock players remain cached.
-        FriendWealthCache.refresh(listOf("AnotherAccount"), 61000)
+        FriendWealthCache.refresh(listOf("AnotherAccount"), 86460000)
         check(!FriendWealthCache.isQueued("AnotherAccount")) // Repeated clicks cannot restart/extend an active pass.
-        FriendWealthCache.finishAttempt("ALICE", retryable = true, now = 1001)
-        check(!FriendWealthCache.isQueued("Alice") && FriendWealthCache.isQueued("NewFriend"))
-        FriendWealthCache.finishAttempt("NewFriend", retryable = false, now = 1002)
-        check(!FriendWealthCache.canRefresh(60999) && FriendWealthCache.canRefresh(61000))
+        FriendWealthCache.finishAttempt("Stale", retryable = true, now = 86400001)
+        check(!FriendWealthCache.isQueued("Stale") && FriendWealthCache.isQueued("NewFriend"))
+        FriendWealthCache.finishAttempt("NewFriend", retryable = false, now = 86400002)
+        check(!FriendWealthCache.canRefresh(86459999) && FriendWealthCache.canRefresh(86460000))
+        FriendWealthCache.refresh(listOf("Alice"), 86460000)
+        check(FriendWealthCache.isQueued("Alice"))
+        FriendWealthCache.finishAttempt("Alice", retryable = false, now = 86460001)
         Files.writeString(wealthPath, "{bad json")
         check(runCatching { wealth.load() }.isFailure && Files.readString(wealthPath) == "{bad json")
         fun presence(text: String) = publicProfilePresence(JsonParser.parseString(text).asJsonObject)
@@ -977,16 +986,22 @@ private fun checkMenuRefresh() {
 
     val cached = listOf(OnlineDungeonFriend("Alice", "in SkyBlock"), OnlineDungeonFriend("Bob", "Offline"), OnlineDungeonFriend("Carol", "Offline"))
     val social = FriendListScanner(cached.take(1), cached)
-    check(social.refreshOnOpen(0, full = true))
-    check(social.tick(0) == "friend list 1")
-    social.receive("Friends (Page 1 of 34)\nAlice is in SkyBlock\nBob is offline\n--------------------", 1)
-    check(!social.scanning && social.tick(1201) == null && "carol" in social.all)
-    social.refresh(2000, full = true) // Explicit roster refresh still checks everyone, including offline removals.
-    social.tick(2000)
-    social.receive("Friends (Page 1 of 2)\nAlice is in SkyBlock\nBob is offline\n--------------------", 2001)
-    check(social.tick(3201) == "friend list 2")
-    social.receive("Friends (Page 2 of 2)\nDave is offline\n--------------------", 3202)
+    FriendWealthCache.refresh(social.all.keys, 100000000)
+    check(FriendWealthCache.isQueued("Carol")) // Offline players come from the saved roster.
+    check(social.tick(100000000) == null && !social.scanning)
+    FriendWealthCache.refresh(social.all.keys, 100060000)
+    check(social.tick(100060000) == null) // A wealth refresh never starts or advances a friends-list scan.
+    social.all.keys.forEach { FriendWealthCache.finishAttempt(it, retryable = false, now = 100060000) }
+    check(social.savedAllFriends!!.toList() == cached)
+    check(social.refreshOnOpen(100060000, full = true)) // Only the Party Finder status refresh requests a scan.
+    check(social.tick(100060000) == "friend list 1")
+    social.receive("Friends (Page 1 of 34)\nAlice is in SkyBlock\nBob is offline\n--------------------", 100060001)
+    check(!social.scanning && social.tick(100061201) == null && "carol" in social.all)
+    social.notification("Dave", true) // Add/remove notices maintain the cache without another scan.
+    social.remove("Carol")
     check("carol" !in social.all && "dave" in social.all)
+    check(social.savedAllFriends!!.map { it.name }.toSet() == setOf("Alice", "Bob", "Dave"))
+    check(social.tick(100063201) == null)
 }
 
 private fun checkWealthRefresh() {
@@ -1000,11 +1015,25 @@ private fun checkWealthRefresh() {
     val partial = FriendWealthCache.fromProfile(profile)
     check(partial.hasProfile == true && partial.purse == 1234.0 && partial.bank == 4666.0)
     check(partial.networth == null && partial.status.startsWith("Networth calculation unavailable"))
-    profile.netWorth = CompletableFuture.completedFuture(99999L to emptyMap<String, Long>())
-    check(FriendWealthCache.fromProfile(profile).networth == 99999.0)
+    profile.netWorth = CompletableFuture.completedFuture(99999L to mapOf(
+        WealthCategoryFixture.LOADOUT to mapOf("Armor" to 12000L, "Equipment" to 3000L),
+        WealthCategoryFixture.INVENTORY to mapOf("Other" to 80000L)))
+    val priced = FriendWealthCache.fromProfile(profile)
+    check(priced.networth == 99999.0 && priced.wardrobe == 15000.0) // Subtotal, not added to networth again.
+    profile.backingProfile.bank = CompletableFuture.failedFuture(IllegalStateException("Bank API disabled"))
+    val noBank = FriendWealthCache.fromProfile(profile)
+    check(noBank.networth == null && noBank.wardrobe == 15000.0 && noBank.purse == 1234.0)
+    profile.backingProfile.bank = CompletableFuture.completedFuture(WealthBankFixture(bank, JsonObject()))
+    for ((items, expected) in listOf(emptyMap<String, Any>() to 0.0, mapOf("Unknown" to -1) to null,
+        mapOf("Unknown" to Double.NaN) to null, mapOf("Unknown" to "100") to null)) {
+        profile.netWorth = CompletableFuture.completedFuture(99999L to mapOf(WealthCategoryFixture.LOADOUT to items))
+        check(FriendWealthCache.fromProfile(profile).wardrobe == expected)
+    }
+    profile.netWorth = CompletableFuture.completedFuture(99999L to emptyMap<WealthCategoryFixture, Map<String, Long>>())
+    check(FriendWealthCache.fromProfile(profile).wardrobe == null) // Missing breakdown is not an empty wardrobe.
     profile.backingProfile.inventory = CompletableFuture.failedFuture(IllegalStateException("Inventory decoding failed"))
     val inventoryFailed = FriendWealthCache.fromProfile(profile)
-    check(inventoryFailed.purse == 1234.0 && inventoryFailed.bank == 4666.0 && inventoryFailed.networth == null)
+    check(inventoryFailed.purse == 1234.0 && inventoryFailed.bank == 4567.0 && inventoryFailed.networth == null && inventoryFailed.wardrobe == null)
     check(inventoryFailed.status.startsWith("Inventory calculation unavailable"))
 
     val api = WealthApiFixture(profile)
@@ -1022,11 +1051,12 @@ data class WealthCurrencyFixture(val json: com.google.gson.JsonObject)
 data class WealthBankFixture(val json: com.google.gson.JsonObject, val member: com.google.gson.JsonObject)
 data class WealthLoadoutsFixture(val armorSets: Map<String, Any> = emptyMap())
 data class WealthInventoryFixture(val loadouts: WealthLoadoutsFixture = WealthLoadoutsFixture())
-data class WealthBackingFixture(val currency: CompletableFuture<WealthCurrencyFixture>, val bank: CompletableFuture<WealthBankFixture>,
+enum class WealthCategoryFixture { LOADOUT, INVENTORY; override fun toString() = "Formatted name" }
+data class WealthBackingFixture(val currency: CompletableFuture<WealthCurrencyFixture>, var bank: CompletableFuture<WealthBankFixture>,
     var inventory: CompletableFuture<WealthInventoryFixture>)
 data class WealthProfileIdFixture(val name: String = "Apple")
 data class WealthProfileFixture(val backingProfile: WealthBackingFixture, val selected: Boolean = true, val id: WealthProfileIdFixture = WealthProfileIdFixture(),
-    var netWorth: CompletableFuture<Pair<Long, Map<String, Long>>> = CompletableFuture.failedFuture(IllegalStateException("Price calculation failed")))
+    var netWorth: CompletableFuture<Pair<Long, Map<WealthCategoryFixture, Map<String, Any>>>> = CompletableFuture.failedFuture(IllegalStateException("Price calculation failed")))
 class WealthApiFixture(private val profile: WealthProfileFixture) {
     val maxCache = 300000L
     var cached: List<WealthProfileFixture>? = listOf(profile)
