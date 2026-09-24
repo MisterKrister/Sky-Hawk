@@ -7,6 +7,7 @@ import me.mycellium.skymyce.ModuleManager
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.features.general.AuctionHouseScreen
+import me.mycellium.skymyce.features.digest.DailyDigest
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
@@ -39,6 +40,10 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             }
             .then(dungeon())
+            .then(literal("digest").executes {
+                MC.instance.execute { DailyDigest.open() }
+                1
+            })
             .then(literal("pf").executes {
                 MC.instance.execute { MC.instance.setScreen(DungeonFriendsScreen()) }
                 1

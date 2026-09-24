@@ -9,6 +9,9 @@ import me.mycellium.skymyce.commands.SkyMyceCommands
 import me.mycellium.skymyce.config.Config
 import me.mycellium.skymyce.config.instances.dungeons.PartyFinder
 import me.mycellium.skymyce.features.dev.DevTooltips
+import me.mycellium.skymyce.features.digest.DailyDigest
+import me.mycellium.skymyce.features.digest.DigestActivities
+import me.mycellium.skymyce.features.digest.DigestRng
 import me.mycellium.skymyce.features.general.*
 import me.mycellium.skymyce.features.general.overlays.AbilityCooldownOverlay
 import me.mycellium.skymyce.features.general.overlays.ClientInfoOverlay
@@ -56,7 +59,7 @@ object SkyMyce : ClientModInitializer {
             DevTooltips,
             LoadoutKeybinds, SkyMyceCommands, SkillXpOverlay, AbilityCooldownOverlay, AutoRefill, ClientInfoOverlay, PartyCommands, Waypoints,
             StashHelper, PartyFinder, DungeonFriends, GearLending, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
-            MiningFeatures, Plane
+            MiningFeatures, Plane, DailyDigest, DigestActivities, DigestRng
         )
 
         ModuleManager.modules.forEach {
