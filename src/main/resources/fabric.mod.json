@@ -30,6 +30,7 @@
 		"minecraft": "~26.1.2",
 		"java": ">=21",
 		"fabric-api": "*",
-		"fabric-language-kotlin": "*"
+		"fabric-language-kotlin": "*",
+		"skyblockpv": ">=1.8.9"
 	}
 }

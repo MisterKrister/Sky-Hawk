@@ -1,6 +1,11 @@
 export const WEALTH_TTL = 86_400_000;
 export const ABSENT_TTL = 604_800_000;
 export type CachedWealth = { name: string; uuid: string; wealth: Record<string, unknown>; fetchedAt: number };
+const totals = ["networth", "purse", "bank", "wardrobe"] as const;
+
+function incomplete(wealth: Record<string, unknown>): boolean {
+  return wealth.hasProfile === true && totals.some(key => wealth[key] == null);
+}
 
 /** Store totals only, never inventories, item NBT, account credentials, or the friend roster. */
 export function validateWealth(value: unknown): Record<string, unknown> | null {
@@ -8,7 +13,7 @@ export function validateWealth(value: unknown): Record<string, unknown> | null {
   const data = value as Record<string, unknown>;
   if (typeof data.hasProfile !== "boolean") return null;
   const result: Record<string, unknown> = { hasProfile: data.hasProfile };
-  for (const key of ["networth", "purse", "bank", "wardrobe"]) {
+  for (const key of totals) {
     if (data[key] == null) continue;
     if (!data.hasProfile || typeof data[key] !== "number" || !Number.isFinite(data[key]) ||
         data[key] < 0 || data[key] > Number.MAX_SAFE_INTEGER) return null;
@@ -36,14 +41,24 @@ export class SharedWealth {
     if (!row || (uuid && row.uuid !== uuid)) return null;
     const wealth = JSON.parse(row.wealth);
     const ttl = wealth.hasProfile || refresh ? WEALTH_TTL : ABSENT_TTL;
+    // Manual retries may fill missing values, but clients share a one-minute minimum retry interval.
+    if (refresh && incomplete(wealth) && row.fetched_at <= now - 60_000) return null;
     return row.fetched_at > now - ttl ? { name: row.name, uuid: row.uuid, wealth, fetchedAt: row.fetched_at } : null;
   }
 
   put(record: CachedWealth, now: number): boolean {
-    const existing = this.sql.exec<{ fetched_at: number }>(
-      "SELECT fetched_at FROM player_wealth WHERE uuid = ? OR name = ?", record.uuid, record.name,
+    const existing = this.sql.exec<{ uuid: string; wealth: string; fetched_at: number }>(
+      "SELECT uuid, wealth, fetched_at FROM player_wealth WHERE uuid = ? OR name = ?", record.uuid, record.name,
     ).toArray();
-    if (existing.some(row => row.fetched_at >= record.fetchedAt || row.fetched_at > now - WEALTH_TTL)) return false;
+    if (existing.some(row => {
+      if (row.fetched_at >= record.fetchedAt) return true;
+      if (row.fetched_at <= now - WEALTH_TTL) return false;
+      const previous = JSON.parse(row.wealth);
+      // Within 24h accept only an improvement for the same player, without losing any known totals.
+      return row.uuid !== record.uuid || !incomplete(previous) ||
+        totals.some(key => previous[key] != null && record.wealth[key] == null) ||
+        !totals.some(key => previous[key] == null && record.wealth[key] != null);
+    })) return false;
     this.sql.exec("DELETE FROM player_wealth WHERE uuid = ? OR name = ?", record.uuid, record.name);
     this.sql.exec("INSERT INTO player_wealth (uuid, name, wealth, fetched_at) VALUES (?, ?, ?, ?)",
       record.uuid, record.name, JSON.stringify(record.wealth), record.fetchedAt);

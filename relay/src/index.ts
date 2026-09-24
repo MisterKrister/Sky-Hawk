@@ -249,16 +249,16 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       ws.serializeAttachment(session);
       if (!allowed) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, error: "rate_limited", retryAt: now + 5000 })); return; }
       if (data.type === "wealth_get") {
-        const record = this.wealth.get(data.name, data.uuid as string | undefined, now, data.refresh === true);
-        if (record) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record })); return; }
+        const record = this.wealth.get(data.name, data.uuid as string | undefined, now, data.refresh === true && data.canFetch !== false);
         const matches = (grant: StatsGrant) => grant.name === (data.name as string).toLowerCase() ||
           (data.uuid !== undefined && grant.uuid === data.uuid);
         // Cache-only viewers and clients in provider backoff must not reserve work they cannot perform.
         if (data.canFetch === false) {
           session.wealthUploads = session.wealthUploads.filter(grant => !matches(grant));
           ws.serializeAttachment(session);
-          ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null })); return;
+          ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record })); return;
         }
+        if (record) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record })); return; }
         const own = session.wealthUploads.find(grant => matches(grant) &&
           (!grant.uuid || grant.uuid === data.uuid));
         if (own) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null, upload: own.token })); return; }

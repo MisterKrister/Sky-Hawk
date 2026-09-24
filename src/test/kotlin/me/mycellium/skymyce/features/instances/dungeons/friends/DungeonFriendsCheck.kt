@@ -907,9 +907,18 @@ private fun checkFullFriendRoster() {
         restored.tick(1201)
         restored.tick(11201)
         check(restored.savedAllFriends!!.toList() == scanner.savedAllFriends!!.toList())
-        val played = FriendWealth(networth = 100.0, fetchedAt = 1000, hasProfile = true, uuid = "a".repeat(8) + "-aaaa-aaaa-aaaa-" + "a".repeat(12))
+        val played = FriendWealth(networth = 100.0, purse = 10.0, bank = 20.0, wardrobe = 30.0,
+            fetchedAt = 1000, hasProfile = true, uuid = "a".repeat(8) + "-aaaa-aaaa-aaaa-" + "a".repeat(12))
         val absent = FriendWealth(fetchedAt = 1000, hasProfile = false, uuid = "b".repeat(8) + "-bbbb-bbbb-bbbb-" + "b".repeat(12))
         val failed = FriendWealth(fetchedAt = 1000, status = "API unavailable")
+        check(!played.canRefreshManually(1001) && played.canRefreshManually(86401000))
+        check(!absent.canRefreshManually(1001) && failed.canRefreshManually(1001))
+        check(!played.copy(networth = 0.0, purse = 0.0, bank = 0.0, wardrobe = 0.0).canRefreshManually(1001))
+        for (partial in listOf(played.copy(networth = null), played.copy(purse = null),
+            played.copy(bank = null), played.copy(wardrobe = null))) {
+            check(partial.canRefreshManually(1001))
+            check(!partial.shouldRefresh(1001, online = true, skyBlockLocation = true)) // Manual only.
+        }
         check(!played.shouldRefresh(999999, online = false, skyBlockLocation = false))
         check(!played.shouldRefresh(301000, online = true, skyBlockLocation = true))
         check(!played.shouldRefresh(86400999, online = true, skyBlockLocation = true))
@@ -922,10 +931,16 @@ private fun checkFullFriendRoster() {
         check(!failed.shouldRefresh(60999, true, false) && failed.shouldRefresh(61000, true, false))
         val wealth = FriendWealthStore(wealthPath)
         val stale = played.copy(fetchedAt = 0, expires = 86400000)
-        wealth.save(mapOf("alice" to played, "bob" to absent, "stale" to stale, "failed" to failed))
-        check(wealth.load() == mapOf("alice" to played, "bob" to absent, "stale" to stale)) // No negative entry on API failure.
+        val partial = played.copy(wardrobe = null)
+        wealth.save(mapOf("alice" to played, "bob" to absent, "stale" to stale, "failed" to failed, "partial" to partial))
+        check(wealth.load() == mapOf("alice" to played, "bob" to absent, "stale" to stale, "partial" to partial)) // No negative entry on API failure.
         FriendWealthCache.initialize(wealthPath)
-        FriendWealthCache.refresh(listOf("Alice", "Bob", "Stale", "NewFriend"), 86400000)
+        FriendWealthCache.refresh(listOf("Alice", "Bob", "Stale", "NewFriend", "Partial"), 86400000)
+        check(FriendWealthCache.isQueued("Partial")) // A fresh incomplete entry can be retried manually.
+        FriendWealthCache.finishAttempt("Partial", retryable = false, now = 86400000, retryAt = 86460000)
+        check(FriendWealthCache.isQueued("Partial")) // A partial cache hit during provider cooldown must not cancel the retry.
+        check(!FriendWealthCache.canLookup("Partial", 86401000) && FriendWealthCache.canLookup("NewFriend", 86401000))
+        FriendWealthCache.finishAttempt("Partial", retryable = false, now = 86400000)
         check(!FriendWealthCache.isQueued("ALICE")) // Manual refresh skips estimates under 24h, even without a relay connection.
         check(FriendWealthCache.isQueued("Stale") && FriendWealthCache.isQueued("NewFriend"))
         check(!FriendWealthCache.isQueued("Bob")) // Confirmed non-SkyBlock players remain cached.
@@ -933,6 +948,11 @@ private fun checkFullFriendRoster() {
         check(!FriendWealthCache.isQueued("AnotherAccount")) // Repeated clicks cannot restart/extend an active pass.
         FriendWealthCache.finishAttempt("Stale", retryable = true, now = 86400001)
         check(!FriendWealthCache.isQueued("Stale") && FriendWealthCache.isQueued("NewFriend"))
+        // A cache miss (including no local provider) must not hold the next friend's hit for a minute.
+        check(!FriendWealthCache.canLookup("NewFriend", 86401000))
+        check(FriendWealthCache.canLookup("NewFriend", 86401001))
+        check(!FriendWealthCache.canLookup("STALE", 86401001))
+        check(FriendWealthCache.canLookup("Stale", 86460001)) // Retain the per-player retry cooldown.
         FriendWealthCache.finishAttempt("NewFriend", retryable = false, now = 86400002)
         check(!FriendWealthCache.canRefresh(86459999) && FriendWealthCache.canRefresh(86460000))
         FriendWealthCache.refresh(listOf("Alice"), 86460000)
