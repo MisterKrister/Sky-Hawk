@@ -138,7 +138,7 @@ object DungeonFriends : SkyMyceModule() {
         if (automatic) {
             if (!scanner.refreshOnOpen(now(), full)) return
         } else scanner.refresh(now(), full)
-        DungeonFriendStatsCache.refresh()
+        if (!automatic && !full) DungeonFriendStatsCache.refresh()
     }
 
     override fun tick() {

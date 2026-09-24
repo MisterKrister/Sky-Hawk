@@ -52,8 +52,8 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                 child(label(when (tab) { Tab.FRIENDS -> "§lFriends"; Tab.LENDING -> "§lWho Has My Gear?"; Tab.WEALTH -> "§lFriend Wealth" }, CYAN)
                     .horizontalSizing(Sizing.expand()))
                 refreshButton = button("Refresh", 72) {
-                    DungeonFriends.refreshFriends(full = true)
-                    if (tab == Tab.WEALTH) FriendWealthCache.refresh()
+                    if (tab == Tab.WEALTH) FriendWealthCache.refresh(DungeonFriends.scanner.all.values.map { it.name })
+                    else DungeonFriends.refreshFriends(full = true)
                     updateRows()
                 }
                 child(refreshButton)
@@ -108,14 +108,18 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
     override fun tick() {
         super.tick()
         val ledger = if (tab == Tab.LENDING) GearLending.ledger else null
-        refreshButton.active(LocationAPI.onHypixel && !DungeonFriends.scanner.scanning)
-        refreshButton.message = Component.literal(if (DungeonFriends.scanner.scanning) "Refreshing" else "Refresh")
+        val wealth = tab == Tab.WEALTH
+        val refreshing = if (wealth) !FriendWealthCache.canRefresh() else DungeonFriends.scanner.scanning
+        refreshButton.active(LocationAPI.onHypixel && !refreshing && (!wealth || FriendWealthCache.available))
+        refreshButton.message = Component.literal(if (refreshing) "Refreshing" else "Refresh")
         refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else
-            "Refresh the full friend list. Automatic refreshes are limited to once per minute; cached profile checks are reused."))
-        val status = if (LocationAPI.onHypixel) DungeonFriends.scanner.status else "Join Hypixel to refresh friends"
+            if (wealth) "Update this account's SkyBlock friends one at a time, including offline friends. Shared and provider cooldowns apply; the roster is reused."
+            else "Refresh the full friend list. Opening the menu updates online status at most once per minute and reuses the saved roster."))
+        val status = if (!LocationAPI.onHypixel) "Join Hypixel to refresh friends"
+            else if (wealth) FriendWealthCache.refreshStatus() else DungeonFriends.scanner.status
         if (scanStatus.text().string != status) scanStatus.text(Component.literal(status))
         val state = listOf(FriendWealthCache.version, DungeonFriends.scanner.all.toMap(), ledger, ledger?.trades, ledger?.error,
-            DungeonFriendsSettings.error, LocationAPI.onHypixel)
+            DungeonFriendsSettings.error, LocationAPI.onHypixel, FriendWealthCache.available)
         if (state != previous) { previous = state; updateRows() }
     }
 
@@ -196,7 +200,7 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
     private fun wealthRows(list: FlowLayout) {
         DungeonFriendsSettings.error?.let { list.child(label(it, RED).horizontalSizing(Sizing.fill())) }
         if (!FriendWealthCache.available) {
-            list.child(label("Install SkyBlockPv to load public profiles and networth estimates.", MUTED).horizontalSizing(Sizing.fill())); return
+            list.child(label("Saved estimates • reconnect to the relay or install SkyBlockPv to update.", MUTED).horizontalSizing(Sizing.fill()))
         }
         if (!LocationAPI.onHypixel) { list.child(label("Join Hypixel to view this account's friends.", MUTED)); return }
         val friends = DungeonFriends.scanner.all.values.filter { matchesFriendName(it.name, search) && FriendWealthCache.get(it.name)?.hasProfile != false }
@@ -219,8 +223,13 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
                         })
                     }
                 })
-                val status = if (FriendWealthCache.isLoading(friend.name)) "Loading public profile..." else data?.status ?: "Queued..."
+                val status = when {
+                    FriendWealthCache.isLoading(friend.name) -> "Loading public profile..."
+                    FriendWealthCache.isQueued(friend.name) -> "Queued for refresh • saved values shown until updated"
+                    else -> data?.status ?: if (FriendWealthCache.available) "Queued..." else "No saved estimate"
+                }
                 if (status.isNotEmpty()) child(label(status, MUTED).horizontalSizing(Sizing.fill()))
+                data?.let { child(label("Updated ${DATE.format(Instant.ofEpochMilli(it.fetchedAt).atZone(ZoneId.systemDefault()))}", MUTED)) }
             })
         }
     }

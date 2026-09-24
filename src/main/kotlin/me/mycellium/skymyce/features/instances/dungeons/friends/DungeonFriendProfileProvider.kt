@@ -43,10 +43,17 @@ object DungeonFriendProfileProvider {
         publicProfilePresence(fetchSkyblockerProfiles(uuid))
     }.getOrNull()
 
-    internal fun fetchViewerProfile(uuid: UUID): Any? {
-        val api = Class.forName("me.owdding.skyblockpv.api.ProfileAPI")
-        val instance = api.getField("INSTANCE").get(null)
+    internal fun fetchViewerProfile(uuid: UUID, fresh: Boolean = false): Any? =
+        fetchViewerProfile(uuid, fresh, Class.forName("me.owdding.skyblockpv.api.ProfileAPI").getField("INSTANCE").get(null))
+
+    internal fun fetchViewerProfile(uuid: UUID, fresh: Boolean, instance: Any): Any? {
+        val api = instance.javaClass
         val cached = api.getMethod("getCached", Any::class.java).invoke(instance, uuid) as? List<*>
+        if (fresh && cached != null) {
+            // The provider has no per-player invalidation. Wait for its cache rather than clearing other mods' data.
+            val ttl = (api.getMethod("getMaxCache").invoke(instance) as Number).toLong().coerceIn(1000, 300000)
+            throw ProfileLookupDeferred(System.currentTimeMillis() + ttl)
+        }
         val profiles = (cached ?: run {
             check(viewerRequests.start(System.currentTimeMillis())) { "Profile lookups are cooling down" }
             var success = false
@@ -111,6 +118,8 @@ object DungeonFriendProfileProvider {
         return duration.takeIf { it.isFinite() && it.isPositive() }?.inWholeMilliseconds
     }
 }
+
+internal class ProfileLookupDeferred(val retryAt: Long) : Exception("Waiting for the provider cache to expire")
 
 /** Both dungeon stats and wealth use the same provider budget; fallback success cannot erase a failure. */
 internal class ProfileLookupCooldown {

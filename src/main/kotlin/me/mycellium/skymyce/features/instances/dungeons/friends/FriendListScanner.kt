@@ -51,7 +51,7 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null, cachedA
     /** Shared by every menu opening; manual refreshes and the initial scan also start this cooldown. */
     fun refreshOnOpen(now: Long, full: Boolean = false): Boolean {
         if (scanning || requested || now < nextAutomaticRefresh) return false
-        refresh(now, full)
+        refresh(now, full && !hasScannedAll)
         return true
     }
 
