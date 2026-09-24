@@ -482,7 +482,11 @@ fun main() {
             pollCache(cacheTime + 2)
         }
         check(DungeonFriendStatsCache.verified("Alice") == known && DungeonFriendStatsCache.pendingCount == 0)
-        check(DungeonJoinPolicy(F7, known.sPlusTimes.getValue(F7)).accepts(DungeonFriendStatsCache.verified("Alice"), F7))
+        val policy = DungeonJoinPolicy(F7, known.sPlusTimes.getValue(F7))
+        check(policy.accepts(DungeonFriendStatsCache.verified("Alice"), F7))
+        check(policy.canRequest(null, F7) && !policy.accepts(null, F7)) // Unknown locally can ask; the host must verify.
+        check(!policy.canRequest(null, M7) && !policy.copy(open = false).canRequest(null, F7))
+        check(!policy.copy(maxPbMillis = 1).canRequest(known, F7)) // Known failing PBs stay blocked.
         check(!DungeonFriendStatsCache.receiveShared(oldRecord, "Alice", null, cacheTime + 3))
         DungeonFriendStatsCache.invalidateProfile("Alice", cacheTime + 4)
         check(!DungeonFriendStatsCache.receiveShared(fresh.getAsJsonObject("record"), "Alice", null, cacheTime + 5))
@@ -1224,6 +1228,8 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     check(!f4Context.policy.accepts(f4Stats.copy(sPlusTimes = mapOf(F4 to 420001L)), F4))
     val f4Host = DungeonFriendJoining()
     check(f4Host.receiveRequest("Self", f4Request, 0))
+    check(f4Host.nextCommand(f4Context, 1) { null } == null) // A Join click cannot bypass the host's PB check.
+    check(f4Host.nextCommand(f4Context, 1) { f4Stats.copy(sPlusTimes = mapOf(F4 to 420001L)) } == null)
     check(f4Host.nextCommand(hostContext, 1) { f4Stats } == null)
     check(f4Host.nextCommand(f4Context, 2) { f4Stats } ==
         "msg self Inviting you for F4 as Tank [SkyMyce Ready ${request.token}]")

@@ -87,7 +87,7 @@ Lookups check the shared relay cache first. Local provider lookups remain paced 
 
 In `/sm pf`, **Party** and **Invite** require a confirmed party with space and invitation permission (leader, moderator or All Invite). **Join** requires being solo and the other player's party to be available. The menu displays the invitation restriction above the friend rows and gives the specific reason on each disabled button's tooltip. Pending background stat requests do not lock the roster Refresh button.
 
-Join PB checks can use the shared relay cache even without a local profile-provider mod. Detecting or changing a SkyBlock profile rejects reports fetched before that detection; a newer shared report restores eligibility without requiring a local API lookup. Until that report arrives, Join says it is waiting for fresh PB data rather than claiming the player fails the requirement. Disabled Party Finder controls retain hover explanations.
+Join PB checks can use the shared relay cache even without a local profile-provider mod. Detecting or changing a SkyBlock profile rejects reports fetched before that detection; newer shared reports restore local PB data without requiring a local API lookup. If the joining client has no fresh PB yet, Join can send a request for the host to check. The host still requires fresh, qualifying stats before issuing an invitation; a known failing PB remains disabled locally. Disabled Party Finder controls retain hover explanations.
 
 ## Validation
 
