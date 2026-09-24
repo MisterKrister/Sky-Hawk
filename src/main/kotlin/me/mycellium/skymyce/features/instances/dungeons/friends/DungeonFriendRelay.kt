@@ -380,9 +380,9 @@ object DungeonFriendRelay {
         return lookupCache("stats_get", name, uuid)
     }
 
-    fun lookupWealth(name: String, uuid: String?, refresh: Boolean): CompletableFuture<JsonObject?>? {
+    fun lookupWealth(name: String, uuid: String?, refresh: Boolean, canFetch: Boolean): CompletableFuture<JsonObject?>? {
         if (!sharedWealthAvailable) return null
-        return lookupCache("wealth_get", name, uuid, refresh)
+        return lookupCache("wealth_get", name, uuid, refresh, canFetch)
     }
 
     /** Separate small queue so digest refreshes cannot consume party/wealth lookup slots. */
@@ -402,12 +402,17 @@ object DungeonFriendRelay {
         if (connected && rngFeedAvailable) packet(mapOf("type" to "rng_subscribe", "id" to UUID.randomUUID().toString().replace("-", ""), "enabled" to false))
     }
 
-    private fun lookupCache(type: String, name: String, uuid: String?, refresh: Boolean = false): CompletableFuture<JsonObject?>? {
+    private fun lookupCache(type: String, name: String, uuid: String?, refresh: Boolean = false, canFetch: Boolean = true): CompletableFuture<JsonObject?>? {
         if (statsRequests.size >= 8) return null
         val id = UUID.randomUUID().toString().replace("-", "")
         val future = CompletableFuture<JsonObject?>()
         statsRequests[id] = DungeonFriends.now() + 5000 to future
-        packet(buildMap { put("type", type); put("id", id); put("name", name); uuid?.let { put("uuid", it) }; if (refresh) put("refresh", true) })
+        packet(buildMap {
+            put("type", type); put("id", id); put("name", name)
+            uuid?.let { put("uuid", it) }
+            if (refresh) put("refresh", true)
+            if (type == "wealth_get") put("canFetch", canFetch)
+        })
         return future
     }
 
