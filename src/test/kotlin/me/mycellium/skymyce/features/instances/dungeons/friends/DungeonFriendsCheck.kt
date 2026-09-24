@@ -795,6 +795,7 @@ private fun checkJoinLookups() {
     check(value.networth == 1000000000.0 && value.purse == 1000.0 && value.bank == null)
     check(value.fetchedAt == 1000000L && value.expires == 1900000L)
     check(sharedFriendWealth(shared, "Bob", null, 1000100) == null)
+    check(sharedFriendWealth(shared, "OldAliceName", java.util.UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), 1000100) == value)
     check(sharedFriendWealth(shared, "Alice", java.util.UUID(0, 0), 1000100) == null)
     check(sharedFriendWealth(shared, "Alice", null, 1900000) == null)
     check(sharedFriendWealth(shared.deepCopy().apply { addProperty("fetchedAt", 1060101) }, "Alice", null, 1000100) == null)
@@ -803,6 +804,14 @@ private fun checkJoinLookups() {
     check(sharedFriendWealth(shared.deepCopy().apply { getAsJsonObject("wealth").addProperty("hasProfile", false) }, "Alice", null, 1000100) == null)
     val absentShared = shared.deepCopy().apply { add("wealth", JsonParser.parseString("""{"hasProfile":false}""")) }
     check(sharedFriendWealth(absentShared, "Alice", null, 1900000)?.hasProfile == false)
+
+    check(wealthLookupRetryAt(null, sharedAvailable = false, 1000) == 0L) // Offline relay permits local fallback.
+    check(wealthLookupRetryAt(null, sharedAvailable = true, 1000) == 6000L) // A full request queue must not bypass the shared cache.
+    check(wealthLookupRetryAt(JsonParser.parseString("""{"error":"rate_limited"}""").asJsonObject, true, 1000) == 61000L)
+    check(wealthLookupRetryAt(JsonParser.parseString("""{"retryAt":9000}""").asJsonObject, true, 1000) == 9000L)
+    check(wealthLookupRetryAt(JsonParser.parseString("""{"retryAt":9999999}""").asJsonObject, true, 1000) == 121000L)
+    check(wealthLookupRetryAt(JsonParser.parseString("""{"retryAt":"invalid"}""").asJsonObject, true, 1000) == 61000L)
+    check(wealthLookupRetryAt(JsonParser.parseString("""{"record":null,"upload":"${"a".repeat(32)}"}""").asJsonObject, true, 1000) == 0L)
 
     val cooldown = ProfileLookupCooldown()
     check(cooldown.start(1000))

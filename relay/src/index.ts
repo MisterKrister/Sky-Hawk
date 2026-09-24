@@ -13,6 +13,7 @@ type Session = {
   ip: string;
   name?: string;
   uuid?: string;
+  registered?: boolean;
   liveUpdates?: boolean;
   checking?: boolean;
   credits: number;
@@ -68,6 +69,24 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     this.wealth = new SharedWealth(ctx.storage.sql);
     this.news = new DigestNews(ctx.storage.sql, env);
     this.rng = new DigestRng(ctx.storage.sql);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS mod_users (
+      uuid TEXT PRIMARY KEY, name TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL)`);
+    // Register already-authenticated sockets on the first wake after upgrading the relay.
+    for (const ws of ctx.getWebSockets()) {
+      const session = ws.deserializeAttachment() as Session;
+      if (session.name && session.uuid && !session.registered) {
+        this.registerUser(session.uuid, session.name);
+        session.registered = true;
+        ws.serializeAttachment(session);
+      }
+    }
+  }
+
+  private registerUser(id: string, name: string): void {
+    const now = Date.now();
+    // Identity comes exclusively from verified account proofs, never wealth reports or friend lists.
+    this.ctx.storage.sql.exec(`INSERT INTO mod_users (uuid, name, first_seen, last_seen) VALUES (?, ?, ?, ?)
+      ON CONFLICT(uuid) DO UPDATE SET name = excluded.name, last_seen = excluded.last_seen`, id, name, now, now);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -115,6 +134,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
           ws.close(rejection.retryable ? 4003 : 4004, rejection.error); return;
         }
         if (ws.readyState !== WebSocket.OPEN) return;
+        this.registerUser(profile.id, profile.name);
         for (const other of this.ctx.getWebSockets()) {
           const previous = other.deserializeAttachment() as Session;
           if (other !== ws && (previous.uuid === profile.id || previous.name?.toLowerCase() === profile.name.toLowerCase())) {
@@ -123,6 +143,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         }
         session.name = profile.name;
         session.uuid = profile.id;
+        session.registered = true;
         session.liveUpdates = data.liveUpdates === true;
         session.challenge = "";
         ws.serializeAttachment(session);
@@ -216,7 +237,8 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       const now = Date.now();
       if (encoder.encode(raw).length > 2048 || typeof data.id !== "string" || !uuid.test(data.id) ||
           typeof data.name !== "string" || !username.test(data.name) ||
-          (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid)))) {
+          (data.uuid !== undefined && (typeof data.uuid !== "string" || !uuid.test(data.uuid))) ||
+          (data.canFetch !== undefined && typeof data.canFetch !== "boolean")) {
         ws.close(1008, "Invalid wealth request"); return;
       }
       session.wealthCredits = Math.min(6, (session.wealthCredits ?? 6) + (now - (session.wealthUpdated ?? now)) / 1000);
@@ -229,13 +251,21 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       if (data.type === "wealth_get") {
         const record = this.wealth.get(data.name, data.uuid as string | undefined, now, data.refresh === true);
         if (record) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record })); return; }
-        const own = session.wealthUploads.find(grant => grant.name === (data.name as string).toLowerCase() &&
+        const matches = (grant: StatsGrant) => grant.name === (data.name as string).toLowerCase() ||
+          (data.uuid !== undefined && grant.uuid === data.uuid);
+        // Cache-only viewers and clients in provider backoff must not reserve work they cannot perform.
+        if (data.canFetch === false) {
+          session.wealthUploads = session.wealthUploads.filter(grant => !matches(grant));
+          ws.serializeAttachment(session);
+          ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null })); return;
+        }
+        const own = session.wealthUploads.find(grant => matches(grant) &&
           (!grant.uuid || grant.uuid === data.uuid));
         if (own) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null, upload: own.token })); return; }
         // Socket attachments retain leases during hibernation. One client fetches each missing player.
         const owner = this.ctx.getWebSockets().filter(other => other.readyState === WebSocket.OPEN)
           .flatMap(other => ((other.deserializeAttachment() as Session).wealthUploads ?? []))
-          .find(grant => grant.name === (data.name as string).toLowerCase() && grant.expires > now);
+          .find(grant => matches(grant) && grant.expires > now);
         if (owner) { ws.send(JSON.stringify({ type: "wealth_result", id: data.id, retryAt: Math.min(owner.expires, now + 5000) })); return; }
         const grant = { name: data.name.toLowerCase(), uuid: data.uuid as string | undefined,
           token: crypto.randomUUID().replaceAll("-", ""), expires: now + 120_000 };
@@ -243,7 +273,8 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         ws.serializeAttachment(session);
         ws.send(JSON.stringify({ type: "wealth_result", id: data.id, record: null, upload: grant.token }));
       } else {
-        const grant = session.wealthUploads.find(it => it.name === (data.name as string).toLowerCase() &&
+        const grant = session.wealthUploads.find(it => (it.name === (data.name as string).toLowerCase() ||
+          (it.uuid !== undefined && it.uuid === data.uuid)) &&
           it.token === data.upload && (!it.uuid || it.uuid === data.uuid));
         const wealth = validateWealth(data.wealth);
         if (!grant || !wealth || typeof data.uuid !== "string" || !uuid.test(data.uuid) ||

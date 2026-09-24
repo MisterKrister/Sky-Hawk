@@ -32,7 +32,8 @@ data class FriendWealth(
 }
 
 internal fun sharedFriendWealth(record: JsonObject, name: String, uuid: UUID?, now: Long): FriendWealth? = runCatching {
-    if (!record.get("name").asString.equals(name, true)) return null
+    val reportedName = record.get("name").asString
+    if (!reportedName.matches(Regex("[A-Za-z0-9_]{1,16}")) || (uuid == null && !reportedName.equals(name, true))) return null
     val id = record.get("uuid").asString
     if (!id.matches(Regex("[a-f0-9]{32}")) || (uuid != null && id != uuid.toString().replace("-", ""))) return null
     val json = record.getAsJsonObject("wealth")
@@ -56,6 +57,17 @@ internal fun sharedFriendWealth(record: JsonObject, name: String, uuid: UUID?, n
     FriendWealth(money("networth"), money("purse"), money("bank"), money("wardrobe"), text("profile", 64),
         text("status", 128), minOf(fetched, now), present, resolved.toString(), minOf(fetched, now) + ttl)
 }.getOrNull()
+
+/** A busy/malformed shared lookup is not permission for every client to call the upstream API. */
+internal fun wealthLookupRetryAt(response: JsonObject?, sharedAvailable: Boolean, now: Long): Long {
+    if (!sharedAvailable) return 0L
+    return runCatching {
+        if (response == null) return now + 5000
+        val retry = response.get("retryAt")?.asLong ?: 0L
+        if (retry > now) return retry.coerceAtMost(now + 120000)
+        if (response.has("error")) now + 60000 else 0L
+    }.getOrDefault(now + 60000)
+}
 
 internal fun publicCoins(json: JsonObject?, vararg path: String): Double? = runCatching {
     var value: com.google.gson.JsonElement? = json
@@ -164,23 +176,30 @@ object FriendWealthCache {
         val knownUuid = FriendsAPI.getFriend(name)?.uuid ?: get(name)?.uuid?.let(UUID::fromString)
         val alreadyAbsent = !newlyAdded && get(name) == null && DungeonFriendStatsCache.get(name)?.state == StatsState.NO_PROFILE &&
             !friend.location.contains("SkyBlock", true) && friend.activity != FriendActivity.IN_RUN
+        val sharedAvailable = DungeonFriendRelay.sharedWealthAvailable
         val sharedLookup = DungeonFriendRelay.lookupWealth(name, knownUuid?.toString()?.replace("-", ""),
-            newlyAdded || manual || get(name)?.hasProfile == false)
+            newlyAdded || manual || get(name)?.hasProfile == false,
+            providerAvailable && now >= DungeonFriendProfileProvider.nextViewerRequest)
         Scheduling.schedule(0.seconds) {
             var retryAt = 0L
             var sharedHit = false
             var upload: String? = null
             val result = runCatching {
                 val response = sharedLookup?.get(6, TimeUnit.SECONDS)
-                retryAt = response?.get("retryAt")?.asLong?.coerceIn(0, System.currentTimeMillis() + 120000) ?: 0L
+                retryAt = wealthLookupRetryAt(response, sharedAvailable, System.currentTimeMillis())
                 if (retryAt > System.currentTimeMillis()) return@runCatching null
                 val shared = response?.get("record")?.takeIf { it.isJsonObject }?.asJsonObject
                     ?.let { sharedFriendWealth(it, name, knownUuid, System.currentTimeMillis()) }
                 if (shared != null) { sharedHit = true; return@runCatching shared }
-                upload = response?.get("upload")?.asString?.takeIf { it.matches(Regex("[a-f0-9]{32}")) }
+                upload = response?.get("upload")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }
+                    ?.asString?.takeIf { it.matches(Regex("[a-f0-9]{32}")) }
                 if (!providerAvailable) return@runCatching FriendWealth(status = "No shared estimate yet; install SkyBlockPv for local lookup")
                 if (System.currentTimeMillis() < DungeonFriendProfileProvider.nextViewerRequest) {
                     retryAt = DungeonFriendProfileProvider.nextViewerRequest
+                    return@runCatching null
+                }
+                if (sharedAvailable && upload == null) {
+                    retryAt = System.currentTimeMillis() + 5000
                     return@runCatching null
                 }
                 // The same public UUID lookup as the dungeon stats cache; no private credentials are sent.

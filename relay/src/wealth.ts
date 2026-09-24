@@ -31,7 +31,7 @@ export class SharedWealth {
 
   get(name: string, uuid: string | undefined, now: number, refresh: boolean): CachedWealth | null {
     const row = this.sql.exec<{ uuid: string; name: string; wealth: string; fetched_at: number }>(
-      "SELECT uuid, name, wealth, fetched_at FROM player_wealth WHERE name = ?", name,
+      `SELECT uuid, name, wealth, fetched_at FROM player_wealth WHERE ${uuid ? "uuid" : "name"} = ?`, uuid ?? name,
     ).toArray()[0];
     if (!row || (uuid && row.uuid !== uuid)) return null;
     const wealth = JSON.parse(row.wealth);

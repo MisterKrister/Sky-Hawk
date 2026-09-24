@@ -36,6 +36,7 @@ const options = convertV4MiniflareOptions({
   outboundService: () => { throw new Error("Account verification must not make outbound requests"); },
 });
 options.workers[0].config.env.CONNECT_LIMIT = { type: "rate-limit", namespace: "7112026", simple: { limit: 20, period: 60 } };
+options.unsafeInspectDurableObjects = true;
 const mf = new Miniflare(options);
 const sockets = [];
 function inbox(ws) {
@@ -79,6 +80,12 @@ try {
   assert.equal(unconfiguredNews.error, "not_configured"); assert.deepEqual(unconfiguredNews.items, []);
   const bob = await connect("Bob"); bob.authenticate(); assert.equal((await bob.next()).type, "ready");
   const carol = await connect("Carol", "testing"); carol.authenticate({ ...proof("Carol", carol.challenge), liveUpdates: true }); await carol.next();
+  const storage = await mf.unsafeGetDurableObjectStorage("relay-check", "RelayRoom", { name: "friends" });
+  const users = () => storage.exec("SELECT * FROM mod_users ORDER BY name");
+  const registered = await users();
+  assert.deepEqual(registered.map(row => row.name), ["Alice", "Bob"]);
+  assert.deepEqual(Object.keys(registered[0]).sort(), ["first_seen", "last_seen", "name", "uuid"]);
+  assert.equal(registered[0].uuid, identities.get("Alice"));
   let cacheId = 100;
   async function cache(client, data) {
     client.ws.send(JSON.stringify({ id: (cacheId++).toString(16).padStart(32, "0"), ...data }));
@@ -105,10 +112,14 @@ try {
   assert.equal((await cache(bob, { ...lookup, uuid: identities.get("Alice") })).record, null);
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   assert.deepEqual((await cache(bob, lookup)).record.stats, stats); // SQLite survives hibernation.
+  assert.deepEqual(await users(), registered); // Hibernation must neither lose users nor rewrite their timestamps.
   const wealthLookup = { type: "wealth_get", name: "Bob", uuid: identities.get("Bob") };
+  const cacheOnly = await cache(bob, { ...wealthLookup, canFetch: false });
+  assert.equal(cacheOnly.record, null);
+  assert.equal(cacheOnly.upload, undefined); // A mod without the provider cannot monopolize an empty cache.
   const wealthGrant = await cache(alice, wealthLookup);
   assert.match(wealthGrant.upload, /^[a-f0-9]{32}$/);
-  assert.ok((await cache(bob, wealthLookup)).retryAt > Date.now()); // Only one client calls the provider on a miss.
+  assert.ok((await cache(bob, { ...wealthLookup, name: "OldBobName" })).retryAt > Date.now()); // UUID aliases share one fetch.
   assert.equal((await cache(alice, wealthLookup)).upload, wealthGrant.upload); // Reuse a lease after local API backoff.
   await mf.unsafeEvictDurableObject("relay-check", "RelayRoom", { name: "friends", webSockets: "hibernate" });
   assert.ok((await cache(bob, wealthLookup)).retryAt > Date.now());
@@ -120,18 +131,20 @@ try {
   assert.equal((await cache(alice, { ...wealthEntry, wealth: { ...wealth, purse: -1 } })).error, "invalid_upload");
   assert.equal((await cache(alice, { ...wealthEntry, fetchedAt: Date.now() - 900001 })).error, "invalid_upload");
   assert.equal((await cache(alice, wealthEntry)).stored, true);
-  const wealthHit = await cache(bob, wealthLookup);
+  const wealthHit = await cache(bob, { ...wealthLookup, name: "OldBobName", canFetch: false });
   assert.equal(wealthHit.record.wealth.networth, wealth.networth);
   assert.equal(wealthHit.record.wealth.inventory, undefined);
   assert.equal(wealthHit.upload, undefined);
   assert.ok(Buffer.byteLength(JSON.stringify(wealthHit.record)) < 1024);
   assert.equal((await cache(carol, wealthLookup)).record, null); // No wealth data crosses rooms.
   alice.ws.send("ping"); assert.equal(await alice.next(), "pong"); // No room-wide wealth broadcasts.
+  await new Promise(resolve => setTimeout(resolve, 1100)); // Refill one credit after the extra cache-only lookup.
   const absentLookup = { type: "wealth_get", name: "NoProfile", uuid: "e".repeat(32) };
   const absentGrant = await cache(bob, absentLookup);
   assert.equal((await cache(bob, { ...absentLookup, type: "wealth_put", upload: absentGrant.upload,
     wealth: { hasProfile: false }, fetchedAt: Date.now() })).stored, true);
   assert.equal((await cache(bob, absentLookup)).record.wealth.hasProfile, false);
+  assert.deepEqual((await users()).map(row => row.name), ["Alice", "Bob"]); // Looking up friends never registers them as mod users.
   const olderLookup = { type: "wealth_get", name: "Older", uuid: "f".repeat(32) };
   const olderGrant = await cache(carol, olderLookup);
   assert.equal((await cache(carol, { ...olderLookup, type: "wealth_put", upload: olderGrant.upload,
@@ -219,12 +232,17 @@ try {
   const blocked = closeEvent(unauth.ws);
   unauth.ws.send(JSON.stringify({ type: "message", id, to: "Carol", text: "not authenticated" }));
   assert.equal((await blocked).code, 1008);
+  const testingStorage = await mf.unsafeGetDurableObjectStorage("relay-check", "RelayRoom", { name: "testing" });
+  assert.deepEqual((await testingStorage.exec("SELECT name FROM mod_users")).map(row => row.name), ["Carol"]);
   const closed = closeEvent(bob.ws);
   bob.ws.send(JSON.stringify({ type: "message", id: "3".repeat(32), to: "Alice", text: "x".repeat(2050) }));
   assert.equal((await closed).code, 1009);
   assert.equal((await policies(alice, ["Bob"])).parties.bob, null); // Disconnected hosts are not advertised.
   const modernBob = await connect("Bob");
   modernBob.authenticate({ ...proof("Bob", modernBob.challenge), liveUpdates: true }); await modernBob.next();
+  const returningBob = (await users()).find(row => row.uuid === identities.get("Bob"));
+  assert.equal(returningBob.first_seen, registered[1].first_seen);
+  assert.ok(returningBob.last_seen > registered[1].last_seen);
   const selfRefresh = await cache(modernBob, lookup);
   assert.deepEqual(selfRefresh.record.stats, stats); assert.match(selfRefresh.upload, /^[a-f0-9]{32}$/);
   const improved = { ...entry, stats: { ...stats, sPlusTimes: { F7: 290000 } }, fetchedAt: Date.now(), upload: selfRefresh.upload };
@@ -286,13 +304,34 @@ try {
   const displaced = closeEvent(burstRecipient.ws);
   const replacement = await connect("Bob", "testing"); replacement.authenticate(); await replacement.next();
   assert.equal((await displaced).code, 4001);
+  const bobUsers = await testingStorage.exec("SELECT * FROM mod_users WHERE uuid = ?", identities.get("Bob"));
+  assert.equal(bobUsers.length, 1); // Reconnect updates one row, never adds another user.
+  assert.ok(bobUsers[0].last_seen >= bobUsers[0].first_seen);
+  const releaseLookup = { type: "wealth_get", name: "RefreshTarget", uuid: "d".repeat(32) };
+  const released = await cache(alice, releaseLookup);
+  assert.match(released.upload, /^[a-f0-9]{32}$/);
+  assert.equal((await cache(alice, { ...releaseLookup, canFetch: false })).upload, undefined);
+  const reassigned = await cache(modernBob, releaseLookup);
+  assert.match(reassigned.upload, /^[a-f0-9]{32}$/);
+  assert.notEqual(reassigned.upload, released.upload); // Provider backoff releases the slot for another user.
+  assert.equal((await cache(alice, { ...releaseLookup, type: "wealth_put", upload: released.upload,
+    wealth, fetchedAt: Date.now() })).error, "invalid_upload");
+  assert.equal((await cache(modernBob, { ...releaseLookup, type: "wealth_put", name: "RenamedTarget",
+    upload: reassigned.upload, wealth, fetchedAt: Date.now() })).stored, true);
+  assert.equal((await cache(alice, { ...releaseLookup, canFetch: false })).record.wealth.networth, wealth.networth);
   const spam = closeEvent(alice.ws);
   for (let i = 0; i < 15; i++) alice.ws.send(JSON.stringify({ type: "message", id: i.toString(16).padStart(32, "0"), to: "Offline", text: "rate test" }));
   assert.equal((await spam).code, 1008);
   const cleanClose = closeEvent(carol.ws);
   carol.ws.close(1000, "Diagnostic complete");
   assert.equal((await cleanClose).code, 1000);
-  console.log("Relay checks passed: signed account proof, shared stats and wealth, refresh leases, bounded payloads, hibernation, receipts, isolation, and limits.");
+  identities.set("RenamedBob", identities.get("Bob"));
+  const renamed = await connect("RenamedBob", "testing"); renamed.authenticate(); await renamed.next();
+  const renamedUsers = await testingStorage.exec("SELECT * FROM mod_users WHERE uuid = ?", identities.get("Bob"));
+  assert.equal(renamedUsers.length, 1);
+  assert.equal(renamedUsers[0].name, "RenamedBob");
+  assert.equal(renamedUsers[0].first_seen, bobUsers[0].first_seen);
+  console.log("Relay checks passed: authenticated user registry, shared stats and wealth, refresh leases, bounded payloads, hibernation, receipts, isolation, and limits.");
 } finally {
   for (const ws of sockets) { try { ws.close(); } catch {} }
   await mf.dispose();
