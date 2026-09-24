@@ -8,6 +8,8 @@ import io.wispforest.owo.ui.container.FlowLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.themed
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.NumberUtils.condense
 import net.minecraft.network.chat.Component
@@ -41,11 +43,11 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
 
     override fun build(root: FlowLayout) {
         DungeonFriendsSettings.load()
-        root.surface(Surface.blur(3f, 10f).and(Surface.flat(0x66090D12)))
+        root.surface(HudTheme.backdrop)
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(UIContainers.verticalFlow(Sizing.fixed(panelWidth), Sizing.fixed(minOf(430, height - 24))).apply {
             padding(Insets.of(12)); gap(8)
-            surface(Surface.flat(0xF510171E.toInt()).and(Surface.outline(0xFF2C3944.toInt())))
+            surface(HudTheme.panel())
             child(row().apply {
                 child(label(when (tab) { Tab.FRIENDS -> "§lFriends"; Tab.LENDING -> "§lWho Has My Gear?"; Tab.WEALTH -> "§lFriend Wealth" }, CYAN)
                     .horizontalSizing(Sizing.expand()))
@@ -227,15 +229,15 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
     private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text)).color(Color.ofRgb(color)).shadow(false)
     private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(6); verticalAlignment(VerticalAlignment.CENTER) }
     private fun card() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
-        gap(6); padding(Insets.of(6)); surface(Surface.flat(0xFF17212A.toInt()))
+        gap(6); padding(Insets.of(6)); surface(HudTheme.panel(true))
     }
     private fun button(text: String, width: Int, action: () -> Unit) = UIComponents.button(Component.literal(text)) { action() }.apply {
         sizing(Sizing.fixed(width), Sizing.fixed(18)); textShadow(false)
-        renderer(ButtonComponent.Renderer.flat(0xFF1D2933.toInt(), 0xFF304B5B.toInt(), 0xFF151C23.toInt()))
+        themed()
     }
     private fun rebuild() { uiAdapter.rootComponent.clearChildren(); build(uiAdapter.rootComponent); uiAdapter.inflateAndMount() }
     companion object {
-        private const val CYAN = 0x67CCF2
+        private val CYAN get() = HudTheme.ACCENT
         private const val WHITE = 0xEDF3F7
         private const val MUTED = 0x91A2AF
         private const val RED = 0xF18C8C

@@ -1,6 +1,10 @@
 package me.mycellium.skymyce.features.digest
 
-import com.teamresourceful.resourcefulconfig.api.client.ResourcefulConfigScreen
+import me.mycellium.skymyce.config.SettingsScreen
+import me.mycellium.skymyce.config.SettingsTab
+import me.mycellium.skymyce.hud.themed
+import io.wispforest.owo.ui.component.DropdownComponent
+import net.minecraft.client.gui.screens.ChatScreen
 import io.wispforest.owo.ui.base.BaseOwoScreen
 import io.wispforest.owo.ui.component.ButtonComponent
 import io.wispforest.owo.ui.component.LabelComponent
@@ -42,7 +46,7 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
     private lateinit var footer: LabelComponent
     private lateinit var refresh: ButtonComponent
     private val layout get() = DigestLayout.fit(width, height, DailyDigestConfig.compact)
-    private val accent get() = DailyDigestConfig.accent.color
+    private val accent get() = HudTheme.ACCENT
     private val compactOverview get() = page == null && (DailyDigestConfig.compact || height < 300)
     private val mergedHeader get() = compactOverview && layout.width >= 400
 
@@ -68,11 +72,11 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
         previous = DailyDigest.view()
         cards.clear()
         clocks.clear()
-        root.surface(Surface.flat(0xB0090D12.toInt()))
+        root.surface(HudTheme.backdrop)
         root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
         root.child(UIContainers.verticalFlow(Sizing.fixed(layout.width), Sizing.fixed(layout.height)).apply {
             padding(Insets.of(layout.padding)); gap(layout.gap)
-            surface(Surface.flat(0xF510171E.toInt()).and(Surface.outline(0xFF000000.toInt() or HudTheme.BORDER)))
+            surface(HudTheme.panel())
             child(row().apply {
                 child(label("SKY-HAWK  /  ${if (mergedHeader) "DIGEST" else pageTitle()}", accent).apply { horizontalSizing(Sizing.expand()) })
                 if (mergedHeader) { child(refreshButton()); child(settingsButton()) }
@@ -233,7 +237,7 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
         if (page == "rng") {
             target.child(label(if (community) "Community-reported • unverified" else "Detected on this account and profile • stored locally", HudTheme.PURPLE))
             if (community && !DailyDigestConfig.receiveRng) {
-                target.child(empty("Community feed is off", "Enable receiving in Settings → General → Daily Digest. Sharing your own drops is a separate option."))
+                target.child(empty("Community feed is off", "Enable receiving in Settings → Social & Sharing. Sharing your own drops is a separate option."))
                 return
             }
         }
@@ -272,7 +276,7 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
         entry.timestamp?.let { stamp -> child(clock(HudTheme.MUTED) { "${timestamp(stamp)}  •  ${digestRelativeTime(stamp, System.currentTimeMillis())}" }) }
         entry.until?.let { until -> child(clock(tone(entry.tone), until) { digestTimeRemaining(until, System.currentTimeMillis()) }) }
         entry.slots.take(7).forEach { slot -> child(column().apply {
-            padding(Insets.of(7)); gap(4); surface(Surface.flat(0x5510171E))
+            padding(Insets.of(7)); gap(4); surface(HudTheme.panel(true))
             child(label(digestText(slot.title, 200), tone(slot.tone)))
             if (slot.summary.isNotBlank()) child(label(digestText(slot.summary, 200), HudTheme.MUTED))
             slot.until?.let { until -> child(clock(tone(slot.tone), until) { digestTimeRemaining(until, System.currentTimeMillis()) }) }
@@ -296,6 +300,16 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
         digestLink(entry.url)?.let { uri -> child(button("Open source", 90) {
             ConfirmLinkScreen.confirmLinkNow(this@DailyDigestScreen, uri)
         }.tip("Open ${uri.host} in your browser after confirmation")) }
+        if (page == "rng") child(UIComponents.button(Component.literal("Share…")) { anchor ->
+            val report = digestShareText(entry)
+            DropdownComponent.openContextMenu(this@DailyDigestScreen, uiAdapter.rootComponent, { root, menu -> root.child(menu) },
+                anchor.x.toDouble(), (anchor.y + anchor.height).toDouble()) { menu ->
+                menu.surface(HudTheme.panel())
+                menu.button(Component.literal("Party chat…")) { MC.instance.setScreen(ChatScreen("/pc $report", false)) }
+                menu.button(Component.literal("Guild chat…")) { MC.instance.setScreen(ChatScreen("/gc $report", false)) }
+                menu.button(Component.literal("Copy report")) { MC.instance.keyboardHandler.clipboard = report; menu.parent()?.removeChild(menu) }
+            }
+        }.themed().apply { sizing(Sizing.fixed(66), Sizing.fixed(20)); tip("Choose Party, Guild or Copy. Chat opens a draft for you to review and send; nothing is sent automatically.") })
     }
 
     private fun newsFilters() = row().apply {
@@ -316,8 +330,8 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
 
     private fun settingsButton() = button("Settings", if (mergedHeader) 54 else 64) {
         returningFromSettings = true
-        MC.instance.setScreen(ResourcefulConfigScreen.make(SkyMyce.config).withParent(this@DailyDigestScreen).build())
-    }.tip("General → Daily Digest: automatic opening, news, privacy and appearance")
+        MC.instance.setScreen(SettingsScreen(this@DailyDigestScreen, if (page == "rng") SettingsTab.SOCIAL else SettingsTab.GENERAL))
+    }.tip("Automatic opening and news in General; RNG privacy in Social & Sharing; global colors in Theme & Appearance")
 
     private fun navigate(next: String?) { page = next; historyPage = 0; rebuild() }
     private fun resetList() { historyPage = 0; updateContent() }
@@ -348,12 +362,12 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
     }
     private fun column() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply { gap(layout.gap) }
     private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(6); verticalAlignment(VerticalAlignment.CENTER) }
-    private fun cardSurface(): Surface = Surface.flat(((DailyDigestConfig.cardOpacity.coerceIn(75, 100) * 255 / 100) shl 24) or HudTheme.CARD)
+    private fun cardSurface(): Surface = HudTheme.panel(true)
     private fun card() = column().apply { padding(Insets.of(if (DailyDigestConfig.compact) 8 else 11)); gap(7); surface(cardSurface()) }
     private fun empty(title: String, body: String) = card().apply { child(label(title, HudTheme.MUTED)); child(label(body, HudTheme.MUTED)) }
     private fun button(text: String, width: Int, action: () -> Unit) = UIComponents.button(Component.literal(text)) { action() }.apply {
         sizing(Sizing.fixed(width), Sizing.fixed(20)); textShadow(false)
-        renderer(ButtonComponent.Renderer.flat(0xFF1D2933.toInt(), 0xFF304B5B.toInt(), 0xFF151C23.toInt()))
+        themed()
     }
 
     companion object {

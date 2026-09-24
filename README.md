@@ -4,6 +4,8 @@ Sky-Hawk is a modern Fabric mod for Hypixel SkyBlock built to streamline the gri
 
 Open the in-game config with `/skymyce` or `/sm`.
 
+Settings now use five searchable categories with expandable advanced options and shared accent/opacity controls. See the [settings and Party Finder matcher guide](docs/settings-party-finder.md).
+
 ## Why play with Sky-Hawk?
 
 Sky-Hawk is designed for players who want a smoother SkyBlock experience without sacrificing clarity or speed. Instead of forcing you to memorize every timer, state, or action, it quietly surfaces the information you need and automates the repetitive parts of the game.
@@ -41,6 +43,9 @@ From dungeon prep and chest safety to party coordination and daily tracking, Sky
   Lets you bind quick slot swaps while in your wardrobe or loadout, making equipment changes feel immediate.
 
 ### Instance & Dungeon Features
+
+- **Party Finder Matcher**
+  Dims chest listings that do not match your selected classes or floor-specific PB requirements. Slots remain visible and clickable; matching does not join parties automatically.
 
 - Notify Missing Players  
   Warns you when players are missing when joining an instance, helping prevent disorganized or failed runs.

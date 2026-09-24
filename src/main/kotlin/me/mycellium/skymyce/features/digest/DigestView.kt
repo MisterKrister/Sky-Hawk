@@ -40,6 +40,13 @@ data class DigestView(
     val revision: Long = 0,
 )
 
+/** Plain bounded report text only; never invent a public URL or dispatch a chat message here. */
+fun digestShareText(entry: DigestEntry): String {
+    val suffix = if (entry.community) " [unverified]" else ""
+    return "[Sky-Hawk] ${entry.title} • ${entry.summary} (${entry.activity})"
+        .replace(Regex("§."), "").filter { it >= ' ' && it != '\u007f' }.take(240 - suffix.length) + suffix
+}
+
 /** Logical GUI pixels, so Minecraft's selected GUI scale applies without another transform. */
 data class DigestLayout(val width: Int, val height: Int, val padding: Int, val gap: Int, val columns: Int) {
     val contentWidth get() = (width - padding * 2 - 4).coerceAtLeast(1)

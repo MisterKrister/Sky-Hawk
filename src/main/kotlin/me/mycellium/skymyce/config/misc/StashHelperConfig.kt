@@ -13,6 +13,7 @@ object StashHelperConfig : CategoryKt("Stash Helper") {
 
     val stashHelper by boolean(true) {
         name = TranslatableValue.literal("Enabled")
+        description = TranslatableValue.literal("Use the configured value threshold to filter low-value stash items.")
     }
 
     val stashValueThreshold by double(0.1) {

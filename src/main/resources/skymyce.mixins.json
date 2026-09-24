@@ -6,7 +6,8 @@
     "AbstractContainerScreenMixin"
   ],
   "client": [
-    "LabelComponentMixin"
+    "LabelComponentMixin",
+    "ResourcefulConfigScreenBuilderMixin"
   ],
   "injectors": {
     "defaultRequire": 1

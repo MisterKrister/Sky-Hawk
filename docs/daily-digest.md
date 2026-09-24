@@ -40,6 +40,8 @@ Before configuration, the news card says that the bridge is unavailable. The res
 
 **Sharing and receiving are both off by default.** These are independent settings. Public Minecraft names are also off by default; anonymous reports display `Anonymous`. Enabling sharing never uploads old history.
 
+RNG privacy controls are under **Social & Sharing → Daily Digest**. News and automatic opening remain under **General → Daily Digest**. Shared colors and panel opacity are under **Theme & Appearance**. Each history entry has a **Share…** menu for Party/Guild chat drafts or copying a text report; drafts are never sent automatically.
+
 The initial detector supports seven rare dungeon items (Necron's Handle, Giant's Sword, Dark Claymore, Shadow Fury, and the three Wither scrolls) and three Slayer drops (Warden Heart, Judgement Core, Overflux Capacitor). Dungeon announcements require a matching increase in carried inventory count before publication; a reward preview alone is insufficient. Ordinary loot is ignored. Kuudra and fishing are not claimed as supported until a reliable acquisition detector is added.
 
 Only a random/deterministic event identifier, allowed item ID, activity category, occurrence time, and name-visibility preference are submitted through the existing authenticated relay. The server supplies the authenticated public name or `Anonymous` and publishes a separate opaque event ID. Minecraft's signed account proof is reused; Hypixel credentials are not required.

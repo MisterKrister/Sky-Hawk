@@ -6,6 +6,8 @@ import me.mycellium.skymyce.config.instances.InstancesConfig
 import me.mycellium.skymyce.config.instances.dungeons.DungeonsConfig
 import me.mycellium.skymyce.config.mining.MiningConfig
 import me.mycellium.skymyce.config.misc.GeneralConfig
+import me.mycellium.skymyce.config.misc.ThemeConfig
+import me.mycellium.skymyce.config.instances.dungeons.PartyFinderConfig
 import org.lwjgl.glfw.GLFW
 
 object Config : ConfigKt("SkyMyce Config") {
@@ -16,6 +18,8 @@ object Config : ConfigKt("SkyMyce Config") {
         category(InstancesConfig)
         category(DungeonsConfig)
         category(MiningConfig)
+        category(PartyFinderConfig)
+        category(ThemeConfig)
     }
 
     var openConfigKey by key(GLFW.GLFW_KEY_RIGHT_SHIFT) {
