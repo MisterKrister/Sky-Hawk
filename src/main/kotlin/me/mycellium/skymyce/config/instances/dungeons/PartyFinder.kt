@@ -4,6 +4,15 @@ import me.mycellium.skymyce.SkyMyceModule
 import me.mycellium.skymyce.utils.Utils.displayDevMessage
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
 import me.mycellium.skymyce.features.instances.dungeons.friends.parseDungeonClass
+import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendStatsCache
+import me.mycellium.skymyce.features.instances.dungeons.partyOpenClasses
+import me.mycellium.skymyce.features.instances.dungeons.partyMatches
+import me.mycellium.skymyce.api.events.RenderSlotEvent
+import me.mycellium.skymyce.utils.MC
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
+import tech.thatgravyboat.skyblockapi.api.events.screen.ContainerCloseEvent
+import tech.thatgravyboat.skyblockapi.api.events.screen.InventoryChangeEvent
+import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonClass
 import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 import net.minecraft.core.component.DataComponents
@@ -24,9 +33,47 @@ data class PartyListing(
     val note: String?,
     val memberClasses: Map<String, DungeonClass> = emptyMap(),
     val floor: DungeonFloor? = null,
+    val openClasses: Set<DungeonClass>? = null,
 )
 
 object PartyFinder : SkyMyceModule() {
+    private var screen: AbstractContainerScreen<*>? = null
+    private val listings = mutableMapOf<Int, PartyListing>()
+    private val dimmed = mutableSetOf<Int>()
+    private var statsRevision = -1L
+
+    fun invalidateMatcher() { statsRevision = -1 }
+
+    private fun updateMatcher() {
+        val self = MC.instance.player ?: return
+        val stats = DungeonFriendStatsCache.get(self.name.string)
+        val classes = PartyFinderConfig.classes.toSet().ifEmpty { stats?.selectedClass?.let(::setOf).orEmpty() }
+        dimmed.clear()
+        listings.values.forEach { listing ->
+            if (!partyMatches(listing, classes, listing.floor?.let { stats?.completionTimes?.get(it) },
+                    PartyFinderConfig.matchClass, PartyFinderConfig.matchPb)) dimmed += listing.slotIndex
+        }
+        statsRevision = DungeonFriendStatsCache.version
+    }
+
+    @Subscription fun onSlotChanged(event: InventoryChangeEvent) {
+        if (event.screen !== screen || event.isInPlayerInventory || event.slot.index !in 10..43) return
+        val listing = if (event.item.item == Items.PLAYER_HEAD) parsePartyItem(event.slot.index, event.item) else null
+        if (listing == null) listings.remove(event.slot.index) else listings[event.slot.index] = listing
+        invalidateMatcher()
+    }
+
+    @Subscription fun onClose(event: ContainerCloseEvent) {
+        screen = null; listings.clear(); dimmed.clear(); invalidateMatcher()
+    }
+
+    @Subscription fun onRender(event: RenderSlotEvent.After) {
+        if (!PartyFinderConfig.enabled || !LocationAPI.isOnSkyBlock || screen == null || MC.screen !== screen) return
+        if (statsRevision != DungeonFriendStatsCache.version) updateMatcher()
+        if (event.slot.index !in dimmed || screen?.menu?.slots?.getOrNull(event.slot.index) !== event.slot) return
+        event.graphics.fill(event.slot.x, event.slot.y, event.slot.x + 16, event.slot.y + 16, 0xA0181B20.toInt())
+    }
+
     @Subscription(priority = Subscription.LOW)
     fun onListingClick(event: SlotClickEvent) {
         if (!event.title.startsWith("Party Finder", true) || event.isInPlayerInventory || event.slot.index !in 10..43) return
@@ -37,10 +84,18 @@ object PartyFinder : SkyMyceModule() {
     @Subscription
     fun onContainerOpen(event: ContainerInitializedEvent) {
         val title = event.title.trim()
+        screen = null; listings.clear(); dimmed.clear(); invalidateMatcher()
 
         if (title.startsWith("Party Finder", ignoreCase = true)) {
             displayDevMessage("[PartyFinder] Detected container: title='$title', slots=${event.containerSlots.size}")
             val listings = parsePartyListings(event)
+            if (LocationAPI.isOnSkyBlock) {
+                screen = event.screen
+                this.listings.putAll(listings.associateBy { it.slotIndex })
+                if (PartyFinderConfig.enabled) MC.instance.player?.let {
+                    DungeonFriendStatsCache.request(it.name.string, it.uuid, priority = true)
+                }
+            }
             displayDevMessage("[PartyFinder] Parsed ${listings.size} listing(s): $listings")
             DungeonFriends.onListings(listings)
         }
@@ -111,7 +166,8 @@ fun partyListingFromLore(slotIndex: Int, leaderUuid: UUID?, loreLines: List<Stri
         }
     }
 
-    return PartyListing(slotIndex, leaderName ?: return null, leaderUuid, members, note, classes, partyListingFloor(loreLines))
+    return PartyListing(slotIndex, leaderName ?: return null, leaderUuid, members, note, classes, partyListingFloor(loreLines),
+        partyOpenClasses(loreLines, classes.values))
 }
 
 fun partyListingFloor(lines: List<String>): DungeonFloor? {
