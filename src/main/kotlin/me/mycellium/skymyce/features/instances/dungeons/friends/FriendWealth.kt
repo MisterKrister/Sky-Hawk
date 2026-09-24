@@ -86,6 +86,16 @@ object FriendWealthCache {
     val busy get() = loading != null
     fun get(name: String) = entries[name.lowercase()]
     fun isLoading(name: String) = loading == name.lowercase()
+    fun isQueued(name: String) = name.lowercase() in manualRefresh
+    fun canRefresh(now: Long = System.currentTimeMillis()) = manualRefresh.isEmpty() && now >= nextManualRefresh
+
+    fun refreshStatus(now: Long = System.currentTimeMillis()): String = when {
+        !available -> "Offline • showing saved wealth"
+        busy -> "Updating $loading • ${manualRefresh.size} queued"
+        manualRefresh.isNotEmpty() -> "Waiting for API/cache cooldown • ${manualRefresh.size} queued"
+        now < nextManualRefresh -> "Refresh requested • available again in ${(nextManualRefresh - now + 999) / 1000}s"
+        else -> "Saved wealth • refresh checks SkyBlock friends one at a time"
+    }
 
     fun initialize(file: Path) {
         try {
@@ -108,12 +118,20 @@ object FriendWealthCache {
 
     fun checkNewFriend(name: String) { newFriends += name.lowercase() }
 
-    fun refresh() {
-        val now = System.currentTimeMillis()
-        if (now < nextManualRefresh) return
+    fun refresh(friends: Collection<String>, now: Long = System.currentTimeMillis()) {
+        if (!canRefresh(now)) return
         nextManualRefresh = now + 60000
-        manualRefresh += entries.filterValues { it.hasProfile == true }.keys
+        manualRefresh += friends.map { it.lowercase() }.filter { get(it)?.hasProfile != false }
         version++
+    }
+
+    internal fun finishAttempt(name: String, retryable: Boolean, now: Long) {
+        val key = name.lowercase()
+        waiting.remove(key)
+        if (retryable) waiting[key] = now + 60000
+        // One pass per click: a broken profile must not keep jumping ahead of the remaining friends.
+        newFriends.remove(key)
+        manualRefresh.remove(key)
     }
 
     fun tick(friends: Collection<OnlineDungeonFriend>, online: Set<String>) {
@@ -121,6 +139,9 @@ object FriendWealthCache {
         if (!available || busy) return
         val now = System.currentTimeMillis()
         if (now < nextRequest || (!DungeonFriendRelay.sharedWealthAvailable && now < DungeonFriendProfileProvider.nextViewerRequest)) return
+        val roster = friends.mapTo(mutableSetOf()) { it.name.lowercase() }
+        manualRefresh.retainAll(roster)
+        newFriends.retainAll(roster)
         val candidates = friends.filter { it.name.matches(Regex("[A-Za-z0-9_]{1,16}")) && now >= (waiting[it.name.lowercase()] ?: 0L) }
         candidates.forEach { friend ->
             val key = friend.name.lowercase()
@@ -137,13 +158,14 @@ object FriendWealthCache {
             } ?: return
         val name = friend.name
         val newlyAdded = name.lowercase() in newFriends
+        val manual = name.lowercase() in manualRefresh
         loading = name.lowercase()
         version++
         val knownUuid = FriendsAPI.getFriend(name)?.uuid ?: get(name)?.uuid?.let(UUID::fromString)
         val alreadyAbsent = !newlyAdded && get(name) == null && DungeonFriendStatsCache.get(name)?.state == StatsState.NO_PROFILE &&
             !friend.location.contains("SkyBlock", true) && friend.activity != FriendActivity.IN_RUN
         val sharedLookup = DungeonFriendRelay.lookupWealth(name, knownUuid?.toString()?.replace("-", ""),
-            newlyAdded || name.lowercase() in manualRefresh || get(name)?.hasProfile == false)
+            newlyAdded || manual || get(name)?.hasProfile == false)
         Scheduling.schedule(0.seconds) {
             var retryAt = 0L
             var sharedHit = false
@@ -156,7 +178,8 @@ object FriendWealthCache {
                     ?.let { sharedFriendWealth(it, name, knownUuid, System.currentTimeMillis()) }
                 if (shared != null) { sharedHit = true; return@runCatching shared }
                 upload = response?.get("upload")?.asString?.takeIf { it.matches(Regex("[a-f0-9]{32}")) }
-                if (providerAvailable && System.currentTimeMillis() < DungeonFriendProfileProvider.nextViewerRequest) {
+                if (!providerAvailable) return@runCatching FriendWealth(status = "No shared estimate yet; install SkyBlockPv for local lookup")
+                if (System.currentTimeMillis() < DungeonFriendProfileProvider.nextViewerRequest) {
                     retryAt = DungeonFriendProfileProvider.nextViewerRequest
                     return@runCatching null
                 }
@@ -168,9 +191,12 @@ object FriendWealthCache {
                     require(id.matches(Regex("[a-fA-F0-9]{32}")))
                     UUID.fromString(id.replace(Regex("(.{8})(.{4})(.{4})(.{4})(.{12})"), "$1-$2-$3-$4-$5"))
                 }
-                (if (alreadyAbsent) FriendWealth(hasProfile = false, status = "No SkyBlock profile") else fetch(uuid))
+                (if (alreadyAbsent) FriendWealth(hasProfile = false, status = "No SkyBlock profile") else fetch(uuid, manual))
                     .copy(uuid = uuid.toString())
-            }.getOrElse { FriendWealth(status = "API unavailable or rate limited; retrying later") }
+            }.getOrElse {
+                if (it is ProfileLookupDeferred) { retryAt = it.retryAt; null }
+                else FriendWealth(status = "API unavailable or rate limited; retrying later")
+            }
             MC.instance.execute {
                 loading = null
                 if (result == null) {
@@ -179,10 +205,8 @@ object FriendWealthCache {
                     version++
                     return@execute
                 }
-                waiting.remove(name.lowercase())
                 val retryable = result.hasProfile == null || result.status == "SkyBlock profile found; wealth data unavailable"
-                if (retryable) waiting[name.lowercase()] = System.currentTimeMillis() + 60000
-                else { newFriends.remove(name.lowercase()); manualRefresh.remove(name.lowercase()) }
+                finishAttempt(name, retryable, System.currentTimeMillis())
                 nextRequest = System.currentTimeMillis() + if (sharedHit) 1000 else if (result.hasProfile == null) 60000 else 10000
                 val previous = entries[name.lowercase()]
                 entries[name.lowercase()] = if (retryable && previous?.hasProfile != null)
@@ -199,9 +223,10 @@ object FriendWealthCache {
         }
     }
 
-    private fun fetch(uuid: UUID): FriendWealth {
-        val profile = try { DungeonFriendProfileProvider.fetchViewerProfile(uuid) }
+    private fun fetch(uuid: UUID, fresh: Boolean): FriendWealth {
+        val profile = try { DungeonFriendProfileProvider.fetchViewerProfile(uuid, fresh) }
         catch (failure: Exception) {
+            if (failure is ProfileLookupDeferred) throw failure
             // Some providers reject Hypixel's valid profiles:null response; verify it through the raw provider.
             val present = DungeonFriendProfileProvider.profilePresence(uuid) ?: throw failure
             return FriendWealth(hasProfile = present, status = if (present) "SkyBlock profile found; wealth data unavailable" else "No SkyBlock profile")
@@ -212,15 +237,17 @@ object FriendWealthCache {
         }
     }
 
-    private fun fromProfile(profile: Any): FriendWealth {
+    internal fun fromProfile(profile: Any): FriendWealth {
         val backing = read(profile, "getBackingProfile") ?: error("No profile")
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
-        fun await(value: Any?) = (value as CompletableFuture<*>).get(
-            (deadline - System.nanoTime()).coerceAtLeast(1), TimeUnit.NANOSECONDS)
-        val currency = await(read(backing, "getCurrency"))
-        val banking = await(read(backing, "getBank"))
+        fun await(instance: Any, getter: String) = runCatching {
+            (read(instance, getter) as CompletableFuture<*>).get(
+                (deadline - System.nanoTime()).coerceAtLeast(1), TimeUnit.NANOSECONDS)
+        }.getOrNull()
+        val currency = await(backing, "getCurrency")
+        val banking = await(backing, "getBank")
         val member = currency?.let { read(it, "getJson") as? JsonObject }
-        val inventory = if (hasPublicInventory(member)) await(read(backing, "getInventory")) else null
+        val inventory = if (hasPublicInventory(member)) await(backing, "getInventory") else null
         val purse = publicCoins(member, "currencies", "coin_purse")
         val bankJson = banking?.let { read(it, "getJson") as? JsonObject }
         val personal = banking?.let { read(it, "getMember") as? JsonObject }
@@ -228,22 +255,27 @@ object FriendWealthCache {
             it + (publicCoins(personal, "profile", "bank_account") ?: 0.0)
         }
         val total = if (inventory != null && bank != null && purse != null) {
-            val result = await(read(profile, "getNetWorth")) as Pair<*, *>
-            (result.first as Number).toDouble().takeIf { it.isFinite() && it >= 0 }
+            val result = await(profile, "getNetWorth") as? Pair<*, *>
+            (result?.first as? Number)?.toDouble()?.takeIf { it.isFinite() && it >= 0 }
         } else null
-        val wardrobe = inventory?.let { read(it, "getLoadouts") }?.let { loadouts ->
-            val sets = read(loadouts, "getArmorSets") as Map<*, *>
-            val items = sets.values.filterNotNull().flatMap { read(it, "getStacks") as List<*> }
-                .filterIsInstance<ItemStack>().filterNot { it.isEmpty }
-            val values = items.map { it.getItemValue() }
-            // Missing market prices must not make an unpriced wardrobe appear worthless.
-            if (values.any { it.rawPrice <= 0 }) null else values.sumOf { it.price.toDouble() }
-        }
+        val wardrobe = runCatching {
+            inventory?.let { read(it, "getLoadouts") }?.let { loadouts ->
+                val sets = read(loadouts, "getArmorSets") as Map<*, *>
+                val items = sets.values.filterNotNull().flatMap { read(it, "getStacks") as List<*> }
+                    .filterIsInstance<ItemStack>().filterNot { it.isEmpty }
+                val values = items.map { it.getItemValue() }
+                // Missing market prices must not make an unpriced wardrobe appear worthless.
+                if (values.any { it.rawPrice <= 0 }) null else values.sumOf { it.price.toDouble() }
+            }
+        }.getOrNull()
         val profileName = read(profile, "getId")?.let { read(it, "getName") as? String }.orEmpty()
         return FriendWealth(total, purse, bank, wardrobe, profileName, when {
-            inventory == null -> "Inventory API disabled"
-            bank == null -> "Bank API disabled; total unavailable"
+            member == null -> "Public balances unavailable; retry later"
+            !hasPublicInventory(member) -> "Inventory API disabled"
+            inventory == null -> "Inventory calculation unavailable; showing public balances"
+            bank == null -> "Bank API unavailable or disabled; total unavailable"
             purse == null -> "Purse unavailable; total unavailable"
+            total == null -> "Networth calculation unavailable; showing public balances"
             wardrobe == null -> "Wardrobe or some item prices unavailable"
             else -> ""
         }, hasProfile = true)

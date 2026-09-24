@@ -34,6 +34,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     private var seenPartyRevision = DungeonFriends.partyRevision
     private lateinit var results: ScrollContainer<FlowLayout>
     private lateinit var partyStatus: LabelComponent
+    private lateinit var actionStatus: LabelComponent
     private lateinit var listStatus: LabelComponent
     private lateinit var floorButton: ButtonComponent
     private lateinit var classButton: ButtonComponent
@@ -86,6 +87,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             button.active(reason == null)
             button.tooltip(Component.literal(reason ?: tooltip))
         }
+        val actionReason = DungeonFriends.actionUnavailable.orEmpty()
+        if (actionStatus.text().string != actionReason) actionStatus.text(Component.literal(actionReason))
         DungeonFriendRelay.requestPolicies(DungeonFriends.scanner.online.values.map { it.name })
         joinActions.forEach { (button, friend) ->
             val reason = DungeonFriends.joinUnavailable(friend, floor)
@@ -104,7 +107,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         val percent = refreshProgress.update(DungeonFriendStatsCache.completedCount, remaining,
             DungeonFriends.scanner.completedPages, DungeonFriends.scanner.remainingPages)
         refreshButton.message = Component.literal(if (refreshing || percent == 100) "${if (refreshing) "§b" else ""}Refresh $percent%" else "Refresh")
-        refreshButton.active(LocationAPI.onHypixel && !refreshing)
+        refreshButton.active(LocationAPI.onHypixel && !DungeonFriends.scanner.scanning)
         refreshButton.tooltip(Component.literal(if (!LocationAPI.onHypixel) "Join Hypixel to refresh" else buildString {
             append(DungeonFriends.scanner.status)
             if (remaining > 0) append("\n$remaining player stats remaining")
@@ -213,6 +216,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
             // Match the list's scrollbar gutter so headers align with row values.
             margins(Insets.right(4))
         })
+        actionStatus = label(DungeonFriends.actionUnavailable.orEmpty(), 0xE8BF71).apply { horizontalSizing(Sizing.fill()) }
+        child(actionStatus)
         results = UIContainers.verticalScroll(Sizing.fill(), Sizing.expand(), UIContainers.verticalFlow(Sizing.fill(), Sizing.content())).apply {
             scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(CYAN)))
             scrollbarThiccness(2)

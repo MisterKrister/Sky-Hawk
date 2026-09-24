@@ -77,6 +77,16 @@ The unified RNG action lives in [`DailyDigestScreen.kt`](../src/main/kotlin/me/m
 
 No packet manipulation, new dependency or new API client is needed. The existing container mixin supplies `RenderSlotEvent.After`. A narrow Resourceful Config builder mixin routes only Sky-Hawk's configuration to the same settings screen, including Mod Menu's existing factory.
 
+## Friends and wealth refresh
+
+`/sm friends` keeps a saved roster per Minecraft account. The first scan discovers everyone, including offline friends. Later menu openings update online status at most once per minute and stop at offline entries. **Refresh** on the Friends tab explicitly rescans the whole roster to find additions or removals made while the mod was closed.
+
+**Refresh** on Friend Wealth reuses that roster and queues known SkyBlock players and unchecked friends, including offline players. Confirmed non-SkyBlock friends stay cached; newly added friends are checked separately. Repeated clicks cannot restart an active pass. The status line shows the active lookup or the remaining queue, and each estimate shows its update time. Failed profiles do not block the rest of a manual pass; successful public balances remain visible when inventory or networth calculations fail.
+
+Lookups check the shared relay cache first. Local provider lookups remain paced at least ten seconds apart, with backoff on API failures. A manual refresh can wait up to SkyBlockPv's five-minute profile cache lifetime before fetching fresh data; it does not clear that mod's cache or relabel an old profile as a fresh response. Shared records already fetched within one minute can be reused. Reopening the menu does not start another wealth refresh.
+
+In `/sm pf`, **Party** and **Invite** require a confirmed party with space and invitation permission (leader, moderator or All Invite). **Join** requires being solo and the other player's party to be available. The menu displays the invitation restriction above the friend rows and gives the specific reason on each disabled button's tooltip. Pending background stat requests do not lock the roster Refresh button.
+
 ## Validation
 
 `gradlew.bat --offline build` runs the existing `dungeonFriendsCheck` and `hudCheck` tasks, including new parser/class/PB boundary checks, normal/Master floor isolation, configuration coverage and tooltips, preserved configuration paths, hex validation, horizontal layout and bounded sharing text. Previous Digest, friends, lending and HUD checks also run.
