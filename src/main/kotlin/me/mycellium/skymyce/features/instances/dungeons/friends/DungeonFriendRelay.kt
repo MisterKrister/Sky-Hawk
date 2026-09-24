@@ -97,6 +97,14 @@ object DungeonFriendRelay {
     private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
     private val deliveries = RelayDeliveries()
     private val statsRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    private val digestRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    var digestNewsAvailable = false
+        private set
+    var rngFeedAvailable = false
+        private set
+    var onDigestEvent: ((JsonObject) -> Unit)? = null
+    var onDigestReady: (() -> Unit)? = null
+    var onDigestClosed: (() -> Unit)? = null
     private val partyPolicies = mutableMapOf<String, Pair<Long, PartyPolicy?>>()
     private var policiesAvailable = false
     private var policyRequest: Pair<String, List<String>>? = null
@@ -138,6 +146,7 @@ object DungeonFriendRelay {
         if (now >= policyDeadline) policyRequest = null
         deliveries.tick(now)
         statsRequests.filterValues { it.first <= now }.keys.toList().forEach { statsRequests.remove(it)?.second?.complete(null) }
+        digestRequests.filterValues { it.first <= now || it.second.isCancelled }.keys.toList().forEach { digestRequests.remove(it)?.second?.complete(null) }
         if ((connecting || socket != null) && now >= deadline) failed("Relay timed out; reconnecting")
         if (connected && now >= nextPing) { packet("ping"); nextPing = now + 45000 }
         if (socket != null || connecting || now < retry.nextAttempt) return
@@ -160,7 +169,7 @@ object DungeonFriendRelay {
                 webSocket.request(1)
             }
             override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean): CompletionStage<*>? {
-                if (text.length + data.length > 8192) {
+                if (text.length + data.length > 65536) {
                     MC.instance.execute { if (token == generation) failed("Relay sent an oversized message") }
                     return null
                 }
@@ -168,11 +177,17 @@ object DungeonFriendRelay {
                 if (last) {
                     val message = text.toString()
                     text.setLength(0)
+                    // Decode bounded news/history packets on the WebSocket executor, never during a client tick.
+                    val decoded = if (message == "pong") null else runCatching {
+                        JsonParser.parseString(message).asJsonObject.also {
+                            check(message.length <= 8192 || it.get("type")?.asString in setOf("digest_news_result", "rng_result"))
+                        }
+                    }
                     MC.instance.execute {
                         if (token == generation) {
                             deadline = DungeonFriends.now() + if (connected) 90000 else 30000
                             if (message != "pong") runCatching {
-                                val json = JsonParser.parseString(message).asJsonObject
+                                val json = decoded!!.getOrThrow()
                                 when (json.get("type")?.asString) {
                                     "challenge" -> {
                                         check(!authenticating && !connected && json.get("protocol")?.asInt == 2)
@@ -222,12 +237,15 @@ object DungeonFriendRelay {
                                         sharedStatsAvailable = json.get("statsCache")?.asBoolean == true
                                         sharedWealthAvailable = json.get("wealthCache")?.asBoolean == true
                                         policiesAvailable = json.get("partyPolicies")?.asBoolean == true
+                                        digestNewsAvailable = json.get("digestNews")?.asBoolean == true
+                                        rngFeedAvailable = json.get("rngFeed")?.asBoolean == true
                                         retry.reset()
                                         stage = "connected"
                                         deadline = DungeonFriends.now() + 90000
                                         nextPing = DungeonFriends.now() + 45000
                                         status = "Relay connected"
                                         SkyMyce.logger.info("[Dungeon relay] Connected")
+                                        onDigestReady?.invoke()
                                     }
                                     "message", "ack" -> {
                                         check(connected)
@@ -246,6 +264,8 @@ object DungeonFriendRelay {
                                         }
                                     }
                                     "stats_result", "wealth_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
+                                    "digest_news_result", "rng_result" -> { check(connected); runCatching { digestRequests.remove(json.get("id").asString)?.second?.complete(json) } }
+                                    "rng_event" -> { check(connected); runCatching { onDigestEvent?.invoke(json) } }
                                     "stats_update" -> {
                                         check(connected)
                                         val record = json.getAsJsonObject("record")
@@ -353,6 +373,23 @@ object DungeonFriendRelay {
         return lookupCache("wealth_get", name, uuid, refresh)
     }
 
+    /** Separate small queue so digest refreshes cannot consume party/wealth lookup slots. */
+    fun digestRequest(type: String, fields: Map<String, Any> = emptyMap()): CompletableFuture<JsonObject?>? {
+        digestRequests.entries.removeIf { it.value.second.isDone }
+        if (!connected || digestRequests.size >= 4 || type !in setOf("digest_news_get", "rng_subscribe", "rng_publish")) return null
+        if (type == "digest_news_get" && !digestNewsAvailable || type != "digest_news_get" && !rngFeedAvailable) return null
+        val id = UUID.randomUUID().toString().replace("-", "")
+        val future = CompletableFuture<JsonObject?>()
+        digestRequests[id] = DungeonFriends.now() + 12000 to future
+        packet(fields + mapOf("type" to type, "id" to id))
+        return future
+    }
+
+    /** Privacy opt-out cannot wait for a free request slot. Its optional receipt is deliberately untracked. */
+    fun disableRngFeed() {
+        if (connected && rngFeedAvailable) packet(mapOf("type" to "rng_subscribe", "id" to UUID.randomUUID().toString().replace("-", ""), "enabled" to false))
+    }
+
     private fun lookupCache(type: String, name: String, uuid: String?, refresh: Boolean = false): CompletableFuture<JsonObject?>? {
         if (statsRequests.size >= 8) return null
         val id = UUID.randomUUID().toString().replace("-", "")
@@ -434,6 +471,8 @@ object DungeonFriendRelay {
         connected = false
         sharedStatsAvailable = false
         sharedWealthAvailable = false
+        digestNewsAvailable = false
+        rngFeedAvailable = false
         policiesAvailable = false
         partyPolicies.clear()
         policyRequest = null
@@ -443,6 +482,9 @@ object DungeonFriendRelay {
         nextPolicyUpdate = 0L
         statsRequests.values.forEach { it.second.complete(null) }
         statsRequests.clear()
+        digestRequests.values.forEach { it.second.complete(null) }
+        digestRequests.clear()
+        onDigestClosed?.invoke()
         connecting = false
         authenticating = false
         stage = "idle"

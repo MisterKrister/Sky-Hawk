@@ -8,6 +8,7 @@
 
 # Features
 ## General
+- **Daily Digest (/sm digest)**: A cached, once-per-local-day dashboard for news, mayor/events, personal dailies and optional RNG activity. See the [Daily Digest guide](docs/daily-digest.md) for tracking, privacy, settings and news setup.
 - **Client Info Widget**: Shows client info as a widget
 - **Auto Refill**:  Automatically refill items from your sack when you run out of them
 - **Skill XP Widget**: Moves the XP gain from your action bar to a widget

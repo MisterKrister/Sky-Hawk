@@ -2,8 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 import { verifyAccount } from "./auth";
 import { classes, SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
 import { SharedWealth, WEALTH_TTL, validateWealth } from "./wealth";
+import { DigestNews, DigestRng, type DigestConfig } from "./digest";
 
-type RelayEnv = Env;
+type RelayEnv = Env & DigestConfig;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
 type Session = {
   started?: number;
@@ -27,6 +28,9 @@ type Session = {
   party?: JoinPolicy;
   partyCredits?: number;
   partyUpdated?: number;
+  rngSubscribed?: boolean;
+  digestCredits?: number;
+  digestUpdated?: number;
 };
 const username = /^[A-Za-z0-9_]{1,16}$/;
 const uuid = /^[a-f0-9]{32}$/;
@@ -55,11 +59,15 @@ export default {
 export class RelayRoom extends DurableObject<RelayEnv> {
   private readonly stats: SharedStats;
   private readonly wealth: SharedWealth;
+  private readonly news: DigestNews;
+  private readonly rng: DigestRng;
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     this.stats = new SharedStats(ctx.storage.sql);
     this.wealth = new SharedWealth(ctx.storage.sql);
+    this.news = new DigestNews(ctx.storage.sql, env);
+    this.rng = new DigestRng(ctx.storage.sql);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -118,8 +126,47 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.liveUpdates = data.liveUpdates === true;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true, digestNews: true, rngFeed: true }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
+      return;
+    }
+
+    if (data.type === "digest_news_get" || data.type === "rng_subscribe" || data.type === "rng_publish") {
+      const now = Date.now();
+      if (encoder.encode(raw).length > 1024 || typeof data.id !== "string" || !uuid.test(data.id)) {
+        ws.close(1008, "Invalid digest request"); return;
+      }
+      const type = data.type === "digest_news_get" ? "digest_news_result" : "rng_result";
+      session.digestCredits = Math.min(6, (session.digestCredits ?? 6) + (now - (session.digestUpdated ?? now)) / 5000);
+      session.digestUpdated = now;
+      const allowed = session.digestCredits >= 1;
+      if (allowed) session.digestCredits--;
+      // Turning receiving off is always honored, even after a burst of requests.
+      if (data.type === "rng_subscribe" && data.enabled === false) session.rngSubscribed = false;
+      ws.serializeAttachment(session);
+      if (!allowed) { ws.send(JSON.stringify({ type, id: data.id, error: "rate_limited", retryAt: now + 5000 })); return; }
+      if (data.type === "digest_news_get") {
+        if (data.source !== "game" && data.source !== "alpha") { ws.send(JSON.stringify({ type, id: data.id, error: "invalid_source" })); return; }
+        const result = await this.news.get(data.source);
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, id: data.id, ...result }));
+      } else if (data.type === "rng_subscribe") {
+        if (typeof data.enabled !== "boolean") { ws.send(JSON.stringify({ type, id: data.id, error: "invalid_subscription" })); return; }
+        session.rngSubscribed = data.enabled;
+        ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type, id: data.id, events: data.enabled ? this.rng.recent(now) : [] }));
+      } else {
+        const result = this.rng.publish(session.uuid!, session.name, data, now);
+        ws.send(JSON.stringify({ type, id: data.id, stored: result.stored, ...(result.error ? { error: result.error } : {}) }));
+        if (result.event) {
+          const packet = JSON.stringify({ type: "rng_event", event: result.event });
+          for (const peer of this.ctx.getWebSockets()) {
+            const recipient = peer.deserializeAttachment() as Session;
+            if (peer !== ws && peer.readyState === WebSocket.OPEN && recipient.name && recipient.rngSubscribed) {
+              try { peer.send(packet); } catch { /* Recipient disconnected during delivery. */ }
+            }
+          }
+        }
+      }
       return;
     }
 

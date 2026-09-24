@@ -6,6 +6,7 @@ import me.mycellium.skymyce.features.general.AutoRefill
 
 object GeneralConfig : CategoryKt("General") {
     init {
+        category(DailyDigestConfig)
         category(PartyCommandsConfig)
         category(StashHelperConfig)
         category(WardrobeConfig)
