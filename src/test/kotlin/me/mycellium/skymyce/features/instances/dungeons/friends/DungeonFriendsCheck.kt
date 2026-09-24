@@ -986,16 +986,22 @@ private fun checkMenuRefresh() {
 
     val cached = listOf(OnlineDungeonFriend("Alice", "in SkyBlock"), OnlineDungeonFriend("Bob", "Offline"), OnlineDungeonFriend("Carol", "Offline"))
     val social = FriendListScanner(cached.take(1), cached)
-    check(social.refreshOnOpen(0, full = true))
-    check(social.tick(0) == "friend list 1")
-    social.receive("Friends (Page 1 of 34)\nAlice is in SkyBlock\nBob is offline\n--------------------", 1)
-    check(!social.scanning && social.tick(1201) == null && "carol" in social.all)
-    social.refresh(2000, full = true) // Explicit roster refresh still checks everyone, including offline removals.
-    social.tick(2000)
-    social.receive("Friends (Page 1 of 2)\nAlice is in SkyBlock\nBob is offline\n--------------------", 2001)
-    check(social.tick(3201) == "friend list 2")
-    social.receive("Friends (Page 2 of 2)\nDave is offline\n--------------------", 3202)
+    FriendWealthCache.refresh(social.all.keys, 100000000)
+    check(FriendWealthCache.isQueued("Carol")) // Offline players come from the saved roster.
+    check(social.tick(100000000) == null && !social.scanning)
+    FriendWealthCache.refresh(social.all.keys, 100060000)
+    check(social.tick(100060000) == null) // A wealth refresh never starts or advances a friends-list scan.
+    social.all.keys.forEach { FriendWealthCache.finishAttempt(it, retryable = false, now = 100060000) }
+    check(social.savedAllFriends!!.toList() == cached)
+    check(social.refreshOnOpen(100060000, full = true)) // Only the Party Finder status refresh requests a scan.
+    check(social.tick(100060000) == "friend list 1")
+    social.receive("Friends (Page 1 of 34)\nAlice is in SkyBlock\nBob is offline\n--------------------", 100060001)
+    check(!social.scanning && social.tick(100061201) == null && "carol" in social.all)
+    social.notification("Dave", true) // Add/remove notices maintain the cache without another scan.
+    social.remove("Carol")
     check("carol" !in social.all && "dave" in social.all)
+    check(social.savedAllFriends!!.map { it.name }.toSet() == setOf("Alice", "Bob", "Dave"))
+    check(social.tick(100063201) == null)
 }
 
 private fun checkWealthRefresh() {

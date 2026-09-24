@@ -48,7 +48,7 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null, cachedA
         }
     }
 
-    /** Shared by every menu opening; manual refreshes and the initial scan also start this cooldown. */
+    /** Party Finder opening cooldown; manual status refreshes and the initial scan also start it. */
     fun refreshOnOpen(now: Long, full: Boolean = false): Boolean {
         if (scanning || requested || now < nextAutomaticRefresh) return false
         refresh(now, full && !hasScannedAll)
@@ -199,7 +199,7 @@ class FriendListScanner(cached: Collection<OnlineDungeonFriend>? = null, cachedA
             status = "Background scan paused after manual command"
             return
         }
-        // Party Finder stops at offline entries; the social menu scans the entire roster.
+        // Status checks stop at offline entries; only the initial cache load needs the full roster.
         if ((!scanAll && offlineSeen) || page >= lastPage) {
             online.keys.retainAll(seen)
             if (scanAll) {

@@ -79,7 +79,9 @@ No packet manipulation, new dependency or new API client is needed. The existing
 
 ## Friends and wealth refresh
 
-`/sm friends` keeps a saved roster per Minecraft account. The first scan discovers everyone, including offline friends. Later menu openings update online status at most once per minute and stop at offline entries. **Refresh** on the Friends tab explicitly rescans the whole roster to find additions or removals made while the mod was closed.
+`/sm friends` uses the saved roster for this Minecraft account. Opening Friends, Lending or Wealth never requests the friends list. **Refresh** on Friends and Lending redraws the local data; Wealth Refresh checks only players already in that roster. Friend-add/remove notifications maintain the cache without rescanning.
+
+Only the Party Finder status checker issues friend-list commands. It populates a missing complete cache once, including offline friends; after that, status checks stop at offline entries and preserve the rest of the cached roster. Opening `/sm pf` refreshes status at most once per minute. With background scanning disabled, open Party Finder to populate a missing cache. Offline roster changes made while the mod is closed may remain undetected until a later friend notification or status check sees them; social refreshes do not perform a full rescan.
 
 **Refresh** on Friend Wealth reuses that roster and queues only missing or expired estimates, including offline players. Estimates updated less than 24 hours ago are skipped. Confirmed non-SkyBlock friends stay cached; newly added friends also reuse recent estimates. Repeated clicks cannot restart an active pass. The status line shows the active lookup or the remaining queue, and each estimate shows its original update time. Failed profiles do not block the rest of a manual pass; successful public balances remain visible when inventory or networth calculations fail.
 
