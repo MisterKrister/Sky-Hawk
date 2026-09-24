@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.seconds
 
-internal const val FRIEND_WEALTH_TTL = 900000L
+internal const val FRIEND_WEALTH_TTL = 86400000L
 
 data class FriendWealth(
     val networth: Double? = null, val purse: Double? = null, val bank: Double? = null,
@@ -178,7 +178,7 @@ object FriendWealthCache {
             !friend.location.contains("SkyBlock", true) && friend.activity != FriendActivity.IN_RUN
         val sharedAvailable = DungeonFriendRelay.sharedWealthAvailable
         val sharedLookup = DungeonFriendRelay.lookupWealth(name, knownUuid?.toString()?.replace("-", ""),
-            newlyAdded || manual || get(name)?.hasProfile == false,
+            manual || get(name)?.hasProfile == false,
             providerAvailable && now >= DungeonFriendProfileProvider.nextViewerRequest)
         Scheduling.schedule(0.seconds) {
             var retryAt = 0L

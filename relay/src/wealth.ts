@@ -1,4 +1,4 @@
-export const WEALTH_TTL = 900_000;
+export const WEALTH_TTL = 86_400_000;
 export const ABSENT_TTL = 604_800_000;
 export type CachedWealth = { name: string; uuid: string; wealth: Record<string, unknown>; fetchedAt: number };
 
