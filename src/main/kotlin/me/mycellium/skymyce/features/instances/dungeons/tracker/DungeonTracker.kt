@@ -1,7 +1,6 @@
 package me.mycellium.skymyce.features.instances.dungeons.tracker
 
 import com.google.gson.JsonElement
-import com.mojang.serialization.Codec
 import com.mojang.serialization.JsonOps
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.SkyMyceModule
@@ -32,11 +31,11 @@ import tech.thatgravyboat.skyblockapi.api.remote.api.SkyBlockId
 import tech.thatgravyboat.skyblockapi.utils.Scheduling
 import java.util.UUID
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
 object DungeonTracker : SkyMyceModule() {
     val saveFile = SkyMyce.configPath.resolve("dungeon_tracker.json").toFile()
-    val CODEC: Codec<MutableMap<DungeonFloor, FloorTracker>> = Codec.unboundedMap(
-        Codec.STRING.xmap({ DungeonFloor.valueOf(it) }, { it.name }), FloorTracker.CODEC).xmap({ it.toMutableMap() }, { it })
     val profitData = mutableMapOf<DungeonFloor, FloorTracker>()
     var revision = 0L
         private set
@@ -54,13 +53,11 @@ object DungeonTracker : SkyMyceModule() {
             MC.instance.execute { storageStatus = "Save failed • previous totals retained"; revision++ }
         })
         Scheduling.schedule(0.milliseconds) {
-            val json = file.read()
-            val parsed = runCatching { if (json == null) mutableMapOf() else CODEC.parse(JsonOps.INSTANCE, json).result().orElseThrow() }
-            runCatching { if (json != null) file.preserveOriginal("before-acquisitions") }
+            val parsed = runCatching { readDungeonTotals(file) }
             MC.instance.execute {
                 writable = parsed.isSuccess && !file.damaged
                 if (writable) profitData.putAll(parsed.getOrThrow())
-                loaded = true; storageStatus = if (writable) "All-time totals • legacy records have no account or date" else "Legacy totals unreadable • original preserved"
+                loaded = true; storageStatus = if (writable) "All-time totals • legacy records have no account or date" else "Could not load or repair totals • original preserved"
                 val work = queued.toList(); queued.clear(); if (writable) work.forEach { it() }; revision++
             }
         }
@@ -73,7 +70,7 @@ object DungeonTracker : SkyMyceModule() {
     }
     fun save() {
         if (!loaded || !writable) return
-        val json = CODEC.encodeStart(JsonOps.INSTANCE, profitData).result().orElse(null) ?: return
+        val json = dungeonTotalsCodec.encodeStart(JsonOps.INSTANCE, profitData).result().orElse(null) ?: return
         revision++; writer.submit(json)
     }
 
@@ -81,6 +78,7 @@ object DungeonTracker : SkyMyceModule() {
     private val xpRegex = Regex("^\\s*\\+([\\d,.]+) (.+) Experience(?: \\(Team Bonus\\))?$")
     private var session = UUID.randomUUID().toString()
     private var run: DungeonRunRecord? = null
+    private var runStarted: TimeMark? = null
     var currentFloor: DungeonFloor? = null
         private set
     private data class PendingChest(val event: DungeonChestOpenEvent, val context: AcquisitionContext, val baseline: Map<String, Int>, val time: Long)
@@ -89,16 +87,19 @@ object DungeonTracker : SkyMyceModule() {
     private var pendingReroll: PendingReroll? = null
 
     @Subscription fun onDungeonQueue(event: DungeonPartyFinderQueueEvent) { currentFloor = event.floor }
-    @Subscription fun onDungeonEnter(event: DungeonEnterEvent) { currentFloor = event.floor; pendingChest = null; pendingReroll = null }
+    @Subscription fun onDungeonEnter(event: DungeonEnterEvent) {
+        currentFloor = event.floor; run = null; runStarted = null; pendingChest = null; pendingReroll = null
+    }
     @Subscription fun onDungeonStart(event: DungeonStartEvent) {
         val context = AcquisitionRepository.currentContext() ?: return
         val floor = DungeonAPI.dungeonFloor ?: currentFloor ?: return
         currentFloor = floor
+        runStarted = TimeSource.Monotonic.markNow()
         run = DungeonRunRecord(UUID.randomUUID().toString(), session, context, floor.name, startedAt = System.currentTimeMillis())
         if (DungeonTrackerConfig.dungeonTracker) AcquisitionRepository.run(run!!)
     }
     @Subscription(ProfileChangeEvent::class, ServerDisconnectEvent::class) fun resetContext() {
-        run = null; session = UUID.randomUUID().toString(); currentFloor = null; pendingChest = null; pendingReroll = null
+        run = null; runStarted = null; session = UUID.randomUUID().toString(); currentFloor = null; pendingChest = null; pendingReroll = null
     }
 
     @Subscription @OnlyIn(SkyBlockIsland.THE_CATACOMBS)
@@ -108,10 +109,11 @@ object DungeonTracker : SkyMyceModule() {
         val floor = DungeonFloor.entries.find { it.name == active.floor } ?: return
         val now = System.currentTimeMillis()
         if (floorRegex.matches(event.text) && active.completedAt == null) {
-            val duration = active.startedAt?.let { (now - it).takeIf { elapsed -> elapsed in 1..86400000 } }
+            val duration = dungeonRunDuration(runStarted)
+            runStarted = null
             run = active.copy(completedAt = now, duration = duration)
             AcquisitionRepository.run(run!!)
-            aggregate { val data = profitData.getOrPut(floor) { FloorTracker() }; data.totalRuns++; data.totalTimeMillis += duration ?: 0 }
+            aggregate { profitData.getOrPut(floor) { FloorTracker() }.recordRun(duration) }
         }
         xpRegex.matchEntire(event.text)?.let { match ->
             val amount = match.groupValues[1].replace(",", "").toDoubleOrNull()?.takeIf { it.isFinite() && it in 0.0..1e12 } ?: return

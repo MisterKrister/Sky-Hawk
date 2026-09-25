@@ -27,6 +27,10 @@ Open `/sm dungeon` or `/skymyce dungeon`. The four views share floor/mode contro
 
 All-time totals preserve the original aggregate save, including its lack of account ownership. They are explicitly labeled **unscoped** and cannot honestly be split into historical profiles/dates/sessions. Choose **Current profile**, **All local profiles**, or **Unscoped legacy** for timestamped history. Offline, All local profiles and Unscoped legacy remain available. Normal and Master floors stay separate.
 
+Older builds could add time since 1970 when a completion arrived without a start, producing roughly 20,000 days. On load, negative totals or totals exceeding one day per recorded run are treated as invalid. Before changing anything, the exact save is copied to `dungeon_tracker.json.before-time-repair`. Only the invalid time total is reset; run counts, loot, chest/reroll costs, valuables, XP and other floors are preserved. An additive `timedRuns` field distinguishes unknown historical durations from newly measured runs. Repair is idempotent and runs off the render thread through the existing atomic file writer. If the backup or repair fails, the original remains and recording pauses.
+
+New run durations use a monotonic clock, separate from the calendar timestamps stored for date filtering. Missing starts cannot contribute elapsed time, and entering a new dungeon clears the previous run's clock. Timing appears as **Unknown** until a valid duration is recorded, then as partial with the number of timed runs. Averages use only timed runs; all-time XP/profit/runs per hour remain unavailable when their historical time is incomplete. Historical duration cannot be reconstructed from aggregate-only saves, so it is never estimated from today's time or from average PBs.
+
 New runs store detected account UUID, available profile UUID/name, main/alpha server, session ID, floor, timestamps, duration and detected XP. New chest records require a matching inventory receipt after the existing chest action. Clicking a chest alone does not create an acquisition. Kismet usage requires a matching inventory decrease. Essence-only receipts cannot currently be verified by a physical inventory increase and are left unrecorded rather than invented. Prices are estimates captured at acquisition, not guaranteed sale proceeds. Run-level reroll costs cannot be apportioned to a chest-type filter.
 
 ## One personal acquisition archive
@@ -51,7 +55,7 @@ In `/sm hud`, right-click a widget to edit only its theme. Reset restores inheri
 | --- | --- |
 | `config/SkyMyce Config.jsonc` | Existing Resourceful schema/keys, additive theme/cosmetics fields; atomic queued saves retain unknown preferences. Original `.json`/`.jsonc` copied once to `.before-theme-v1` before loading/migration. |
 | `config/skymyce/widgets.json` | Existing layout fields retained; nullable `theme` added; original preserved before upgrade. |
-| `config/skymyce/dungeon_tracker.json` | Original aggregate format retained; existing data is not rewritten into fabricated runs. |
+| `config/skymyce/dungeon_tracker.json` | Aggregate format retained with optional `timedRuns`; invalid duration totals repaired after preserving `.before-time-repair`. No fabricated historical runs. |
 | `config/skymyce/acquisitions.json` | Version-1 permanent personal archive; source tracker/Digest files copied to `.before-acquisitions` before import. |
 | `config/skymyce/tracker_view.json` | Remembered view/filter preferences. |
 | `config/skymyce/auction_searches.json` | Version-1 search/filter/favorites preferences. |

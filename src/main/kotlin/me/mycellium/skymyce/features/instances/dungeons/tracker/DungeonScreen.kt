@@ -187,7 +187,8 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>(Component.literal("Sky-Hawk Dung
     private fun overview(content: FlowLayout) {
         pageLabel.text(Component.literal("Overview").withColor(HudTheme.MUTED))
         val s = view.summary
-        val values = listOf("Runs" to s.runs.toString(), "Tracked time" to duration(s.time), "Average run" to (s.average?.toLong()?.let(::duration) ?: "Unknown"),
+        val values = listOf("Runs" to s.runs.toString(), "Tracked time${if (s.timedRuns < s.runs) " (partial)" else ""}" to
+            (if (s.timedRuns == 0L && s.runs > 0) "Unknown" else duration(s.time)), "Average run" to (s.average?.toLong()?.let(::duration) ?: "Unknown"),
             "Net profit${if (s.incompleteValues) " (partial)" else ""}" to money(s.net), "Gross value${if (s.incompleteValues) " (known only)" else ""}" to money(s.gross),
             "Chest costs" to money(s.chestCost), "Reroll costs" to money(s.rerollCost), "Catacombs XP" to money(s.cataXp), "Chests / rerolls" to "${s.chests} / ${s.rerolls}")
         val columns = (bodyWidth / 180).coerceIn(1, 3)
@@ -197,6 +198,7 @@ class DungeonScreen : BaseOwoScreen<FlowLayout>(Component.literal("Sky-Hawk Dung
             })
         } }) }
         s.classXp.forEach { (name, xp) -> content.child(label("$name XP: ${money(xp)}", HudTheme.MUTED)) }
+        if (s.timedRuns < s.runs) content.child(label("Time known for ${s.timedRuns}/${s.runs} completed runs. Average uses only timed runs; missing historical durations are not estimated.", HudTheme.YELLOW))
         content.child(label(if (view.usingLegacy) "Legacy totals preserve the original save. Account, date, session and per-acquisition prices were not recorded. Average uses aggregate time/runs; observed loot rates are unavailable." else
             "Only confirmed inventory receipts appear as chest acquisitions. Average uses completed runs with known duration. Values are estimates recorded at acquisition; unknown values remain unknown. Reroll costs cannot be split by chest type.", HudTheme.MUTED))
         content.child(label(AcquisitionRepository.status, HudTheme.MUTED)); content.child(label(DungeonTracker.storageStatus, HudTheme.MUTED))

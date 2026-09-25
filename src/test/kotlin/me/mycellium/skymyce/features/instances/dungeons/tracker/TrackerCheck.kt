@@ -7,6 +7,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 
 fun checkTracker() {
+    checkDungeonTiming()
     check(safeAverage(0.0, 0) == null && safeAverage(Double.NaN, 1) == null && safeAverage(100.0, 2) == 50.0)
     val context = AcquisitionContext("a".repeat(32), "b".repeat(32), "Apple")
     val other = context.copy(profileId = "c".repeat(32), profileName = "Pear")

@@ -42,25 +42,23 @@ object DungeonTrackerWidget : SkyMyceModule() {
             else -> {
                 lines += "§8/skymyce dungeon"
                 lines += ""
-                lines +=
-                    "§7Time: §e${stats.totalTimeMillis.milliseconds.inWholeSeconds.seconds}§7 (§e${
-                        (stats.totalTimeMillis / stats.totalRuns.coerceAtLeast(
-                            1
-                        )).milliseconds.inWholeSeconds.seconds
-                    }§7/run)"
-                lines += "§7Runs: §a${stats.totalRuns}§7 (§a${hourly(stats.totalRuns.toDouble(), stats.totalTimeHours)}§7/h)"
+                val time = if (stats.timedRunCount > 0) stats.totalTimeMillis.milliseconds.inWholeSeconds.seconds.toString() else "Unknown"
+                val average = stats.averageRunMillis?.toLong()?.milliseconds?.inWholeSeconds?.seconds?.toString() ?: "Unknown"
+                lines += "§7Time: §e$time§7 (§e$average§7/run)"
+                if (stats.incompleteTime) lines += "§8Time known for ${stats.timedRunCount}/${stats.totalRuns} runs"
+                fun rate(value: Double) = stats.hourlyRate(value)?.let(NumberUtils::condense) ?: "—"
+                lines += "§7Runs: §a${stats.totalRuns}§7 (§a${rate(stats.totalRuns.toDouble())}§7/h)"
                 lines += "§7Chests: §a${stats.totalChestsOpened}§7 (§b${stats.totalRerolled} rerolls§7)"
                 lines += ""
-                lines += "§7Profit: ${TextUtils.parseProfit(stats.netProfit)}§7 (${hourly(stats.netProfit, stats.totalTimeHours)}§7/h)"
+                lines += "§7Profit: ${TextUtils.parseProfit(stats.netProfit)}§7 (${rate(stats.netProfit)}§7/h)"
 
                 lines +=
                     "§7Cata Exp: §b${NumberUtils.condense(stats.totalXp)} §7(§b${
-                        hourly(stats.totalXp, stats.totalTimeHours)
+                        rate(stats.totalXp)
                     }§7/h)"
             }
         }
 
         content.updateTextLines(lines)
     }
-    private fun hourly(value: Double, hours: Double): String = if (hours.isFinite() && hours > 0 && value.isFinite()) NumberUtils.condense(value / hours) else "—"
 }

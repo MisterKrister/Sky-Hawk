@@ -23,6 +23,12 @@ fun checkSettings() {
     check(settingsTab("Dungeons/Dungeon Tracker/dungeonTracker") == SettingsTab.COMBAT)
     check(settingsTab("Theme & Appearance/opacity") == SettingsTab.THEME)
     check(rows.any { it.path == "General/Party Commands/hypixelApiKey" }) // Existing storage path retained.
+    val devMode = rows.single { it.path == "devMode" }
+    check(devMode.title == "Dev Mode" && settingsTab(devMode.path) == SettingsTab.GENERAL)
+    val previousDevMode = Config.devMode
+    try {
+        check(devMode.entry.setBoolean(!previousDevMode) && Config.devMode == !previousDevMode)
+    } finally { devMode.entry.setBoolean(previousDevMode) }
     check(parseThemeHex("#67ccf2") == 0x67CCF2 && parseThemeHex("FFFFFF") == 0xFFFFFF)
     listOf("", "#", "#123", "#12345678", "#GGFFFF", "-1").forEach { check(parseThemeHex(it) == null) }
     val primary = ThemeConfig.primary
