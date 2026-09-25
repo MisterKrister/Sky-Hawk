@@ -117,6 +117,11 @@ export async function checkCosmetics(script, proof) {
     let update = (await late.next()).record;
     assert.equal(update.name, "✦ Sky Hawk ☠"); assert.equal(update.nameStyle.bold, true);
     assert.equal(update.scaleX, 1.6); assert.equal(update.scaleY, 1); assert.equal(update.scaleZ, 1);
+    const pasted = String.raw`["",{color:"dark\_blue",text:"❻"},{color:"dark\_red",text:"❼ "},{color:"aqua",text:"MisterKrister "},{color:"dark\_red",text:"❻"},{color:"dark\_blue",text:"❼"}]`;
+    assert.match(await call(command("set", { name: pasted })), /Saved/);
+    update = (await late.next()).record;
+    assert.equal(update.name, "❻❼ MisterKrister ❻❼");
+    assert.deepEqual(update.nameStyle.extra.map(part => part.color), ["dark_blue", "dark_red", "aqua", "dark_red", "dark_blue"]);
     assert.match(await call(command("set", { y: .8 })), /Saved/);
     update = (await late.next()).record; assert.equal(update.scaleX, 1.6); assert.equal(update.scaleY, .8); assert.equal(update.scaleZ, 1);
     assert.match(await call(command("set", { name: "N".repeat(32) })), /Saved/);
@@ -129,7 +134,7 @@ export async function checkCosmetics(script, proof) {
     }
     assert.equal(legacyUpdate.revision, longName.revision); assert.equal(legacyUpdate.name, null);
     assert.deepEqual(Object.keys(legacyUpdate).sort(), ["name", "revision", "scale", "updatedAt", "uuid"]);
-    for (const name of ['{"text":"Hawk","clickEvent":{"action":"run_command","command":"/op"}}', '{"text":"Hawk","font":"evil:font"}', '{"translate":"evil"}', '{"text":"Hawk","bold":"true"}', '　'.repeat(700) + 'Hawk']) {
+    for (const name of ['{"text":"Hawk","clickEvent":{"action":"run_command","command":"/op"}}', '{"text":"Hawk","font":"evil:font"}', '{"translate":"evil"}', '{"text":"Hawk","bold":"true"}', '["",{text:"Hawk",font:"evil:font"}]', '　'.repeat(700) + 'Hawk']) {
       await resetLimits(); assert.doesNotMatch(await call(command("set", { name })), /^Saved/);
     }
     await resetLimits();
