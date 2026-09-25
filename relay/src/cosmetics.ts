@@ -25,7 +25,7 @@ export function normalizedCode(value: unknown): string | null {
   return /^[A-HJ-NP-Z2-9]{12}$/.test(code) ? code : null;
 }
 export function cosmeticScale(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0.5 || value > 2) message("Scale must be a number between 0.5 and 2.0.");
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0.1 || value > 3) message("Scale must be a number between 0.1 and 3.0.");
   return Math.round(value * 1000) / 1000;
 }
 export async function codeHash(code: string): Promise<string> {
@@ -37,10 +37,13 @@ function publicRow(row: CosmeticRow): CosmeticProfile {
     scaleX: row.scale_x ?? row.scale, scaleY: row.scale_y ?? row.scale, scaleZ: row.scale_z ?? row.scale };
 }
 export function cosmeticPayload(profile: CosmeticProfile, version?: number): object {
-  if (version === 2) return profile;
+  if (version === 3) return profile;
+  if (version === 2) return { ...profile, scale: Math.max(0.5, Math.min(2, profile.scale)),
+    scaleX: Math.max(0.5, Math.min(2, profile.scaleX)), scaleY: Math.max(0.5, Math.min(2, profile.scaleY)),
+    scaleZ: Math.max(0.5, Math.min(2, profile.scaleZ)) };
   const { uuid, name, scale, revision, updatedAt } = profile;
   // Older clients reject extra fields and names over 24 characters. Fall back to their real IGN.
-  return { uuid, name: name && name.length > 24 ? null : name, scale, revision, updatedAt };
+  return { uuid, name: name && name.length > 24 ? null : name, scale: Math.max(0.5, Math.min(2, scale)), revision, updatedAt };
 }
 
 export class PlayerCosmetics {

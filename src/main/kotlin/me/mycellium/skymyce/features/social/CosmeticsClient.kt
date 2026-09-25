@@ -23,13 +23,13 @@ fun parseCosmeticProfile(json: JsonObject): CosmeticProfile? = runCatching {
     val name = json.get("name").takeUnless { it.isJsonNull }?.also { require(it.asJsonPrimitive.isString) }?.asString?.also {
         require(it.length in 1..32 && it.matches(Regex("[\\p{L}\\p{N}\\p{S} _.'•·»«-]+")) && it.none { char -> char == '§' || char == '@' } && it == it.trim() && Normalizer.normalize(it, Normalizer.Form.NFKC) == it)
     }
-    val scale = json.get("scale").asDouble.also { require(it.isFinite() && it in .5..2.0 && json.get("scale").asJsonPrimitive.isNumber) }.toFloat()
+    val scale = json.get("scale").asDouble.also { require(it.isFinite() && it in .1..3.0 && json.get("scale").asJsonPrimitive.isNumber) }.toFloat()
     fun integer(key: String) = json.get(key).also { require(it.asJsonPrimitive.isNumber && it.asString.matches(Regex("[0-9]{1,16}"))) }.asLong.also { require(it in 0..9007199254740991L) }
     val revision = integer("revision"); val time = integer("updatedAt")
     require(revision != 0L || (name == null && scale == 1f && time == 0L))
     require(revision == 0L || time > 0)
     fun axis(key: String): Float = if (!extended) scale else json.get(key).also { require(it.asJsonPrimitive.isNumber) }.asDouble
-        .also { require(it.isFinite() && it in .5..2.0) }.toFloat()
+        .also { require(it.isFinite() && it in .1..3.0) }.toFloat()
     val style = if (!extended) name?.let(Component::literal) else json.get("nameStyle").takeUnless { it.isJsonNull }?.let(::parseCosmeticText)
     require(style?.string == name)
     val x = axis("scaleX"); val y = axis("scaleY"); val z = axis("scaleZ")

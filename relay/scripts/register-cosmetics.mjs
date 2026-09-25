@@ -4,7 +4,7 @@ const command = { name: "cosmetics", type: 1, description: "Manage your Sky-Hawk
     { type: 3, name: "code", description: "Your private 12-character code; hyphens are optional", required: true, min_length: 12, max_length: 14 }] },
   { type: 1, name: "set", description: "Change only the specified cosmetics on your linked account", options: [
     { type: 3, name: "name", description: "Name (32 visible characters), or safe Minecraft text-component JSON", required: false, max_length: 2048 },
-    ...["x", "y", "z"].map(name => ({ type: 10, name, description: `Visual ${name.toUpperCase()} size, 0.5–2.0; other axes stay unchanged`, required: false, min_value: 0.5, max_value: 2 }))] },
+    ...["x", "y", "z"].map(name => ({ type: 10, name, description: `Visual ${name.toUpperCase()} size, 0.1–3.0; other axes stay unchanged`, required: false, min_value: 0.1, max_value: 3 }))] },
   { type: 1, name: "show", description: "Show your linked account's active cosmetics" },
   { type: 1, name: "reset", description: "Restore real name and size 1/1/1" },
   { type: 1, name: "unlink", description: "Remove your account link and reset cosmetics", options: [

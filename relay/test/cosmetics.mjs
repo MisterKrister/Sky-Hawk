@@ -23,7 +23,7 @@ export async function checkCosmetics(script, proof) {
       waiting.push(data => { clearTimeout(timer); resolve(data); });
     });
   }
-  async function connect(name, capable = true, room = "friends", version = 2) {
+  async function connect(name, capable = true, room = "friends", version = 3) {
     const response = await mf.dispatchFetch(`http://localhost/websocket?room=${room}`, { headers: { Upgrade: "websocket", "CF-Connecting-IP": `127.3.0.${sockets.length + 1}` } });
     assert.equal(response.status, 101);
     const ws = response.webSocket, next = inbox(ws); sockets.push(ws); ws.accept(); const challenge = await next();
@@ -88,7 +88,7 @@ export async function checkCosmetics(script, proof) {
     assert.match(await call(command("set", { name: "Stolen", target: a }, bobActor)), /Unsupported/);
     assert.match(await call(command("set", { name: "Unlinked" }, bobActor)), /Link your/);
     assert.match(await call(command("show")), /Hawk/);
-    for (const fields of [{ x: 0.49 }, { x: 2.01 }, { x: "NaN" }, { x: null }, { name: "a\nb" }, { name: "§aName" }, { name: "/op player" }, { name: "@everyone" }, { name: "<click:run>" }, { name: "x".repeat(33) }]) {
+    for (const fields of [{ x: 0.09 }, { x: 3.01 }, { x: "NaN" }, { x: null }, { name: "a\nb" }, { name: "§aName" }, { name: "/op player" }, { name: "@everyone" }, { name: "<click:run>" }, { name: "x".repeat(33) }]) {
       await resetLimits(); assert.doesNotMatch(await call(command("set", fields)), /^Saved/);
     }
     await resetLimits();
@@ -162,6 +162,17 @@ export async function checkCosmetics(script, proof) {
     const resetA = (await request(alice, { type: "cosmetics_get", uuids: [a] })).records[0];
     assert.equal(resetA.name, null); assert.equal(resetA.scaleX, 1); assert.equal(resetA.scaleY, 1); assert.equal(resetA.scaleZ, 1);
     assert.ok(resetA.revision > reset.revision);
+    await resetLimits();
+    assert.match(await call(command("set", { x: .1, y: 3, z: 2.5 })), /Saved/);
+    const expanded = (await request(alice, { type: "cosmetics_get", uuids: [b] })).records[0];
+    assert.equal(expanded.scaleX, .1); assert.equal(expanded.scaleY, 3); assert.equal(expanded.scaleZ, 2.5);
+    const previousClient = await connect("Carol", true, "friends", 2);
+    const compatible = (await request(previousClient, { type: "cosmetics_get", uuids: [b] })).records[0];
+    assert.equal(compatible.scaleX, .5); assert.equal(compatible.scaleY, 2); assert.equal(compatible.scaleZ, 2);
+    assert.equal(compatible.scale, 2);
+    const oldestClient = await connect("Carol", true, "friends", 1);
+    const oldest = (await request(oldestClient, { type: "cosmetics_get", uuids: [b] })).records[0];
+    assert.equal(oldest.scale, 2);
     // Simulate the old durable schema in the isolated testing room, then wake/migrate it twice.
     const legacyStorage = await mf.unsafeGetDurableObjectStorage("cosmetics-check", "RelayRoom", { name: "testing" });
     await legacyStorage.exec("INSERT INTO cosmetics_public (uuid, display_name, scale, revision, updated_at) VALUES (?, 'Legacy', 1.3, 7, ?)", a, Date.now());

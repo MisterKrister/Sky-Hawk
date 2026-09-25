@@ -13,7 +13,7 @@ The existing Discord application and Cloudflare Worker are reused. News still re
 | `/cosmetics show` | View only the caller's linked UUID and settings. |
 | `/cosmetics set name:<text or JSON>` | Set a cosmetic name, up to 32 visible UTF-16 characters. Whitespace-only input clears the name. |
 | `/cosmetics set x:0.8` | Change X width only; Y and Z stay unchanged. |
-| `/cosmetics set y:1.2 z:0.9` | Change height/depth independently. Each axis must be finite and within 0.5–2.0. |
+| `/cosmetics set y:1.2 z:0.9` | Change height/depth independently. Each axis must be finite and within 0.1–3.0. |
 | `/cosmetics reset` | Clear the name, restore all axes to 1.0, keep the account link. |
 | `/cosmetics unlink confirm:true` | Remove the caller's link, revoke outstanding codes for that UUID and reset cosmetics. |
 
@@ -71,7 +71,7 @@ References: [Discord HTTP interaction signatures and ephemeral responses](https:
 
 The existing `cosmetics_public` table gains nullable `name_json` and axis columns. Old uniform scales are read as all three axes until updated. Migration checks column names and is additive/idempotent; UUID ownership, revisions and old rows are retained. Link/replay/rate/audit tables remain private. New public records contain no Discord IDs, challenge hashes, tokens or audit information.
 
-Clients negotiate `cosmeticsVersion:2`. Version-1 clients still receive their original five fields (the Y value is their uniform-scale compatibility approximation); they cannot render styled names/independent axes. Names exceeding their old 24-character limit fall back to the real IGN on those clients. New clients accept old records as plain names/uniform sizes. Short-code management requires the updated client. Live push, snapshot ordering, reset revisions and hibernating subscriptions reuse the existing protocol. Management commands are limited to six per Discord user per minute; WebSocket lookups retain their existing burst/refill limits. No chat or private-message history is added.
+Clients negotiate `cosmeticsVersion:3` for the 0.1–3.0 range. Version-2 clients still receive styled names and independent axes, with out-of-range sizes clamped to their supported 0.5–2.0 range. Version-1 clients still receive their original five fields and a clamped Y value as their uniform-scale approximation; they cannot render styled names/independent axes. Names exceeding their old 24-character limit fall back to the real IGN on those clients. New clients accept old records as plain names/uniform sizes. Short-code management requires the updated client. Live push, snapshot ordering, reset revisions and hibernating subscriptions reuse the existing protocol. Management commands are limited to six per Discord user per minute; WebSocket lookups retain their existing burst/refill limits. No chat or private-message history is added.
 
 Automated checks cover signed/tampered/stale interactions, wrong channels/DMs, self-only ownership, short-code expiry/replay/concurrent consumption/relink/unlink, per-axis preservation, style rejection, legacy schema migration across repeated hibernation, protocol compatibility and revisioned resets. Client checks cover extended/legacy payloads, malicious text components, styled widths, complete-token boundaries across component styles, unchanged click targets, no recursive replacement and cache invalidation.
 
