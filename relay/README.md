@@ -41,6 +41,8 @@ For local development, run `npm run dev` and set the mod's relay URL to `ws://12
 
 Protocol 2 replaces the old `hasJoined` check: Minecraft accepted the local session, but returned HTTP 403 when Cloudflare verified it. Both players must install the updated mod. The client obtains its certificate/profile through Minecraft and signs the relay's challenge locally; the relay makes no requests to the blocked Minecraft endpoints. Connection failures and delivery outcomes go to the Minecraft log without extra chat messages. Delivery IDs correlate with Cloudflare's `relay_delivery` events; neither log includes message bodies or authentication proofs.
 
+**No Chat Reports compatibility:** Sky-Hawk reads Minecraft's existing account key manager directly for the relay proof. No Chat Reports can return an empty manager from the public chat-signing getter, which previously caused `stage=account_key` / `retry=paused` even for a signed-in account. This does not enable chat signing, replace the manager, send credentials/private keys, or weaken relay verification. After installing the fix, restart Minecraft; genuinely unavailable/expired account credentials still require resolving the launcher/session issue.
+
 The public trust roots in `src/minecraft-keys.json` came from `https://api.minecraftservices.com/publickeys` on 2026-09-22. If Mojang rotates these keys, refresh them from your PC (only the `playerCertificateKeys` and `profilePropertyKeys` arrays), run the checks, and redeploy. Never accept public trust roots supplied by a connecting player. These are public verification keys, not account secrets.
 
 ## Behavior and limits
