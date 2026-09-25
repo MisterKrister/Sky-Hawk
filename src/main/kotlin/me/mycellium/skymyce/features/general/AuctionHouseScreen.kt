@@ -6,257 +6,249 @@ import io.wispforest.owo.ui.component.DropdownComponent
 import io.wispforest.owo.ui.component.LabelComponent
 import io.wispforest.owo.ui.component.UIComponents
 import io.wispforest.owo.ui.container.FlowLayout
-import io.wispforest.owo.ui.container.GridLayout
 import io.wispforest.owo.ui.container.ScrollContainer
 import io.wispforest.owo.ui.container.UIContainers
 import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.api.AuctionAPI
+import me.mycellium.skymyce.features.general.auction.AuctionPreferences
+import me.mycellium.skymyce.features.general.auction.AuctionSearch
 import me.mycellium.skymyce.hud.HudTheme
 import me.mycellium.skymyce.hud.themed
-import me.mycellium.skymyce.api.AuctionAPI
-import me.mycellium.skymyce.features.general.auction.AuctionSearch
+import me.mycellium.skymyce.hud.wrappedTooltip
+import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.utils.NumberUtils
 import me.mycellium.skymyce.utils.PlayerUtils.sendCommand
-import net.minecraft.core.component.DataComponents
 import net.minecraft.network.chat.Component
-import net.minecraft.world.item.component.ItemLore
-import tech.thatgravyboat.skyblockapi.api.data.SkyBlockRarity
-import kotlin.math.ceil
-import kotlin.math.max
+import net.minecraft.world.item.Items
+import me.mycellium.skymyce.features.general.auction.AUCTION_RARITIES
+import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
+import tech.thatgravyboat.skyblockapi.utils.Scheduling
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
 
-/** A local, read-only browser for the auctions currently cached by [AuctionAPI]. */
-class AuctionHouseScreen : BaseOwoScreen<FlowLayout>() {
-    private var search = AuctionSearch()
-    private lateinit var scroll: ScrollContainer<GridLayout>
-    private lateinit var resultCount: LabelComponent
-    private lateinit var pageLabel: LabelComponent
-    private var renderedSnapshotVersion = -1L
-    private var browserSessionStarted = false
+/** Retained cards, bounded visible item decoding and background filtering. No render-thread I/O. */
+class AuctionHouseScreen : BaseOwoScreen<FlowLayout>(Component.literal("Sky-Hawk Auction House")) {
+    private var search = AuctionPreferences.value.search
+    private var expanded = false
+    private var selected: AuctionAPI.ActiveAuction? = null
+    private var matches = emptyList<AuctionAPI.ActiveAuction>()
+    private var snapshotVersion = -1L
+    private var preferenceVersion = AuctionPreferences.revision
+    private var queryRevision = 0L
+    private var requestedRevision = -1L
+    private var filterBusy = false
+    private var changedAt = 0L
+    private var closed = false
+    private var cardsRevision = 0L
+    private var lastSecond = -1L
+    private lateinit var scroll: ScrollContainer<FlowLayout>
+    private lateinit var status: LabelComponent
+    private lateinit var count: LabelComponent
+    private lateinit var pages: LabelComponent
+    private val clocks = mutableListOf<Pair<LabelComponent, AuctionAPI.ActiveAuction>>()
+    private val panelWidth get() = (width - 16).coerceIn(220, 950)
+    private val contentWidth get() = panelWidth - 28
 
     override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
+    override fun isPauseScreen() = false
+    override fun init() { closed = false; super.init(); AuctionAPI.beginBrowserSession() }
+    override fun removed() { closed = true; cardsRevision++; AuctionAPI.stopBrowserSession(); super.removed() }
 
     override fun build(root: FlowLayout) {
-        root.surface(HudTheme.backdrop)
-        root.alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-        root.child(mainLayout())
-        if (!browserSessionStarted) {
-            browserSessionStarted = true
-            AuctionAPI.beginBrowserSession()
+        root.surface(HudTheme.backdrop).alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
+        root.child(column(Sizing.fixed(panelWidth), Sizing.fixed((height - 16).coerceAtLeast(140))).apply {
+            surface(HudTheme.panel()); padding(Insets.of(8)); gap(5)
+            child(row().apply {
+                child(label("SKY-HAWK / AUCTIONS", HudTheme.ACCENT).apply { horizontalSizing(Sizing.expand()) })
+                child(button("Close", 42) { onClose() })
+            })
+            child(row().apply {
+                child(UIComponents.textBox(Sizing.expand()).apply {
+                    setMaxLength(160); text(search.query); setHint(Component.literal("Search name, enchantment or lore…"))
+                    wrappedTooltip(Component.literal("Search the item name and available auction lore. All words must match."))
+                    onChanged().subscribe { change(search.withQuery(it)) }
+                })
+                child(button(if (expanded) "Filters −" else "Filters +", 65) { expanded = !expanded; rebuild() })
+            })
+            child(row().apply {
+                child(button("Refresh", 59) { AuctionAPI.beginBrowserSession(true) }.wrappedTooltip(Component.literal("Refresh API pages in the background. At most once a minute.")))
+                child(button("Favorites", 65) { b -> menu(b) { drop ->
+                    drop.button(Component.literal("Save current search (${AuctionPreferences.value.favorites.size}/8)")) {
+                        AuctionPreferences.update(search, (AuctionPreferences.value.favorites + search).takeLast(8)); preferenceVersion = AuctionPreferences.revision
+                    }
+                    AuctionPreferences.value.favorites.forEachIndexed { i, saved ->
+                        drop.button(Component.literal("${i + 1}. ${saved.query.ifBlank { saved.category ?: saved.listingType.label }.take(32)}")) { change(saved); rebuild() }
+                    }
+                    drop.button(Component.literal("Clear favorites")) { AuctionPreferences.update(search, emptyList()); preferenceVersion = AuctionPreferences.revision }
+                } }.wrappedTooltip(Component.literal("Keep up to eight searches, including filters and sort order.")))
+                child(button("Reset", 45) { change(AuctionSearch()); rebuild() })
+            })
+            if (expanded && height >= 340) child(UIContainers.verticalScroll(Sizing.fill(), Sizing.fixed(76), filters()).apply { scrollStep(20) })
+            status = label("", HudTheme.MUTED); child(status)
+            count = label("Searching cached auctions…", HudTheme.MUTED); child(count)
+            scroll = UIContainers.verticalScroll(Sizing.fill(), Sizing.expand(), column()).apply {
+                scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(HudTheme.ACCENT))); scrollbarThiccness(2); scrollStep(30)
+            }
+            child(scroll)
+            child(row().apply {
+                child(button("‹", 28) { changePage(-1) }); pages = label("").apply { horizontalSizing(Sizing.expand()) }; child(pages)
+                child(button("›", 28) { changePage(1) })
+                if (selected != null) child(button("Back to results", 100) { selected = null; rebuild() })
+            })
+        })
+        renderResults(); updateStatus()
+    }
+
+    private fun filters() = column().apply {
+        val controls = listOf(
+            button(search.category ?: "All categories", 108) { b -> menu(b) { d ->
+                (listOf<String?>(null) + listOf("weapon", "armor", "accessories", "consumables", "blocks", "misc")).forEach { category ->
+                    d.button(Component.literal(category ?: "All categories")) { change(search.withCategory(category)); rebuild() }
+                }
+            } }.wrappedTooltip(Component.literal("Filter using Hypixel's item category.")),
+            button(search.rarity ?: "All rarities", 108) { b -> menu(b) { d ->
+                (listOf<String?>(null) + AUCTION_RARITIES).forEach { rarity ->
+                    d.button(Component.literal(rarity ?: "All rarities")) { change(search.withRarity(rarity)); rebuild() }
+                }
+            } },
+            button(search.listingType.label, 108) { b -> menu(b) { d -> AuctionSearch.ListingType.entries.forEach { type ->
+                d.button(Component.literal(type.label)) { change(search.withListingType(type)); rebuild() }
+            } } }.wrappedTooltip(Component.literal("BIN is a purchase price. Auctions show their current or starting bid.")),
+            button(search.sort.label, 108) { b -> menu(b) { d -> AuctionSearch.Sort.entries.forEach { sort ->
+                d.button(Component.literal(sort.label)) { change(search.withSort(sort)); rebuild() }
+            } } },
+        )
+        controls.chunked((contentWidth / 112).coerceAtLeast(1)).forEach { child(row().apply { it.forEach(::child) }) }
+        child(row().apply {
+            child(priceField(true)); child(priceField(false))
+        })
+    }
+
+    private fun priceField(minimum: Boolean) = UIComponents.textBox(Sizing.fill(48)).apply {
+        setMaxLength(16); text((if (minimum) search.minPrice else search.maxPrice)?.toString().orEmpty())
+        setHint(Component.literal(if (minimum) "Minimum coins" else "Maximum coins"))
+        wrappedTooltip(Component.literal("Whole coins. Leave blank for no limit. Bid filters use the displayed bid, not a guaranteed purchase price."))
+        onChanged().subscribe { input ->
+            val value = input.toLongOrNull()?.takeIf { it in 0..9007199254740991L }
+            if (input.isBlank() || value != null) change(if (minimum) search.copy(minPrice = value, page = 0) else search.copy(maxPrice = value, page = 0))
+            else count.text(Component.literal("Enter a valid non-negative whole coin amount").withColor(HudTheme.RED))
         }
-        updateResults()
+    }
+
+    private fun change(value: AuctionSearch) {
+        search = value; selected = null; queryRevision++; changedAt = System.currentTimeMillis()
+        AuctionPreferences.update(search); preferenceVersion = AuctionPreferences.revision
     }
 
     override fun tick() {
         super.tick()
-        if (::scroll.isInitialized && renderedSnapshotVersion != AuctionAPI.snapshotVersion) updateResults()
-    }
-
-    private fun mainLayout(): FlowLayout = UIContainers.verticalFlow(Sizing.fill(80), Sizing.fill(80)).apply {
-        surface(HudTheme.panel())
-        padding(Insets.of(10))
-        gap(6)
-
-        child(UIComponents.label(Component.literal("§b§lAuction Browser")))
-        child(searchField())
-        child(filterBar())
-
-        resultCount = UIComponents.label(Component.empty())
-        child(resultCount)
-
-        scroll = UIContainers.verticalScroll(Sizing.expand(), Sizing.expand(), emptyGrid()).apply {
-            alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-            padding(Insets.of(5))
-            scrollbar(ScrollContainer.Scrollbar.flat(Color.ofRgb(0x55FFFF)))
-            scrollbarThiccness(2)
-            surface(HudTheme.panel(true))
-        }
-        child(scroll)
-        child(paginationBar())
-    }
-
-    private fun searchField(): UIComponent = UIComponents.textBox(Sizing.fill()).apply {
-        text(search.query)
-        setHint(Component.literal("Search"))
-        onChanged().subscribe { query ->
-            search = search.withQuery(query)
-            updateResults()
-        }
-    }
-
-    private fun filterBar(): UIComponent = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply {
-        gap(4)
-        alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-        child(UIComponents.button(Component.literal("§7Category: §f${search.category ?: "All"}")) { button ->
-            openMenu(button) { dropdown ->
-                dropdown.button(Component.literal("§fAll categories")) { selectCategory(null) }
-                AuctionAPI.auctions.map { it.category }.distinct().sorted().forEach { category ->
-                    dropdown.button(Component.literal("§f$category")) { selectCategory(category) }
-                }
-            }
-        }.themed())
-        child(UIComponents.button(Component.literal("§7Rarity: §f${search.rarity ?: "All"}")) { button ->
-            openMenu(button) { dropdown ->
-                dropdown.button(Component.literal("§fAll rarities")) { selectRarity(null) }
-                SkyBlockRarity.entries.forEach { rarity ->
-                    dropdown.button(rarity.displayText) { selectRarity(rarity) }
-                }
-            }
-        }.themed())
-        child(UIComponents.button(Component.literal("§7Type: §f${search.listingType.label}")) { button ->
-            openMenu(button) { dropdown ->
-                AuctionSearch.ListingType.entries.forEach { listingType ->
-                    dropdown.button(Component.literal("§f${listingType.label}")) { selectListingType(listingType) }
-                }
-            }
-        }.themed())
-        child(UIComponents.button(Component.literal("§7Sort: §f${search.sort.label}")) { button ->
-            openMenu(button) { dropdown ->
-                AuctionSearch.Sort.entries.forEach { sort ->
-                    dropdown.button(Component.literal("§f${sort.label}")) { selectSort(sort) }
-                }
-            }
-        }.themed())
-        child(UIComponents.button(Component.literal("Refresh cache").withColor(HudTheme.ACCENT)) { AuctionAPI.beginBrowserSession() }.themed()
-            .tooltip(Component.literal("§7Discards cached pages and requests page 1 again.")))
-    }
-
-    private fun paginationBar(): UIComponent = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply {
-        gap(5)
-        alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-        child(UIComponents.button(Component.literal("<").withColor(HudTheme.ACCENT)) { changePage(-1) }.themed())
-        pageLabel = UIComponents.label(Component.empty())
-        child(pageLabel)
-        child(UIComponents.button(Component.literal(">").withColor(HudTheme.ACCENT)) { changePage(1) }.themed())
-    }
-
-    private fun updateResults() {
         if (!::scroll.isInitialized) return
-
-        val results = search.results(AuctionAPI.auctions)
-        val pageCount = max(1, ceil(results.size / RESULTS_PER_PAGE.toDouble()).toInt())
-        if (search.page >= pageCount) search = search.copy(page = pageCount - 1)
-
-        val firstResult = search.page * RESULTS_PER_PAGE
-        val page = results.drop(firstResult).take(RESULTS_PER_PAGE)
-        val total = AuctionAPI.totalAuctions?.let { " / ${NumberUtils.condense(it)} total" }.orEmpty()
-        resultCount.text(Component.literal("§7${results.size} matching in ${AuctionAPI.cachedPages.size} cached page(s)$total"))
-        pageLabel.text(Component.literal("§7Page §f${search.page + 1}§7 / §f$pageCount"))
-        scroll.child(createGrid(page))
-        renderedSnapshotVersion = AuctionAPI.snapshotVersion
-    }
-
-    private fun changePage(change: Int) {
-        if (change > 0) AuctionAPI.requestNextPage()
-        val pageCount = max(1, ceil(search.results(AuctionAPI.auctions).size / RESULTS_PER_PAGE.toDouble()).toInt())
-        search = search.copy(page = (search.page + change).coerceIn(0, pageCount - 1))
-        updateResults()
-    }
-
-    private fun openMenu(button: ButtonComponent, entries: (DropdownComponent) -> Unit) {
-        DropdownComponent.openContextMenu(
-            this,
-            uiAdapter.rootComponent,
-            { root, dropdown -> root.child(dropdown) },
-            button.x.toDouble(),
-            (button.y + button.height).toDouble(),
-            { menu -> menu.surface(HudTheme.panel()); entries(menu) },
-        )
-    }
-
-    private fun selectCategory(category: String?) {
-        search = search.withCategory(category)
-        rebuild()
-    }
-
-    private fun selectSort(sort: AuctionSearch.Sort) {
-        search = search.withSort(sort)
-        rebuild()
-    }
-
-    private fun selectRarity(rarity: SkyBlockRarity?) {
-        search = search.withRarity(rarity)
-        rebuild()
-    }
-
-    private fun selectListingType(listingType: AuctionSearch.ListingType) {
-        search = search.withListingType(listingType)
-        rebuild()
-    }
-
-    private fun rebuild() {
-        uiAdapter.rootComponent.clearChildren()
-        build(uiAdapter.rootComponent)
-        uiAdapter.inflateAndMount()
-    }
-
-    private fun createGrid(auctions: List<AuctionAPI.ActiveAuction>): GridLayout {
-        if (auctions.isEmpty()) return emptyGrid("§7No active auctions match these filters.")
-
-        val rows = ceil(auctions.size / COLUMNS.toDouble()).toInt()
-        return UIContainers.grid(Sizing.content(), Sizing.content(), rows, COLUMNS).apply {
-            alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-            auctions.forEachIndexed { index, auction ->
-                child(
-                    createAuctionItem(auction),
-                    index / COLUMNS,
-                    index % COLUMNS
-                )
+        if (preferenceVersion != AuctionPreferences.revision) {
+            preferenceVersion = AuctionPreferences.revision; search = AuctionPreferences.value.search; queryRevision++; rebuild()
+        }
+        val snapshot = AuctionAPI.index.view
+        val now = System.currentTimeMillis()
+        if (snapshotVersion != snapshot.version) { snapshotVersion = snapshot.version; queryRevision++; updateStatus() }
+        if (!filterBusy && requestedRevision != queryRevision && now - changedAt >= 150) {
+            filterBusy = true
+            val revision = queryRevision; val query = search; requestedRevision = revision
+            Scheduling.schedule(0.milliseconds) {
+                val found = query.results(snapshot.auctions)
+                MC.instance.execute {
+                    filterBusy = false
+                    if (!closed && revision == queryRevision) { matches = found; renderResults() }
+                }
             }
         }
+        if (now / 1000 != lastSecond) {
+            lastSecond = now / 1000
+            clocks.forEach { (label, auction) -> label.text(Component.literal(remaining(auction)).withColor(if (auction.expired) HudTheme.RED else HudTheme.MUTED)) }
+            // Expired listings are removed off-thread, without rebuilding the list every second.
+            if (lastSecond % 15 == 0L) queryRevision++
+        }
     }
 
-    private fun emptyGrid(message: String = "§7Loading cached auctions..."): GridLayout = UIContainers.grid(
-        Sizing.fill(), Sizing.content(), 1, 1
-    ).apply {
-        child(UIComponents.label(Component.literal(message)), 0, 0)
-        alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
-        padding(Insets.of(12))
+    private fun updateStatus() {
+        val view = AuctionAPI.index.view
+        status.text(Component.literal("${if (view.stale) "Stale • " else ""}${view.coverage}\n${view.message}").withColor(if (view.stale) HudTheme.YELLOW else HudTheme.MUTED))
     }
 
-    private fun createAuctionItem(auction: AuctionAPI.ActiveAuction): UIComponent {
-        val item = auction.item.copy()
-        val lore = item.get(DataComponents.LORE)?.lines?.toMutableList() ?: mutableListOf()
-        lore += listOf(
-            Component.literal("§8§m                                        "),
-            Component.literal("§7Category: §b${auction.category}"),
-            Component.literal("§7Rarity: §f${auction.rarity}"),
-            Component.literal("§7Type: §e${if (auction.isBin) "BIN" else "Auction"}"),
-            Component.literal("§7Price: §a${NumberUtils.condense(auction.price)} coins"),
-            Component.literal("§7Ends in: §e${formatRemaining(auction)}"),
-            Component.literal("§8Seller: ${auction.auctioneer}"),
-        )
-        item.set(DataComponents.LORE, ItemLore(lore))
-        return UIComponents.item(item).apply {
-            margins(Insets.of(2))
-            setTooltipFromStack(true)
-            mouseDown().subscribe { _, _ ->
-                sendCommand("viewauction ${auction.uuid}", false)
-                true
+    private fun renderResults() {
+        cardsRevision++; clocks.clear()
+        val pageCount = ((matches.size + PAGE_SIZE - 1) / PAGE_SIZE).coerceAtLeast(1)
+        search = search.copy(page = search.page.coerceIn(0, pageCount - 1))
+        count.text(Component.literal("${matches.size} matches in ${AuctionAPI.index.view.auctions.size} indexed listings").withColor(HudTheme.MUTED))
+        pages.text(Component.literal("${search.page + 1} / $pageCount").withColor(HudTheme.TEXT))
+        if (expanded && height < 340) {
+            scroll.child(filters()); pages.text(Component.literal("Collapse filters for results").withColor(HudTheme.MUTED)); return
+        }
+        val content = column()
+        val detail = selected
+        if (detail != null) content.child(details(detail))
+        else if (matches.isEmpty()) content.child(label(if (AuctionAPI.index.view.loading) "No matches yet • other API pages are still loading." else "No active matches. Adjust filters or refresh.", HudTheme.MUTED))
+        else {
+            val columns = (contentWidth / 230).coerceIn(1, 3)
+            val cardWidth = (contentWidth - (columns - 1) * 6) / columns
+            matches.drop(search.page * PAGE_SIZE).take(PAGE_SIZE).chunked(columns).forEach { auctions ->
+                content.child(row().apply { auctions.forEach { child(card(it, cardWidth)) } })
             }
         }
+        scroll.child(content)
     }
 
-    private fun formatRemaining(auction: AuctionAPI.ActiveAuction): String = auction.remaining
-        .coerceAtLeast(0)
-        .milliseconds
-        .inWholeSeconds
-        .seconds
-        .toString()
+    private fun card(auction: AuctionAPI.ActiveAuction, cardWidth: Int) = column(Sizing.fixed(cardWidth)).apply {
+        surface(HudTheme.panel(true)); padding(Insets.of(7)); gap(4)
+        child(row().apply { child(icon(auction)); child(label(auction.name).apply { horizontalSizing(Sizing.expand()); wrappedTooltip(Component.literal(auction.name)) }) })
+        child(label("${auction.rarity.replace('_', ' ')} • ${if (auction.isBin) "BIN" else "AUCTION"}", HudTheme.MUTED))
+        child(label("${auction.priceLabel}: ${NumberUtils.condense(auction.price)}", HudTheme.GREEN))
+        child(clock(auction))
+        child(button("Inspect listing", cardWidth - 14) { selected = auction; rebuild() }.wrappedTooltip(Component.literal("Inspect seller, lore and available item data before opening Hypixel's listing.")))
+    }
 
-    private companion object {
-        const val COLUMNS = 25
-        const val RESULTS_PER_PAGE = 1000
+    private fun details(auction: AuctionAPI.ActiveAuction) = column().apply {
+        surface(HudTheme.panel(true)); padding(Insets.of(8)); gap(6)
+        child(row().apply { child(icon(auction)); child(label(auction.name, HudTheme.ACCENT).apply { horizontalSizing(Sizing.expand()) }) })
+        child(label("${auction.priceLabel}: ${NumberUtils.condense(auction.price)} coins", HudTheme.GREEN))
+        child(clock(auction))
+        child(label("Seller UUID: ${auction.auctioneer}", HudTheme.MUTED))
+        child(label("${auction.category} • ${auction.rarity}"))
+        child(label(auction.lore.ifBlank { "Item lore unavailable." }))
+        child(label("Hover the icon for available enchantments and upgrades. Seller identity is shown as its API UUID.", HudTheme.MUTED))
+        child(button("Open in Hypixel", 130) {
+            if (LocationAPI.isOnSkyBlock && !auction.expired) sendCommand("viewauction ${auction.uuid}", false)
+        }.apply { active(LocationAPI.isOnSkyBlock && !auction.expired) }.wrappedTooltip(Component.literal("Opens the server's normal listing. Purchases and bids still require Hypixel's confirmation.")))
+    }
 
-        fun rarityRank(rarity: String): Int = when (rarity.uppercase()) {
-            "VERY_SPECIAL" -> 7
-            "SPECIAL" -> 6
-            "MYTHIC" -> 5
-            "LEGENDARY" -> 4
-            "EPIC" -> 3
-            "RARE" -> 2
-            "UNCOMMON" -> 1
-            else -> 0
+    private fun icon(auction: AuctionAPI.ActiveAuction): FlowLayout = column(Sizing.fixed(32)).apply {
+        verticalSizing(Sizing.fixed(32))
+        surface(HudTheme.tintedPanel { HudTheme.blend(HudTheme.CARD, HudTheme.ACCENT, 12) })
+        padding(Insets.of(2))
+        fun item(stack: net.minecraft.world.item.ItemStack) = UIComponents.item(me.mycellium.skymyce.utils.ItemUtils.displayStack(stack)).apply { sizing(Sizing.fixed(28), Sizing.fixed(28)) }
+        val fallback = runCatching { Items.PAPER.defaultInstance }.getOrDefault(net.minecraft.world.item.ItemStack.EMPTY)
+        child(item(fallback).wrappedTooltip(Component.literal("Loading item data…")))
+        val revision = cardsRevision
+        AuctionAPI.item(auction) { stack ->
+            if (!closed && revision == cardsRevision) {
+                clearChildren()
+                child(item(if (stack.isEmpty) fallback else stack).apply {
+                    if (!stack.isEmpty) setTooltipFromStack(true) else wrappedTooltip(Component.literal("Item definition unavailable; listing metadata is still usable."))
+                })
+            }
         }
+        if (auction.encodedItem == null) { clearChildren(); child(item(fallback).wrappedTooltip(Component.literal("Item definition unavailable"))) }
     }
+
+    private fun clock(auction: AuctionAPI.ActiveAuction) = label(remaining(auction), HudTheme.MUTED).also { clocks += it to auction }
+    private fun remaining(auction: AuctionAPI.ActiveAuction): String {
+        val seconds = (auction.remaining / 1000).coerceAtLeast(0)
+        return if (seconds == 0L) "Expired" else "Ends in ${seconds / 3600}h ${seconds / 60 % 60}m ${seconds % 60}s"
+    }
+    private fun changePage(delta: Int) { if (selected == null) { search = search.copy(page = (search.page + delta).coerceAtLeast(0)); renderResults() } }
+    private fun rebuild() { uiAdapter.rootComponent.clearChildren(); build(uiAdapter.rootComponent); uiAdapter.inflateAndMount() }
+    private fun menu(button: ButtonComponent, entries: (DropdownComponent) -> Unit) = DropdownComponent.openContextMenu(this, uiAdapter.rootComponent,
+        { root, drop -> root.child(drop) }, button.x.toDouble(), (button.y + button.height).toDouble(), { it.surface(HudTheme.panel()); entries(it) })
+    private fun column(w: Sizing = Sizing.fill(), h: Sizing = Sizing.content()) = UIContainers.verticalFlow(w, h).apply { gap(5) }
+    private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(4); verticalAlignment(VerticalAlignment.CENTER) }
+    private fun label(text: String, color: Int = HudTheme.TEXT) = UIComponents.label(Component.literal(text).withColor(color)).apply { horizontalSizing(Sizing.fill()); shadow(HudTheme.SHADOW) }
+    private fun button(text: String, width: Int, action: (ButtonComponent) -> Unit) = UIComponents.button(Component.literal(text), action).themed().apply { sizing(Sizing.fixed(width), Sizing.fixed(20)) }
+    companion object { private const val PAGE_SIZE = 24 }
 }
