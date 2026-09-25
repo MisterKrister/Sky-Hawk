@@ -20,6 +20,7 @@ object Config : ConfigKt("SkyMyce Config") {
         category(MiningConfig)
         category(PartyFinderConfig)
         category(ThemeConfig)
+        category(me.mycellium.skymyce.config.misc.CosmeticsConfig)
     }
 
     var openConfigKey by key(GLFW.GLFW_KEY_RIGHT_SHIFT) {

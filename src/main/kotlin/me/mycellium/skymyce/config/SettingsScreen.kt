@@ -36,7 +36,7 @@ fun settingsTab(path: String): SettingsTab = when {
     path.startsWith("Theme & Appearance/") -> SettingsTab.THEME
     path.startsWith("Party Finder/") -> SettingsTab.PARTY
     path.contains("/Daily Digest/") && path.substringAfterLast('/') in setOf("receiveRng", "shareRng", "publicRngName", "retainedRngEvents") -> SettingsTab.SOCIAL
-    path.contains("Dungeon Friends/") || path.contains("Party Commands/") -> SettingsTab.SOCIAL
+    path.contains("Dungeon Friends/") || path.contains("Party Commands/") || path.startsWith("Cosmetics/") -> SettingsTab.SOCIAL
     path.startsWith("Dungeons/") || path.startsWith("Instances/") || path.contains("Loadout Keybinds/") ||
         path.contains("Wardrobe Keybinds/") || path.contains("Wardrobe/") || path.substringAfterLast('/').startsWith("displayAbility") -> SettingsTab.COMBAT
     else -> SettingsTab.GENERAL
@@ -120,6 +120,17 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
 
     private fun populate() {
         body.clearChildren()
+        if (tab == SettingsTab.THEME) {
+            body.child(label("Preset → global overrides → optional widget overrides", HudTheme.MUTED))
+            body.child(button("Customize shared theme", 190, "Presets, colors, opacity, spacing, preview and JSON import/export") {
+                MC.instance.setScreen(ThemeEditorScreen(this))
+            })
+            body.child(button("Per-widget themes", 190, "Open the HUD editor and right-click a widget to customize or reset its inherited theme") {
+                MC.instance.setScreen(WidgetEditorScreen)
+            })
+            body.child(label("Theme changes preserve HUD positions, anchors and scale. Reset overrides to make them inherit again.", HudTheme.MUTED))
+            return
+        }
         val visible = rows.filter { settingsTab(it.path) == tab && (query.isBlank() || "${it.title} ${it.tip}".contains(query, true)) }
         if (visible.isEmpty()) { body.child(label("No matching settings", HudTheme.MUTED)); return }
         visible.groupBy { it.path.substringBeforeLast('/', "Basics").substringAfterLast('/') }.forEach { (group, values) ->
@@ -132,7 +143,7 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
                 main.forEach { child(editor(it)) }
                 val advanced = values - main.toSet()
                 if (advanced.isNotEmpty()) child(UIContainers.collapsible(Sizing.fill(), Sizing.content(),
-                    Component.literal("More options (${advanced.size})"), id in expanded).apply {
+                    Component.literal("More options (${advanced.size})").withColor(HudTheme.TEXT), id in expanded).apply {
                     tip("Expand additional $group settings")
                     onToggled().subscribe { if (it) expanded.add(id) else expanded.remove(id) }
                     advanced.forEach { child(editor(it)) }
@@ -157,7 +168,7 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
         child(label(setting.title))
         when {
             setting.path in setOf("Theme & Appearance/primary", "Theme & Appearance/secondary") -> child(colorEditor(setting))
-            entry.isArray -> child(UIContainers.collapsible(Sizing.fill(), Sizing.content(), Component.literal("Choose options (${entry.array.size} selected)"), false).apply {
+            entry.isArray -> child(UIContainers.collapsible(Sizing.fill(), Sizing.content(), Component.literal("Choose options (${entry.array.size} selected)").withColor(HudTheme.TEXT), false).apply {
                 tip(setting.tip)
                 entry.objectType().enumConstants?.forEach { option ->
                     child(button(option.toString(), 140, setting.tip) { button ->
@@ -224,7 +235,7 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
         hex.onChanged().subscribe { if (!updating) parseThemeHex(it)?.let(::update) }
         picker.onChanged().subscribe { if (!updating) update(it.rgb()) }
         child(hex)
-        val controls = UIContainers.collapsible(Sizing.fill(), Sizing.content(), Component.literal("Color picker & RGB"), false).apply {
+        val controls = UIContainers.collapsible(Sizing.fill(), Sizing.content(), Component.literal("Color picker & RGB").withColor(HudTheme.TEXT), false).apply {
             tip("Expand the color picker and individual red, green and blue sliders")
             child(picker)
         }
@@ -247,6 +258,7 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
             menu.button(Component.literal("Daily Digest")) { DailyDigest.open() }
             menu.button(Component.literal("Friends & lending")) { MC.instance.setScreen(FriendsSocialScreen()) }
             menu.button(Component.literal("HUD editor")) { MC.instance.setScreen(WidgetEditorScreen) }
+            menu.button(Component.literal("Cosmetics & Discord link")) { MC.instance.setScreen(me.mycellium.skymyce.features.social.CosmeticsScreen()) }
             fun actions(config: ResourcefulConfig) {
                 config.elements().filterIsInstance<ResourcefulConfigButton>().forEach { action -> menu.button(Component.literal(action.title())) { action.invoke() } }
                 config.categories().values.forEach(::actions)
@@ -292,10 +304,10 @@ class SettingsScreen(private val parent: Screen? = null, private var tab: Settin
     private fun keyName(key: Int) = if (key == GLFW.GLFW_KEY_UNKNOWN) "Unbound" else InputConstants.Type.KEYSYM.getOrCreate(key).displayName.string
     private fun numberText(value: Double) = "%.2f".format(value).trimEnd('0').trimEnd('.', ',')
     private fun column() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).gap(6)
-    private fun label(text: String, color: Int = HudTheme.TEXT) = UIComponents.label(Component.literal(text)).apply { color(Color.ofRgb(color)); shadow(false); horizontalSizing(Sizing.fill()) }
+    private fun label(text: String, color: Int = HudTheme.TEXT) = UIComponents.label(Component.literal(text)).apply { color(Color.ofRgb(color)); shadow(HudTheme.SHADOW); horizontalSizing(Sizing.fill()) }
     private fun button(text: String, width: Int, tooltip: String, action: (ButtonComponent) -> Unit) = UIComponents.button(Component.literal(text), action).themed().apply {
         sizing(Sizing.fixed(width), Sizing.fixed(20)); tip(tooltip)
     }
-    private fun <T : UIComponent> T.tip(text: String): T = apply { tooltip(MC.font.split(Component.literal(text), minOf(250, (width - 30).coerceAtLeast(100))).map { net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent.create(it) }) }
+    private fun <T : UIComponent> T.tip(text: String): T = wrappedTooltip(Component.literal(text))
     companion object { private val SAVE_LOCK = Any() }
 }

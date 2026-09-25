@@ -21,6 +21,8 @@ import kotlin.time.Duration.Companion.milliseconds
 
 /** Run with ./gradlew dungeonFriendsCheck; requires no Minecraft client or API credentials. */
 fun main() {
+    me.mycellium.skymyce.features.general.auction.checkAuctions()
+    me.mycellium.skymyce.features.instances.dungeons.tracker.checkTracker()
     me.mycellium.skymyce.features.instances.dungeons.checkPartyMatcher()
     me.mycellium.skymyce.features.digest.checkDigestActivities()
     me.mycellium.skymyce.features.digest.checkDigestRng()
@@ -29,6 +31,8 @@ fun main() {
     checkFullFriendRoster()
     checkMenuRefresh()
     checkWealthRefresh()
+    checkUserMessages()
+    me.mycellium.skymyce.features.social.checkCosmetics()
     checkSocialFeatures()
     check(friendActivity("in SkyBlock - The Catacombs") == FriendActivity.IN_RUN)
     check(friendActivity("in LIMBO") == FriendActivity.LIMBO)
@@ -1265,7 +1269,7 @@ private fun checkJoining(known: DungeonFriendStats, hidden: DungeonFriendStats) 
     val noRange = promptText.indexOf("[No]").let { it until it + 4 }
     for ((index, style) in promptStyles.withIndex()) {
         val reply = when (index) { in yesRange -> "yes"; in noRange -> "no"; else -> null }
-        check((style.clickEvent as? ClickEvent.RunCommand)?.command == reply?.let { "/skymyce relaymsg Host $it ${request.token}" })
+        check((style.clickEvent as? ClickEvent.RunCommand)?.command == reply?.let { "/skymyce lfgreply Host $it ${request.token}" })
         val hint = when (reply) { "yes" -> "Click to join Host's party"; "no" -> "Click to decline the invitation"; else -> null }
         check((style.hoverEvent as? HoverEvent.ShowText)?.value?.string == hint)
     }

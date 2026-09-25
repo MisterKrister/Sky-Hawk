@@ -404,6 +404,13 @@ object DungeonFriends : SkyMyceModule() {
     private fun isFriend(name: String) = name.matches(Regex("[A-Za-z0-9_]{1,16}")) &&
         (FriendsAPI.getFriend(name) != null || name.lowercase() in scanner.online)
 
+    fun isRelayFriend(name: String) = isFriend(name)
+    fun acceptsRelayIdentity(name: String, uuid: String): Boolean {
+        if (!isFriend(name) || !uuid.matches(Regex("[a-f0-9]{32}"))) return false
+        val known = FriendsAPI.getFriend(name)?.uuid?.toString()?.replace("-", "")
+        return known == null || known == uuid
+    }
+
     fun onRelayMessage(name: String, uuid: String, text: String): Boolean {
         if (!LocationAPI.isOnSkyBlock) return rejectRelay(name, "outside_skyblock")
         if (!isFriend(name)) return rejectRelay(name, "unknown_friend")

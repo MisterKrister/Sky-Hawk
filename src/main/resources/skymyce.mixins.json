@@ -6,6 +6,12 @@
     "AbstractContainerScreenMixin"
   ],
   "client": [
+    "RelayChatPrivacyMixin",
+    "AvatarCosmeticsMixin",
+    "AvatarCosmeticStateMixin",
+    "CosmeticFontMixin",
+    "CosmeticTooltipMixin",
+    "CosmeticEditBoxMixin",
     "LabelComponentMixin",
     "ResourcefulConfigScreenBuilderMixin"
   ],

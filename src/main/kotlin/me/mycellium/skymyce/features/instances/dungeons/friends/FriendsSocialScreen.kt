@@ -232,7 +232,7 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
     }
 
     private fun values(data: FriendWealth?) = listOf(data?.networth, data?.purse, data?.bank, data?.wardrobe)
-    private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text)).color(Color.ofRgb(color)).shadow(false)
+    private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text)).color(Color.ofRgb(color)).shadow(HudTheme.SHADOW)
     private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(6); verticalAlignment(VerticalAlignment.CENTER) }
     private fun card() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply {
         gap(6); padding(Insets.of(6)); surface(HudTheme.panel(true))
@@ -244,9 +244,9 @@ class FriendsSocialScreen(private var tab: Tab = Tab.FRIENDS) : BaseOwoScreen<Fl
     private fun rebuild() { uiAdapter.rootComponent.clearChildren(); build(uiAdapter.rootComponent); uiAdapter.inflateAndMount() }
     companion object {
         private val CYAN get() = HudTheme.ACCENT
-        private const val WHITE = 0xEDF3F7
-        private const val MUTED = 0x91A2AF
-        private const val RED = 0xF18C8C
+        private val WHITE get() = HudTheme.TEXT
+        private val MUTED get() = HudTheme.MUTED
+        private val RED get() = HudTheme.RED
         private val DATE = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
     }
 }
