@@ -21,7 +21,7 @@ fun parseCosmeticProfile(json: JsonObject): CosmeticProfile? = runCatching {
     val id = json.get("uuid").also { require(it.asJsonPrimitive.isString) }.asString.also { require(it.matches(Regex("[a-f0-9]{32}"))) }
     val uuid = UUID.fromString("${id.take(8)}-${id.substring(8, 12)}-${id.substring(12, 16)}-${id.substring(16, 20)}-${id.substring(20)}")
     val name = json.get("name").takeUnless { it.isJsonNull }?.also { require(it.asJsonPrimitive.isString) }?.asString?.also {
-        require(it.length in 1..32 && it.matches(Regex("[\\p{L}\\p{N} _.'-]+")) && it == it.trim() && Normalizer.normalize(it, Normalizer.Form.NFKC) == it)
+        require(it.length in 1..32 && it.matches(Regex("[\\p{L}\\p{N}\\p{S} _.'•·»«-]+")) && it.none { char -> char == '§' || char == '@' } && it == it.trim() && Normalizer.normalize(it, Normalizer.Form.NFKC) == it)
     }
     val scale = json.get("scale").asDouble.also { require(it.isFinite() && it in .5..2.0 && json.get("scale").asJsonPrimitive.isNumber) }.toFloat()
     fun integer(key: String) = json.get(key).also { require(it.asJsonPrimitive.isNumber && it.asString.matches(Regex("[0-9]{1,16}"))) }.asLong.also { require(it in 0..9007199254740991L) }

@@ -13,6 +13,7 @@ fun checkCosmetics() {
     val raw = """{"uuid":"${"a".repeat(32)}","name":"Hawk","scale":1.5,"revision":1,"updatedAt":1700000000000}"""
     val profile = requireNotNull(parse(raw))
     check(profile.name == "Hawk" && profile.scale == 1.5f)
+    check(parse(raw.replace("Hawk", "✦ Hawk • ☠"))?.name == "✦ Hawk • ☠")
     listOf(raw.replace("1.5", "2.01"), raw.replace("1.5", "0.49"), raw.replace("1.5", "\"NaN\""),
         raw.replace("\"Hawk\"", "123"), raw.replace("Hawk", "§aHawk"), raw.replace("Hawk", "a\\nb"),
         raw.replace("Hawk", "x".repeat(33)), raw.replace("Hawk", "<click:run>"), raw.replace("Hawk", "@everyone"),
@@ -47,6 +48,7 @@ fun checkCosmetics() {
     fun text(sequence: FormattedCharSequence) = buildString { sequence.accept { _, _, code -> appendCodePoint(code); true } }
     val names = CosmeticNameMap()
     val replacement = parseCosmeticText(JsonParser.parseString("""{"text":"Sky","bold":true,"extra":[{"text":" Hawk","color":"#67ccf2"}]}"""))
+    check(parseCosmeticText(JsonParser.parseString("""{"text":"✦ Sky","extra":[{"text":" Hawk ☠"}]}""")).string == "✦ Sky Hawk ☠")
     check(names.update(mapOf("Alice" to replacement, "Bob" to Component.literal("Alice"))))
     check(!names.update(mapOf("Alice" to replacement, "Bob" to Component.literal("Alice"))))
     val input = Component.literal("[MVP] Al").append(Component.literal("ice").withStyle(Style.EMPTY.withItalic(true))).append(" / Bob / Alice123 / xAlice / Alice_x")
