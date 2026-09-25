@@ -222,7 +222,7 @@ object DungeonFriendRelay {
                                                 sign()
                                             }
                                             val base64 = Base64.getEncoder()
-                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid, "liveUpdates" to true, "userMessages" to true, "cosmetics" to true, "cosmeticsVersion" to 2,
+                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid, "liveUpdates" to true, "userMessages" to true, "cosmetics" to true, "cosmeticsVersion" to 3,
                                                 "expires" to certificate.expiresAt().toEpochMilli(),
                                                 "publicKey" to base64.encodeToString(certificate.key().encoded),
                                                 "keySignature" to base64.encodeToString(certificate.keySignature()),

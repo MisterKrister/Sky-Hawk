@@ -1,6 +1,16 @@
 /** A deliberately small, inert subset of Minecraft text components. No events, fonts, selectors or translations. */
 export type CosmeticText = { text: string; color?: string; bold?: boolean; italic?: boolean; underlined?: boolean; strikethrough?: boolean; extra?: CosmeticText[] };
 const colors = new Set(["black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple", "gold", "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple", "yellow", "white"]);
+function generatorText(source: string): unknown {
+  // Some editors copy SNBT-like arrays with bare component keys and Discord-escaped underscores.
+  const json = source.replace(/"(?:\\.|[^"\\])*"|([,{]\s*)(text|color|bold|italic|underlined|strikethrough|extra)\s*:/g,
+    (token, prefix: string | undefined, key: string | undefined) => prefix ? `${prefix}"${key}":` : token.replace(/\\_/g, "_"));
+  const value: unknown = JSON.parse(json);
+  if (!Array.isArray(value)) return value;
+  const [first, ...rest] = value;
+  if (typeof first !== "string") throw new Error("Name arrays must start with text.");
+  return { text: first, extra: rest.map(item => typeof item === "string" ? { text: item } : item) };
+}
 export function cosmeticText(value: unknown): { plain: string | null; component: CosmeticText | null } {
   if (typeof value !== "string" || value.length > 2048 || new TextEncoder().encode(value).length > 2048) throw new Error("Name must be plain text or a text-component JSON object, at most 2 KiB.");
   const source = value.trim();
@@ -29,7 +39,7 @@ export function cosmeticText(value: unknown): { plain: string | null; component:
     return result;
   }
   let component: CosmeticText;
-  try { component = parse(source.startsWith("{") ? JSON.parse(source) : { text: source }, 0); }
+  try { component = parse(source.startsWith("{") || source.startsWith("[") ? generatorText(source) : { text: source }, 0); }
   catch (error) { throw new Error(error instanceof SyntaxError ? "Invalid name JSON." : (error as Error).message); }
   if (!plain.trim() || plain !== plain.trim()) throw new Error("Names must not be blank or start/end with spaces.");
   return { plain, component };

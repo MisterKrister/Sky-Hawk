@@ -14,7 +14,7 @@ fun checkCosmetics() {
     val profile = requireNotNull(parse(raw))
     check(profile.name == "Hawk" && profile.scale == 1.5f)
     check(parse(raw.replace("Hawk", "✦ Hawk • ☠"))?.name == "✦ Hawk • ☠")
-    listOf(raw.replace("1.5", "2.01"), raw.replace("1.5", "0.49"), raw.replace("1.5", "\"NaN\""),
+    listOf(raw.replace("1.5", "3.01"), raw.replace("1.5", "0.09"), raw.replace("1.5", "\"NaN\""),
         raw.replace("\"Hawk\"", "123"), raw.replace("Hawk", "§aHawk"), raw.replace("Hawk", "a\\nb"),
         raw.replace("Hawk", "x".repeat(33)), raw.replace("Hawk", "<click:run>"), raw.replace("Hawk", "@everyone"),
         raw.replace("\"revision\":1", "\"revision\":-1"), raw.replace("\"revision\":1", "\"revision\":1.5"),
@@ -32,6 +32,8 @@ fun checkCosmetics() {
     check(cache.size == 2 && cache.get(profile.uuid, 700004) == null)
     cache.clear(); check(cache.size == 0)
     check(parse(raw.replace("\"Hawk\"", "null").replace("1.5", "1").replace("\"revision\":1", "\"revision\":0").replace("1700000000000", "0")) != null)
+    check(parse(raw.replace("1.5", "0.1"))?.scale == .1f)
+    check(parse(raw.replace("1.5", "3.0"))?.scale == 3f)
     val extended = JsonParser.parseString(raw).asJsonObject.apply {
         add("nameStyle", JsonParser.parseString("""{"text":"Hawk","bold":true,"color":"gold"}"""))
         addProperty("scaleX", .6); addProperty("scaleY", 1.5); addProperty("scaleZ", 2)
@@ -39,7 +41,9 @@ fun checkCosmetics() {
     val axes = requireNotNull(parseCosmeticProfile(extended))
     check(axes.scaleX == .6f && axes.scaleY == 1.5f && axes.scaleZ == 2f)
     check(axes.nameStyle!!.style.isBold)
-    check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("scaleX", 2.1) }) == null)
+    check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("scaleX", 3.01) }) == null)
+    check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("scaleX", .1) })?.scaleX == .1f)
+    check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("scaleZ", 3) })?.scaleZ == 3f)
     check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("scaleY", "1.5") }) == null)
     check(parseCosmeticProfile(extended.deepCopy().apply { addProperty("name", "Wrong") }) == null)
     for (unsafe in listOf("""{"text":"Hawk","clickEvent":{"action":"run_command","command":"/op"}}""", """{"translate":"anything"}""", """{"text":"Hawk","font":"remote:font"}""", """{"text":"Hawk","bold":"true"}""")) {

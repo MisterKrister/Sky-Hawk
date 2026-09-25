@@ -183,10 +183,10 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.liveUpdates = data.liveUpdates === true;
         session.userMessages = data.userMessages === true;
         session.cosmetics = data.cosmetics === true;
-        session.cosmeticsVersion = data.cosmeticsVersion === 2 ? 2 : 1;
+        session.cosmeticsVersion = data.cosmeticsVersion === 3 ? 3 : data.cosmeticsVersion === 2 ? 2 : 1;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true, digestNews: true, rngFeed: true, userMessages: true, cosmetics: true, cosmeticsVersion: 2 }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true, digestNews: true, rngFeed: true, userMessages: true, cosmetics: true, cosmeticsVersion: 3 }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
       return;
     }
