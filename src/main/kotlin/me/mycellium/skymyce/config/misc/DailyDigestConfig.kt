@@ -20,11 +20,11 @@ object DailyDigestConfig : CategoryKt("Daily Digest") {
     }
     val gameUpdates by boolean(true) { name = TranslatableValue.literal("Game updates"); description = TranslatableValue.literal("Include Cowshed updates for the live SkyBlock server.") }
     val alphaUpdates by boolean(true) { name = TranslatableValue.literal("Alpha updates"); description = TranslatableValue.literal("Include Cowshed announcements for the Alpha test server.") }
-    val receiveRng by boolean(false) {
+    val receiveRng by boolean(true) {
         name = TranslatableValue.literal("Receive community RNG feed")
         description = TranslatableValue.literal("Show optional, unverified drop reports from other Sky-Hawk users")
     }
-    val shareRng by boolean(false) {
+    val shareRng by boolean(true) {
         name = TranslatableValue.literal("Share personal RNG drops")
         description = TranslatableValue.literal("Send only supported drop, activity, time and an optional public name through the authenticated relay. No chat or inventory is sent.")
     }
