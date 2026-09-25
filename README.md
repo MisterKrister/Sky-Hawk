@@ -6,6 +6,8 @@ Open the in-game config with `/skymyce` or `/sm`.
 
 Settings now use five searchable categories with expandable advanced options and shared accent/opacity controls. See the [settings and Party Finder matcher guide](docs/settings-party-finder.md).
 
+The integrated **2.4.2** upgrade adds a paged auction index and item browser (`/sm ah`), a four-view dungeon dashboard (`/sm dungeon`), permanent personal RNG collections, inherited global/widget themes, server-owned visual cosmetics, and acknowledged relay private messages. Read the [auction/tracker/theme guide](docs/auction-tracker-themes.md), [cosmetics and messaging setup](docs/cosmetics-messaging.md), and [validation checklist](docs/upgrade-validation.md). Existing saves and command roots remain compatible; cosmetics require an operator-configured relay/Discord application.
+
 ## Why play with Sky-Hawk?
 
 Sky-Hawk is designed for players who want a smoother SkyBlock experience without sacrificing clarity or speed. Instead of forcing you to memorize every timer, state, or action, it quietly surfaces the information you need and automates the repetitive parts of the game.
@@ -71,7 +73,7 @@ From dungeon prep and chest safety to party coordination and daily tracking, Sky
 ### Dungeon Tracker
 
 - Tracker Screen (`/skymyce dungeon`)  
-  Opens a detailed overview of your dungeon runs and progression data.
+  Overview, searchable/sortable Loot, dated RNG Timeline and a personal collection Museum, with floor, mode, date and session filters. Legacy all-time totals remain accessible.
 
 - Tracker Widget  
   Shows a summary of your dungeon tracker while in the dungeon hub or at the end of a run so your stats are always visible.
@@ -85,7 +87,10 @@ From dungeon prep and chest safety to party coordination and daily tracking, Sky
   Send requests, check availability, and coordinate party selection directly from the mod interface without having to manually message everyone.
 
 - Relay-backed communication  
-  Uses a relay system to improve friend and party communication, including request handling and invite flow.
+  `/sm msg <ign> <message>` and `/sm reply` (`/sm r`) provide private friend conversations with recipient acknowledgements, separately from LFG controls. Messages never silently fall back to Hypixel chat.
+
+- Visual cosmetics (`/sm cosmetics`)
+  Authenticated Discord account linking controls styled custom names and independent X/Y/Z visual player sizes. Only enabled, supporting Sky-Hawk clients see them; real identities remain authoritative. See [player commands, channel permissions and operator setup](docs/cosmetics-discord.md).
 
 ---
 
@@ -125,6 +130,7 @@ Instead of turning the game into a cluttered overlay, the mod aims to make the i
 Sky-Hawk uses the following libraries:
 
 - SkyblockAPI
+- SkyBlockPv (bundled)
 - Resourceful Config
 - owo-lib (not bundled)
 

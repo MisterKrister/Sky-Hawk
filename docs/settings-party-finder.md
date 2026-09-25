@@ -12,7 +12,7 @@ The five tabs are **General**, **Party Finder**, **Dungeons & Combat**, **Social
 
 **Open…** groups feature shortcuts in one menu. RNG history entries have one **Share…** menu: Party chat, Guild chat, or Copy report. Chat actions prepare a bounded draft; sending it requires the player's normal confirmation. Community reports retain their **unverified** label even when long text is shortened. There is no public RNG permalink service, so Copy report copies text.
 
-The global primary/secondary accents accept six-digit RGB hex, a color picker, or individual RGB sliders. Panel opacity ranges from 20–100%. Menus, cards, buttons and HUD panels use the shared rounded dark-glass surfaces. Status colors keep their meaning. Existing HUD position and scale controls remain in `/sm hud`. Previous Digest accent/opacity settings migrate once into the global theme, and duplicate theme controls are hidden. Changed settings save when the screen closes.
+**Theme & Appearance → Shared theme** now uses Dark glass, Minimal, Light and High contrast presets, with nullable global and per-widget overrides. Colors accept six-digit RGB hex, a picker or RGB sliders; panel opacity ranges from 20–100%. Panel/card/text/border colors, padding, corners and text shadow use the same shared theme. Status colors keep their meaning. Right-click a widget in `/sm hud` to edit its overrides without resetting position, anchoring or scale. Reset restores inheritance; versioned clipboard theme import/export is bounded and data-only. Previous Digest accent/opacity settings migrate once, with original configuration preserved. Changes save when the editor closes. See the [theme and migration guide](auction-tracker-themes.md).
 
 ## Party Finder matching
 
