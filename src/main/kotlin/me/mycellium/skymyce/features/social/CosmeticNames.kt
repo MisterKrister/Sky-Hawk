@@ -20,7 +20,7 @@ fun parseCosmeticText(json: JsonElement): Component {
         val node = value.asJsonObject
         require(node.keySet().all { it in setOf("text", "color", "bold", "italic", "underlined", "strikethrough", "extra") })
         val text = node.get("text").also { require(it.isJsonPrimitive && it.asJsonPrimitive.isString) }.asString
-        require(text.matches(Regex("[\\p{L}\\p{N} _.'-]*")) && Normalizer.normalize(text, Normalizer.Form.NFKC) == text)
+        require(text.matches(Regex("[\\p{L}\\p{N}\\p{S} _.'•·»«-]*")) && text.none { it == '§' || it == '@' } && Normalizer.normalize(text, Normalizer.Form.NFKC) == text)
         plain.append(text); require(plain.length <= 32)
         var style = Style.EMPTY
         node.get("color")?.let {
