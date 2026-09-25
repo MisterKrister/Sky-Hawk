@@ -112,10 +112,10 @@ export async function checkCosmetics(script, proof) {
     const late = await connect("Bob"); assert.deepEqual((await request(late, { type: "cosmetics_get", uuids: [a] })).records[0], reset);
     await resetLimits();
     assert.match(await call(command("set", { target: b, name: "Admin set" }, adminActor)), /Unsupported/); // No target bypass, including former administrators.
-    const styled = JSON.stringify({ text: "Sky", color: "gold", bold: true, extra: [{ text: " Hawk", color: "#67ccf2", italic: true }] });
+    const styled = JSON.stringify({ text: "✦ Sky", color: "gold", bold: true, extra: [{ text: " Hawk ☠", color: "#67ccf2", italic: true }] });
     assert.match(await call(command("set", { name: styled, x: 1.6 })), /Saved/);
     let update = (await late.next()).record;
-    assert.equal(update.name, "Sky Hawk"); assert.equal(update.nameStyle.bold, true);
+    assert.equal(update.name, "✦ Sky Hawk ☠"); assert.equal(update.nameStyle.bold, true);
     assert.equal(update.scaleX, 1.6); assert.equal(update.scaleY, 1); assert.equal(update.scaleZ, 1);
     assert.match(await call(command("set", { y: .8 })), /Saved/);
     update = (await late.next()).record; assert.equal(update.scaleX, 1.6); assert.equal(update.scaleY, .8); assert.equal(update.scaleZ, 1);

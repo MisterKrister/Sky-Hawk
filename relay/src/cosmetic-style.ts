@@ -11,7 +11,7 @@ export function cosmeticText(value: unknown): { plain: string | null; component:
     const data = input as Record<string, unknown>;
     if (Object.keys(data).some(key => !["text", "color", "bold", "italic", "underlined", "strikethrough", "extra"].includes(key)) || typeof data.text !== "string") throw new Error("Use text, color, bold, italic, underlined, strikethrough and extra only.");
     const text = data.text.normalize("NFKC");
-    if (!/^[\p{L}\p{N} _.'-]*$/u.test(text) || /[\p{C}§]/u.test(data.text)) throw new Error("Use letters, numbers, spaces, apostrophes, dots, underscores or hyphens in names.");
+    if (!/^[\p{L}\p{N}\p{S} _.'•·»«-]*$/u.test(text) || /[\p{C}§@]/u.test(data.text)) throw new Error("Use letters, numbers, supported symbols and simple separators in names.");
     plain += text;
     if (plain.length > 32) throw new Error("Display names may contain at most 32 characters.");
     const result: CosmeticText = { text };
