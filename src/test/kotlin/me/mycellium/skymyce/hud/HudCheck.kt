@@ -11,6 +11,7 @@ import me.mycellium.skymyce.hud.widget.hudEditorControlAt
 /** Exercises retained owo layout without a Minecraft window or a test framework. */
 fun main() {
     checkSettings()
+    checkThemes()
     me.mycellium.skymyce.features.digest.digestUiCheck()
     val editorRoot = io.wispforest.owo.ui.container.UIContainers.verticalFlow(Sizing.fill(), Sizing.fill())
     val resetControl = UIComponents.box(Sizing.fixed(150), Sizing.fixed(20)).positioning(io.wispforest.owo.ui.core.Positioning.absolute(245, 330))

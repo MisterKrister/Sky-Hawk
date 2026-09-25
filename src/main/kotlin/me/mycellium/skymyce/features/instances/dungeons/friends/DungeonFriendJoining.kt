@@ -90,11 +90,11 @@ data class DungeonLfgOffer(val request: DungeonJoinRequest, val text: String, va
         val classes = request.classes.joinToString("/") { it.displayName }
         return Component.literal("§b$name §7wants you to join §b${request.floor.name} §7as §f$classes")
             .append("  ").append(Component.literal("§a[Yes]").withStyle {
-                it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name yes ${request.token}"))
+                it.withClickEvent(ClickEvent.RunCommand("/skymyce lfgreply $name yes ${request.token}"))
                     .withHoverEvent(HoverEvent.ShowText(Component.literal("Click to join $name's party")))
             })
             .append("  ").append(Component.literal("§c[No]").withStyle {
-                it.withClickEvent(ClickEvent.RunCommand("/skymyce relaymsg $name no ${request.token}"))
+                it.withClickEvent(ClickEvent.RunCommand("/skymyce lfgreply $name no ${request.token}"))
                     .withHoverEvent(HoverEvent.ShowText(Component.literal("Click to decline the invitation")))
             })
     }

@@ -7,6 +7,16 @@ import tech.thatgravyboat.skyblockapi.api.remote.hypixel.pricing.BazaarAPI
 import tech.thatgravyboat.skyblockapi.api.remote.hypixel.pricing.LowestBinAPI
 
 object ItemUtils {
+    /** Display-only copy: preserve lore/upgrades, but use the base item when a custom model is unavailable. */
+    fun displayStack(stack: net.minecraft.world.item.ItemStack): net.minecraft.world.item.ItemStack {
+        if (stack.isEmpty) return stack
+        val key = net.minecraft.core.component.DataComponents.ITEM_MODEL
+        val model = stack.get(key) ?: return stack
+        if (MC.instance.modelManager.getItemModel(model) !is net.minecraft.client.renderer.item.MissingItemModel) return stack
+        val base = stack.item.defaultInstance.get(key) ?: return stack
+        return stack.copy().apply { set(key, base) }
+    }
+
     fun SkyBlockId.getPrice(bazaar: BazaarType, auction: AuctionType): Double {
         val bazaarProduct = BazaarAPI.getProduct(this.bazaarId)
         if (bazaarProduct != null) {

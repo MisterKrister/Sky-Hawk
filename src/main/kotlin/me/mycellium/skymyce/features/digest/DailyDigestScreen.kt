@@ -358,7 +358,7 @@ class DailyDigestScreen(private var page: String? = null) : BaseOwoScreen<FlowLa
     }
     private fun setText(label: LabelComponent, value: String) { if (label.text().string != value) label.text(Component.literal(value)) }
     private fun label(text: String, color: Int = HudTheme.TEXT) = UIComponents.label(Component.literal(text)).apply {
-        color(Color.ofRgb(color)); shadow(false); horizontalSizing(Sizing.fill()); lineSpacing(3)
+        color(Color.ofRgb(color)); shadow(HudTheme.SHADOW); horizontalSizing(Sizing.fill()); lineSpacing(3)
     }
     private fun column() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply { gap(layout.gap) }
     private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(6); verticalAlignment(VerticalAlignment.CENTER) }

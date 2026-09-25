@@ -3,8 +3,10 @@ import { verifyAccount } from "./auth";
 import { classes, SharedStats, STATS_TTL, validateStats, type StatsGrant } from "./stats";
 import { SharedWealth, WEALTH_TTL, validateWealth } from "./wealth";
 import { DigestNews, DigestRng, type DigestConfig } from "./digest";
+import { PlayerCosmetics, codeHash, newLinkCode, normalizedCode, cosmeticPayload, watchCosmetics, watchesCosmetic, type CosmeticsConfig, type DiscordCommand } from "./cosmetics";
+import { verifiedInteraction, discordCommand } from "./discord";
 
-type RelayEnv = Env & DigestConfig;
+type RelayEnv = Env & DigestConfig & CosmeticsConfig;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
 type Session = {
   started?: number;
@@ -15,11 +17,17 @@ type Session = {
   uuid?: string;
   registered?: boolean;
   liveUpdates?: boolean;
+  userMessages?: boolean;
+  cosmetics?: boolean;
+  cosmeticsVersion?: number;
+  cosmeticWatching?: string;
+  cosmeticCredits?: number;
+  cosmeticUpdated?: number;
   checking?: boolean;
   credits: number;
   updated: number;
   seen: string[];
-  inbox: { id: string; from: string; expires: number }[];
+  inbox: { id: string; from: string; expires: number; user?: boolean }[];
   uploads?: StatsGrant[];
   wealthUploads?: StatsGrant[];
   wealthCredits?: number;
@@ -40,6 +48,18 @@ const encoder = new TextEncoder();
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/discord/interactions") {
+      if (!env.DISCORD_PUBLIC_KEY || !env.DISCORD_APPLICATION_ID) return new Response("Interactions not configured", { status: 503 });
+      if (!(await env.CONNECT_LIMIT.limit({ key: `discord:${request.headers.get("CF-Connecting-IP") ?? "local"}` })).success) return new Response("Rate limited", { status: 429 });
+      const data = await verifiedInteraction(request, env);
+      if (!data) return new Response("Invalid signature or interaction", { status: 401 });
+      if (data.type === 1) return Response.json({ type: 1 });
+      const command = discordCommand(data);
+      if (!command) return Response.json({ type: 4, data: { content: "Unsupported command.", flags: 64, allowed_mentions: { parse: [] } } });
+      const room = env.DISCORD_INTERACTIONS_ROOM ?? "friends";
+      if (!env.ROOMS.split(",").includes(room)) return new Response("Interactions room unavailable", { status: 503 });
+      return Response.json(await env.RELAY_ROOMS.getByName(room).discordInteraction(command));
+    }
     if (url.pathname === "/health") return Response.json({ service: "SkyMyce relay", version: 2 });
     if (url.pathname !== "/websocket") return new Response("Not found", { status: 404 });
     if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -62,6 +82,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
   private readonly wealth: SharedWealth;
   private readonly news: DigestNews;
   private readonly rng: DigestRng;
+  private readonly cosmetics: PlayerCosmetics;
   constructor(ctx: DurableObjectState, env: RelayEnv) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -69,6 +90,7 @@ export class RelayRoom extends DurableObject<RelayEnv> {
     this.wealth = new SharedWealth(ctx.storage.sql);
     this.news = new DigestNews(ctx.storage.sql, env);
     this.rng = new DigestRng(ctx.storage.sql);
+    this.cosmetics = new PlayerCosmetics(ctx.storage);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS mod_users (
       uuid TEXT PRIMARY KEY, name TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL)`);
     // Register already-authenticated sockets on the first wake after upgrading the relay.
@@ -80,6 +102,20 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         ws.serializeAttachment(session);
       }
     }
+  }
+
+  /** Binding-only RPC. The public Worker verifies Discord's exact signed HTTP body first. */
+  async discordInteraction(command: DiscordCommand): Promise<object> {
+    const result = await this.cosmetics.command(command, this.env, Date.now());
+    if (result.changed) {
+      for (const ws of this.ctx.getWebSockets()) {
+        const session = ws.deserializeAttachment() as Session;
+        if (ws.readyState === WebSocket.OPEN && session.name && session.cosmetics && watchesCosmetic(session.cosmeticWatching, result.changed.uuid)) {
+          try { ws.send(JSON.stringify({ type: "cosmetics_event", record: cosmeticPayload(result.changed, session.cosmeticsVersion) })); } catch { /* Reconnect lookup restores the newest revision. */ }
+        }
+      }
+    }
+    return result.response;
   }
 
   private registerUser(id: string, name: string): void {
@@ -145,10 +181,40 @@ export class RelayRoom extends DurableObject<RelayEnv> {
         session.uuid = profile.id;
         session.registered = true;
         session.liveUpdates = data.liveUpdates === true;
+        session.userMessages = data.userMessages === true;
+        session.cosmetics = data.cosmetics === true;
+        session.cosmeticsVersion = data.cosmeticsVersion === 2 ? 2 : 1;
         session.challenge = "";
         ws.serializeAttachment(session);
-        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true, digestNews: true, rngFeed: true }));
+        ws.send(JSON.stringify({ type: "ready", name: session.name, uuid: session.uuid, protocol: 2, statsCache: true, wealthCache: true, partyPolicies: true, liveUpdates: true, digestNews: true, rngFeed: true, userMessages: true, cosmetics: true, cosmeticsVersion: 2 }));
       } catch { console.error({ event: "verification_failed" }); ws.close(1013, "Minecraft verification unavailable; retry later"); }
+      return;
+    }
+
+    if (data.type === "cosmetics_get" || data.type === "cosmetics_link" || data.type === "cosmetics_subscribe") {
+      const now = Date.now();
+      if (!session.cosmetics || typeof data.id !== "string" || !uuid.test(data.id) || encoder.encode(raw).length > 2048) { ws.close(1008, "Invalid cosmetics request"); return; }
+      if (data.type === "cosmetics_subscribe" && data.enabled === false) {
+        session.cosmeticWatching = undefined; ws.serializeAttachment(session);
+        ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, disabled: true })); return;
+      }
+      session.cosmeticCredits = Math.min(8, (session.cosmeticCredits ?? 8) + (now - (session.cosmeticUpdated ?? now)) / 1000);
+      session.cosmeticUpdated = now;
+      if (session.cosmeticCredits < 1) { ws.serializeAttachment(session); ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, error: "rate_limited" })); return; }
+      session.cosmeticCredits--; ws.serializeAttachment(session);
+      if (data.type === "cosmetics_link") {
+        if (!this.env.DISCORD_PUBLIC_KEY || !this.env.DISCORD_APPLICATION_ID) { ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, error: "not_configured" })); return; }
+        const code = newLinkCode();
+        const result = this.cosmetics.issue(session.uuid!, await codeHash(normalizedCode(code)!), now);
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, ...result, ...(result.error ? {} : { code }) }));
+        return;
+      }
+      if (data.type !== "cosmetics_get" || !Array.isArray(data.uuids) || data.uuids.length < 1 || data.uuids.length > 16 || data.uuids.some(it => typeof it !== "string" || !uuid.test(it))) {
+        ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, error: "invalid_lookup" })); return;
+      }
+      const ids = [...new Set(data.uuids as string[])];
+      session.cosmeticWatching = watchCosmetics(session.cosmeticWatching, ids); ws.serializeAttachment(session);
+      ws.send(JSON.stringify({ type: "cosmetics_result", id: data.id, records: ids.map(id => cosmeticPayload(this.cosmetics.get(id), session.cosmeticsVersion)) }));
       return;
     }
 
@@ -333,19 +399,26 @@ export class RelayRoom extends DurableObject<RelayEnv> {
 
     if (encoder.encode(raw).length > 2048) { ws.close(1009, "Message too large"); return; }
 
-    if ((data.type !== "message" && data.type !== "ack") || typeof data.id !== "string" || !/^[a-f0-9]{32}$/.test(data.id) ||
-        typeof data.to !== "string" || !username.test(data.to) || (data.type === "message" && (typeof data.text !== "string" ||
+    const ordinary = data.type === "user_message";
+    const receiptMessage = data.type === "ack" || data.type === "reject";
+    if ((data.type !== "message" && !ordinary && !receiptMessage) || typeof data.id !== "string" || !/^[a-f0-9]{32}$/.test(data.id) ||
+        (ordinary && !session.userMessages) || (data.type === "reject" && !session.userMessages) ||
+        typeof data.to !== "string" || !username.test(data.to) || (!receiptMessage && (typeof data.text !== "string" ||
         data.text.length < 1 || data.text.length > 256 || /[\x00-\x1f\x7f§]/.test(data.text)))) {
       ws.close(1008, "Invalid relay message"); return;
     }
     const now = Date.now();
     session.credits = Math.min(12, session.credits + (now - session.updated) / 2500);
     session.updated = now;
-    if (session.credits < 1) { ws.close(1008, "Message rate exceeded"); return; }
+    if (session.credits < 1) {
+      if (ordinary) { ws.serializeAttachment(session); ws.send(JSON.stringify({ type: "error", id: data.id, code: "rate_limited" })); }
+      else ws.close(1008, "Message rate exceeded");
+      return;
+    }
     session.credits--;
-    if (data.type === "ack") {
+    if (receiptMessage) {
       const receipt = session.inbox.find(it => it.id === data.id && it.from.toLowerCase() === (data.to as string).toLowerCase());
-      if (!receipt || receipt.expires <= now) {
+      if (!receipt || receipt.expires <= now || (data.type === "reject" && !receipt.user)) {
         // Late/duplicate receipts cannot be distinguished from invented IDs. Never forward either.
         ws.serializeAttachment(session);
         ws.send(JSON.stringify({ type: "error", id: data.id, code: "invalid_receipt" })); return;
@@ -365,16 +438,18 @@ export class RelayRoom extends DurableObject<RelayEnv> {
       ws.send(JSON.stringify({ type: "error", id: data.id, code: "offline" })); return;
     }
     try {
-      if (data.type === "message") {
+      if (!receiptMessage) {
         const recipient = target.deserializeAttachment() as Session;
-        recipient.inbox = [...recipient.inbox.filter(it => it.expires > now), { id: data.id, from: session.name, expires: now + 10000 }];
+        if (ordinary && !recipient.userMessages) { ws.send(JSON.stringify({ type: "error", id: data.id, code: "recipient_unsupported" })); return; }
+        recipient.inbox = [...recipient.inbox.filter(it => it.expires > now), { id: data.id, from: session.name, expires: now + 10000, ...(ordinary ? { user: true } : {}) }];
         // Reject before delivery rather than evicting a still-valid receipt. Attachments are limited to 2 KiB.
         if (recipient.inbox.length > 16 || encoder.encode(JSON.stringify(recipient)).length > 2048) {
           ws.send(JSON.stringify({ type: "error", id: data.id, code: "recipient_busy" })); return;
         }
         target.serializeAttachment(recipient);
       }
-      target.send(JSON.stringify({ type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
+      target.send(JSON.stringify(data.type === "reject" ? { type: "error", id: data.id, code: "recipient_disallowed" } :
+        { type: data.type, id: data.id, from: session.name, uuid: session.uuid, text: data.text }));
       // Correlate delivery failures without logging names, private messages, or account proof.
       console.info({ event: "relay_delivery", id: data.id, outcome: data.type === "ack" ? "acknowledged" : "forwarded" });
     } catch {

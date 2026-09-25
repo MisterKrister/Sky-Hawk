@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { checkDigest } from "./digest.mjs";
+import { checkSocial } from "./social.mjs";
+import { checkCosmetics } from "./cosmetics.mjs";
 
 // Replace public trust roots only in this in-memory test bundle. Production has no auth bypass.
 const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -394,3 +396,5 @@ try {
   await mf.dispose();
 }
 await checkDigest(script, proof);
+await checkSocial(script, proof);
+await checkCosmetics(script, proof);

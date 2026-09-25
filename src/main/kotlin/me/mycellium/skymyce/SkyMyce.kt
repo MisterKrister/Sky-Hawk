@@ -25,6 +25,7 @@ import me.mycellium.skymyce.features.instances.dungeons.DungeonWinOverlay
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
 import me.mycellium.skymyce.features.instances.dungeons.friends.GearLending
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTracker
+import me.mycellium.skymyce.features.instances.dungeons.tracker.AcquisitionRepository
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTrackerWidget
 import me.mycellium.skymyce.features.mining.MiningFeatures
 import me.mycellium.skymyce.features.troll.CheesePizza
@@ -52,7 +53,7 @@ object SkyMyce : ClientModInitializer {
     lateinit var config: ResourcefulConfig
 
     override fun onInitializeClient() {
-        config = Config.register(configurator)
+        config = me.mycellium.skymyce.config.loadSkyMyceConfig()
         ThemeConfig.migrateDigestTheme()
         config.save()
 
@@ -62,7 +63,8 @@ object SkyMyce : ClientModInitializer {
             DevTooltips,
             LoadoutKeybinds, SkyMyceCommands, SkillXpOverlay, AbilityCooldownOverlay, AutoRefill, ClientInfoOverlay, PartyCommands, Waypoints,
             StashHelper, PartyFinder, DungeonFriends, GearLending, InstanceRequeue, MissingPlayers, DungeonChestOverlay, DungeonTracker, DungeonTrackerWidget, DungeonCleanChat, DungeonWinOverlay,
-            MiningFeatures, Plane, DailyDigest, DigestActivities, DigestRng
+            MiningFeatures, Plane, AcquisitionRepository, DailyDigest, DigestActivities, DigestRng,
+            me.mycellium.skymyce.features.social.CosmeticsClient
         )
 
         ModuleManager.modules.forEach {

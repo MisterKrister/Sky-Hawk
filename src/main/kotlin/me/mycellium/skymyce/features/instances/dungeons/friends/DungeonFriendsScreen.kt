@@ -77,6 +77,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         val state = listOf(
             DungeonFriendStatsCache.version, DungeonFriends.scanner.online.toMap(), floor, sort, ascending, wantedClasses(),
             DungeonFriendsSettings.secondaryClasses, DungeonFriends.replies.version, showLowCata,
+            me.mycellium.skymyce.features.social.CosmeticsClient.revision,
         )
         if (state != renderedState) {
             renderedState = state
@@ -115,7 +116,7 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
     }
 
     private fun label(text: String, color: Int = WHITE) = UIComponents.label(Component.literal(text))
-        .color(Color.ofRgb(color)).shadow(false)
+        .color(Color.ofRgb(color)).shadow(HudTheme.SHADOW)
 
     private fun button(text: String, size: Int, onPress: (ButtonComponent) -> Unit) =
         object : ButtonComponent(Component.literal(text), onPress) {
@@ -311,7 +312,9 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
                 ?: if (stats == null) "Waiting for SkyBlock stats" else "SkyBlock profile stats"
             val identity = UIContainers.verticalFlow(Sizing.expand(), Sizing.content()).apply {
                 gap(3)
-                child(label(if (friend.bestFriend) "§l${friend.name}" else friend.name).horizontalSizing(Sizing.fill()))
+                child(label(if (friend.bestFriend) "§l${friend.name}" else friend.name).apply {
+                    horizontalSizing(Sizing.fill())
+                })
                 child(label(activity.label, activity.color).horizontalSizing(Sizing.fill()))
                 child(label(stats?.selectedClass?.displayName ?: "Unknown", if (stats?.selectedClass != null) CYAN else MUTED)
                     .horizontalSizing(Sizing.fill()))
@@ -495,8 +498,8 @@ class DungeonFriendsScreen : BaseOwoScreen<FlowLayout>() {
         private const val ACTIONS_WIDTH = 157 // Party + Invite + Join + Edit, with three 3px gaps.
         private const val ACTIONS_GAP = 12
         private val CYAN get() = HudTheme.ACCENT
-        private const val WHITE = 0xEDF3F7
-        private const val MUTED = 0x91A2AF
+        private val WHITE get() = HudTheme.TEXT
+        private val MUTED get() = HudTheme.MUTED
         private val displayedClasses = listOf(
             DungeonClass.HEALER to "HEAL", DungeonClass.MAGE to "MAGE", DungeonClass.BERSERKER to "BERS",
             DungeonClass.ARCHER to "ARCH", DungeonClass.TANK to "TANK",

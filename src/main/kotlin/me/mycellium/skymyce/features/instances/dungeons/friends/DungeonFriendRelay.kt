@@ -59,13 +59,13 @@ fun relayUri(text: String): URI? = runCatching {
 /** Only a receipt from the addressed player's mod cancels the fallback. */
 class RelayDeliveries {
     private data class Pending(val name: String, var deadline: Long, val received: () -> Unit,
-        val failed: (String) -> Unit, var transmit: (() -> Boolean)?)
+        val failed: (String) -> Unit, var transmit: (() -> Boolean)?, val notifyOnClear: Boolean)
     private val pending = linkedMapOf<String, Pending>()
     val full get() = pending.size >= 16
     fun add(id: String, name: String, now: Long, received: () -> Unit, failed: (String) -> Unit,
-            transmit: (() -> Boolean)? = null) {
+            notifyOnClear: Boolean = false, transmit: (() -> Boolean)? = null) {
         check(!full && id !in pending)
-        pending[id] = Pending(name, now + 5000, received, failed, transmit)
+        pending[id] = Pending(name, now + 5000, received, failed, transmit, notifyOnClear)
     }
     fun acknowledge(id: String, from: String) {
         val item = pending[id]?.takeIf { it.transmit == null && it.name.equals(from, true) } ?: return
@@ -86,7 +86,7 @@ class RelayDeliveries {
     fun clear(failed: Boolean = false) {
         val old = pending.values.toList()
         pending.clear()
-        if (failed) old.forEach { it.failed("connection_lost") }
+        old.filter { failed || it.notifyOnClear }.forEach { it.failed("connection_lost") }
     }
 }
 
@@ -98,9 +98,14 @@ object DungeonFriendRelay {
     private val deliveries = RelayDeliveries()
     private val statsRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
     private val digestRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    private val cosmeticsRequests = mutableMapOf<String, Pair<Long, CompletableFuture<JsonObject?>>>()
+    var cosmeticsAvailable = false
+        private set
     var digestNewsAvailable = false
         private set
     var rngFeedAvailable = false
+        private set
+    var userMessagesAvailable = false
         private set
     var onDigestEvent: ((JsonObject) -> Unit)? = null
     var onDigestReady: (() -> Unit)? = null
@@ -147,6 +152,7 @@ object DungeonFriendRelay {
         deliveries.tick(now)
         statsRequests.filterValues { it.first <= now }.keys.toList().forEach { statsRequests.remove(it)?.second?.complete(null) }
         digestRequests.filterValues { it.first <= now || it.second.isCancelled }.keys.toList().forEach { digestRequests.remove(it)?.second?.complete(null) }
+        cosmeticsRequests.filterValues { it.first <= now || it.second.isCancelled }.keys.toList().forEach { cosmeticsRequests.remove(it)?.second?.complete(null) }
         if ((connecting || socket != null) && now >= deadline) failed("Relay timed out; reconnecting")
         if (connected && now >= nextPing) { packet("ping"); nextPing = now + 45000 }
         if (socket != null || connecting || now < retry.nextAttempt) return
@@ -216,7 +222,7 @@ object DungeonFriendRelay {
                                                 sign()
                                             }
                                             val base64 = Base64.getEncoder()
-                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid, "liveUpdates" to true,
+                                            mapOf("type" to "authenticate", "name" to user.name, "uuid" to uuid, "liveUpdates" to true, "userMessages" to true, "cosmetics" to true, "cosmeticsVersion" to 2,
                                                 "expires" to certificate.expiresAt().toEpochMilli(),
                                                 "publicKey" to base64.encodeToString(certificate.key().encoded),
                                                 "keySignature" to base64.encodeToString(certificate.keySignature()),
@@ -251,6 +257,8 @@ object DungeonFriendRelay {
                                         policiesAvailable = json.get("partyPolicies")?.asBoolean == true
                                         digestNewsAvailable = json.get("digestNews")?.asBoolean == true
                                         rngFeedAvailable = json.get("rngFeed")?.asBoolean == true
+                                        userMessagesAvailable = json.get("userMessages")?.asBoolean == true
+                                        cosmeticsAvailable = json.get("cosmetics")?.asBoolean == true
                                         retry.reset()
                                         stage = "connected"
                                         deadline = DungeonFriends.now() + 90000
@@ -258,8 +266,9 @@ object DungeonFriendRelay {
                                         status = "Relay connected"
                                         SkyMyce.logger.info("[Dungeon relay] Connected (shared wealth={})", sharedWealthAvailable)
                                         onDigestReady?.invoke()
+                                        me.mycellium.skymyce.features.social.CosmeticsClient.ready()
                                     }
-                                    "message", "ack" -> {
+                                    "message", "user_message", "ack" -> {
                                         check(connected)
                                         val id = json.get("id").asString
                                         val from = json.get("from").asString
@@ -269,15 +278,21 @@ object DungeonFriendRelay {
                                         else {
                                             val body = json.get("text").asString
                                             check(body.length in 1..256 && body.none { it < ' ' || it == '\u007f' || it == '§' })
-                                            if (DungeonFriends.onRelayMessage(from, uuid, body)) {
+                                            val ordinary = json.get("type").asString == "user_message"
+                                            if (if (ordinary) RelayMessages.receive(from, uuid, body) else DungeonFriends.onRelayMessage(from, uuid, body)) {
                                                 packet(mapOf("type" to "ack", "to" to from, "id" to id))
                                                 SkyMyce.logger.info("[Dungeon relay] Accepted delivery {}", id)
-                                            } else SkyMyce.logger.info("[Dungeon relay] Rejected delivery {}", id)
+                                            } else {
+                                                if (ordinary) packet(mapOf("type" to "reject", "to" to from, "id" to id))
+                                                SkyMyce.logger.info("[Dungeon relay] Rejected delivery {}", id)
+                                            }
                                         }
                                     }
                                     "stats_result", "wealth_result" -> { check(connected); statsRequests.remove(json.get("id").asString)?.second?.complete(json) }
                                     "digest_news_result", "rng_result" -> { check(connected); runCatching { digestRequests.remove(json.get("id").asString)?.second?.complete(json) } }
                                     "rng_event" -> { check(connected); runCatching { onDigestEvent?.invoke(json) } }
+                                    "cosmetics_result" -> { check(connected && cosmeticsAvailable); cosmeticsRequests.remove(json.get("id").asString)?.second?.complete(json) }
+                                    "cosmetics_event" -> { check(connected && cosmeticsAvailable); runCatching { me.mycellium.skymyce.features.social.CosmeticsClient.event(json.getAsJsonObject("record")) } }
                                     "stats_update" -> {
                                         check(connected)
                                         val record = json.getAsJsonObject("record")
@@ -352,6 +367,15 @@ object DungeonFriendRelay {
     }
 
     fun send(name: String, text: String, received: () -> Unit = {}, failed: () -> Unit = {}): Boolean {
+        return sendDelivery("message", name, text, received) { failed() }
+    }
+
+    fun sendUserMessage(name: String, text: String, received: () -> Unit, failed: (String) -> Unit): Boolean {
+        if (!connected || !userMessagesAvailable) return false
+        return sendDelivery("user_message", name, text, received, failed)
+    }
+
+    private fun sendDelivery(type: String, name: String, text: String, received: () -> Unit, failed: (String) -> Unit): Boolean {
         if (deliveries.full || relayUri(DungeonFriendsSettings.relayUrl) == null || !name.matches(Regex("[A-Za-z0-9_]{1,16}")) ||
             text.length !in 1..256 || text.any { it < ' ' || it == '\u007f' || it == '§' }) {
             SkyMyce.logger.info("[Dungeon relay] Send rejected: invalid message/configuration or full delivery queue")
@@ -363,10 +387,10 @@ object DungeonFriendRelay {
             received()
         }, { reason ->
             SkyMyce.logger.info("[Dungeon relay] Delivery {} to {} failed: {}", id, name, reason)
-            failed()
-        }, {
+            failed(reason)
+        }, notifyOnClear = type == "user_message", transmit = {
             if (!connected) false else {
-                packet(mapOf("type" to "message", "id" to id, "to" to name, "text" to text))
+                packet(mapOf("type" to type, "id" to id, "to" to name, "text" to text))
                 SkyMyce.logger.info("[Dungeon relay] Sent delivery {} to {}", id, name)
                 true
             }
@@ -378,6 +402,20 @@ object DungeonFriendRelay {
     fun lookupStats(name: String, uuid: String?): CompletableFuture<JsonObject?>? {
         if (!sharedStatsAvailable) return null
         return lookupCache("stats_get", name, uuid)
+    }
+
+    fun cosmeticsRequest(type: String, fields: Map<String, Any> = emptyMap()): CompletableFuture<JsonObject?>? {
+        cosmeticsRequests.entries.removeIf { it.value.second.isDone }
+        if (!connected || !cosmeticsAvailable || cosmeticsRequests.size >= 2 || type !in setOf("cosmetics_get", "cosmetics_link", "cosmetics_subscribe")) return null
+        val id = UUID.randomUUID().toString().replace("-", "")
+        val future = CompletableFuture<JsonObject?>()
+        cosmeticsRequests[id] = DungeonFriends.now() + 8000 to future
+        packet(fields + mapOf("type" to type, "id" to id))
+        return future
+    }
+
+    fun disableCosmetics() {
+        if (connected && cosmeticsAvailable) packet(mapOf("type" to "cosmetics_subscribe", "id" to UUID.randomUUID().toString().replace("-", ""), "enabled" to false))
     }
 
     fun lookupWealth(name: String, uuid: String?, refresh: Boolean, canFetch: Boolean): CompletableFuture<JsonObject?>? {
@@ -490,6 +528,8 @@ object DungeonFriendRelay {
         sharedWealthAvailable = false
         digestNewsAvailable = false
         rngFeedAvailable = false
+        userMessagesAvailable = false
+        cosmeticsAvailable = false
         policiesAvailable = false
         partyPolicies.clear()
         policyRequest = null
@@ -501,6 +541,9 @@ object DungeonFriendRelay {
         statsRequests.clear()
         digestRequests.values.forEach { it.second.complete(null) }
         digestRequests.clear()
+        me.mycellium.skymyce.features.social.CosmeticsClient.closed()
+        cosmeticsRequests.values.forEach { it.second.complete(null) }
+        cosmeticsRequests.clear()
         onDigestClosed?.invoke()
         connecting = false
         authenticating = false
@@ -512,6 +555,8 @@ object DungeonFriendRelay {
     }
 
     fun disconnect() {
+        RelayMessages.reset()
+        me.mycellium.skymyce.features.social.CosmeticsClient.clear()
         deliveries.clear()
         failed("Relay disconnected", graceful = true)
         identity = ""

@@ -1,0 +1,170 @@
+package me.mycellium.skymyce.hud
+
+import com.google.gson.Gson
+import io.wispforest.owo.ui.base.BaseOwoScreen
+import io.wispforest.owo.ui.component.*
+import io.wispforest.owo.ui.container.*
+import io.wispforest.owo.ui.core.*
+import me.mycellium.skymyce.SkyMyce
+import me.mycellium.skymyce.config.misc.ThemeConfig
+import me.mycellium.skymyce.hud.widget.Widget
+import me.mycellium.skymyce.hud.widget.WidgetManager
+import me.mycellium.skymyce.utils.MC
+import net.minecraft.client.gui.screens.Screen
+import net.minecraft.network.chat.Component
+import tech.thatgravyboat.skyblockapi.utils.Scheduling
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.math.roundToInt
+
+/** One editor for the shared palette and nullable widget overrides. Clipboard imports are data only. */
+class ThemeEditorScreen(private val parent: Screen?, private val widget: Widget? = null) :
+    BaseOwoScreen<FlowLayout>(Component.literal("Sky-Hawk Theme")) {
+    private var draft = ThemeDocument(preset = ThemeConfig.preset, overrides = widget?.theme ?: if (widget == null) ThemeConfig.overrides() else ThemeOverrides())
+    private lateinit var preview: FlowLayout
+    private lateinit var notice: LabelComponent
+    private val states = mutableMapOf<String, LabelComponent>()
+    private var dirty = false
+    override fun createAdapter(): OwoUIAdapter<FlowLayout> = OwoUIAdapter.create(this, UIContainers::verticalFlow)
+    override fun isPauseScreen() = false
+    override fun build(root: FlowLayout) {
+        states.clear()
+        root.surface(HudTheme.backdrop).alignment(HorizontalAlignment.CENTER, VerticalAlignment.CENTER)
+        root.child(column().apply {
+            sizing(Sizing.fixed((width - 16).coerceIn(220, 650)), Sizing.fixed((height - 16).coerceAtLeast(160)))
+            padding(Insets.of(8)); surface(HudTheme.panel())
+            child(row().apply {
+                child(label(if (widget == null) "SHARED THEME" else "WIDGET / ${widget.title}", HudTheme.ACCENT).apply { horizontalSizing(Sizing.expand()) })
+                child(button("Done", 48) { onClose() })
+            })
+            preview = column(); child(preview)
+            val controls = column()
+            child(UIContainers.verticalScroll(Sizing.fill(), Sizing.expand(), controls).apply { scrollbarThiccness(2); scrollStep(20) })
+            if (widget == null) controls.child(button("Preset: ${draft.preset.title}", 190) { b ->
+                DropdownComponent.openContextMenu(this@ThemeEditorScreen, uiAdapter.rootComponent, { r, d -> r.child(d) }, b.x.toDouble(), (b.y + b.height).toDouble()) { d ->
+                    d.surface(HudTheme.panel())
+                    ThemePreset.entries.forEach { preset -> d.button(Component.literal(preset.title)) {
+                        draft = draft.copy(preset = preset); applyDraft(); rebuild()
+                    } }
+                }
+            }.wrappedTooltip(Component.literal("Change the inherited base palette. Existing overrides stay in place; Reset removes them.")))
+            controls.child(row().apply {
+                child(button("Reset", 55) { draft = draft.copy(overrides = ThemeOverrides()); applyDraft(); rebuild() }
+                    .wrappedTooltip(Component.literal(if (widget == null) "Reset all global overrides to the selected preset." else "Use the global theme for every widget value. Layout and scale stay unchanged.")))
+                child(button("Export", 55) { MC.instance.keyboardHandler.clipboard = exportThemeDocument(draft); notice.text(Component.literal("Theme JSON copied to clipboard")) }
+                    .wrappedTooltip(Component.literal("Copy versioned theme JSON. No positions, identities or secrets are included.")))
+                child(button("Import", 55) { importClipboard() }.wrappedTooltip(Component.literal("Import theme JSON from the clipboard, limited to 16 KiB. Invalid data changes nothing.")))
+            })
+            controls.child(label("Values marked Inherited follow ${if (widget == null) "the preset" else "your global theme"}." , HudTheme.MUTED))
+            for ((key, name) in listOf("primary" to "Primary accent", "secondary" to "Secondary accent", "panel" to "Panel background",
+                "card" to "Card background", "text" to "Primary text", "muted" to "Secondary text", "border" to "Borders")) controls.child(colorControl(key, name))
+            controls.child(numberControl("opacity", "Panel opacity", 20, 100))
+            controls.child(numberControl("padding", "Padding / compactness", 2, 12))
+            for ((key, name) in listOf("rounded" to "Rounded corners", "shadow" to "Text shadow", "borders" to "Show borders")) controls.child(row().apply {
+                child(label(name).apply { horizontalSizing(Sizing.expand()) })
+                child(button(flagLabel(key), 105) { b ->
+                    val current = Gson().toJsonTree(draft.overrides).asJsonObject.get(key)?.asBoolean
+                    setField(key, when (current) { null -> true; true -> false; false -> null }); b.message = Component.literal(flagLabel(key))
+                }.wrappedTooltip(Component.literal("Cycle inherited, enabled and disabled. Uses the renderer's supported pixel-rounded corners.")))
+            })
+            notice = label("Live preview • changes save when this screen closes", HudTheme.MUTED); child(notice)
+        })
+        updatePreview()
+    }
+    private fun resolved() = resolveTheme(draft.preset, if (widget == null) draft.overrides else ThemeConfig.overrides(), if (widget == null) null else draft.overrides)
+    private fun colorControl(key: String, name: String) = UIContainers.collapsible(Sizing.fill(), Sizing.content(), Component.literal(name).withColor(HudTheme.TEXT), false).apply {
+        wrappedTooltip(Component.literal("Choose a color override or reset to inheritance. Status colors remain independent."))
+        val resolved = Gson().toJsonTree(resolved()).asJsonObject.get(key).asInt
+        val hex = UIComponents.textBox(Sizing.fixed(100)).apply { setMaxLength(7); text("#%06X".format(resolved)); wrappedTooltip(Component.literal("Six hexadecimal RGB digits, for example #67CCF2.")) }
+        val picker = ColorPickerComponent().apply { sizing(Sizing.fill(), Sizing.fixed(64)); selectedColor(Color.ofRgb(resolved)) }
+        val sliders = mutableListOf<ThemeSlider>()
+        var changing = false
+        fun update(value: Int) {
+            if (changing) return
+            changing = true; setField(key, value); hex.text("#%06X".format(value)); picker.selectedColor(Color.ofRgb(value))
+            sliders.forEachIndexed { i, s -> s.value((value shr (16 - i * 8) and 255) / 255.0) }; changing = false
+        }
+        child(row().apply {
+            child(hex); child(button("Inherit", 60) { setField(key, null); rebuild() })
+            val state = label(fieldState(key), HudTheme.MUTED).apply { horizontalSizing(Sizing.expand()) }; states[key] = state; child(state)
+        })
+        child(picker)
+        listOf("Red", "Green", "Blue").forEachIndexed { i, name ->
+            child(label(name, HudTheme.MUTED))
+            val slider = ThemeSlider().apply {
+                value((resolved shr (16 - i * 8) and 255) / 255.0); scrollStep(1.0 / 255)
+                wrappedTooltip(Component.literal("$name channel, 0–255. Arrow keys adjust the focused slider."))
+                onChanged().subscribe { value -> if (!changing) {
+                    val color = Gson().toJsonTree(resolved()).asJsonObject.get(key).asInt
+                    update((color and (255 shl (16 - i * 8)).inv()) or ((value * 255).roundToInt() shl (16 - i * 8)))
+                } }
+            }
+            sliders += slider; child(slider)
+        }
+        hex.onChanged().subscribe { me.mycellium.skymyce.config.parseThemeHex(it)?.let(::update) }
+        picker.onChanged().subscribe { update(it.rgb()) }
+    }
+    private fun numberControl(key: String, title: String, min: Int, max: Int) = column().apply {
+        child(row().apply {
+            val state = label("$title • ${fieldState(key)}", HudTheme.MUTED).apply { horizontalSizing(Sizing.expand()) }; states[key] = state; child(state)
+            child(button("Inherit", 60) { setField(key, null); rebuild() })
+        })
+        child(ThemeSlider().apply {
+            val current = Gson().toJsonTree(resolved()).asJsonObject.get(key).asInt
+            value((current - min).toDouble() / (max - min)); scrollStep(1.0 / (max - min))
+            wrappedTooltip(Component.literal("$title, $min–$max. An explicit override stays fixed when the inherited theme changes."))
+            onChanged().subscribe { setField(key, (min + it * (max - min)).roundToInt()) }
+        })
+    }
+    private fun setField(key: String, value: Any?) {
+        val json = Gson().toJsonTree(draft).asJsonObject
+        if (value == null) json.getAsJsonObject("overrides").remove(key) else json.getAsJsonObject("overrides").add(key, Gson().toJsonTree(value))
+        draft = parseThemeDocument(json.toString()); applyDraft(); states[key]?.text(Component.literal("$key • ${fieldState(key)}").withColor(HudTheme.MUTED))
+    }
+    private fun fieldState(key: String) = Gson().toJsonTree(draft.overrides).asJsonObject.get(key)?.let { "Override: ${it.asString}" } ?: "Inherited"
+    private fun flagLabel(key: String) = Gson().toJsonTree(draft.overrides).asJsonObject.get(key)?.let { if (it.asBoolean) "On" else "Off" } ?: "Inherited"
+    private fun applyDraft() {
+        if (widget == null) { ThemeConfig.preset = draft.preset; ThemeConfig.apply(draft.overrides) }
+        else widget.theme = draft.overrides.takeUnless { it == ThemeOverrides() }
+        dirty = true; HudTheme.changed(); if (::preview.isInitialized) updatePreview()
+    }
+    private fun updatePreview() {
+        preview.clearChildren()
+        val palette = resolved()
+        preview.child(column().apply {
+            padding(Insets.of(palette.padding))
+            surface(Surface { g, c -> HudTheme.withWidget(if (widget == null) null else draft.overrides) {
+                HudTheme.rounded(g, c.x(), c.y(), c.width(), c.height(), HudTheme.alpha(palette.card, palette.opacity))
+                if (palette.borders) g.outline(c.x(), c.y(), c.width(), c.height(), HudTheme.alpha(palette.border, 100))
+            } })
+            child(label("${if (widget == null) draft.preset.title else widget.title} • Live preview", palette.primary).shadow(palette.shadow))
+            child(label("Primary text  /  12 tracked runs", palette.text).shadow(palette.shadow))
+            child(label("Secondary text • inherited values update together", palette.muted).shadow(palette.shadow))
+            child(label("✓ Ready", palette.success).apply {
+                text(Component.literal("✓ Ready").withColor(palette.success)
+                    .append(Component.literal("  •  ! Attention").withColor(palette.warning)))
+            })
+        })
+    }
+    private fun importClipboard() {
+        val parsed = runCatching { parseThemeDocument(MC.instance.keyboardHandler.clipboard) }.getOrNull()
+        if (parsed == null) { notice.text(Component.literal("Invalid theme • nothing changed").withColor(HudTheme.RED)); return }
+        // A widget import uses only overrides; selecting a global preset is deliberately a global action.
+        draft = if (widget == null) parsed else parsed.copy(preset = ThemeConfig.preset)
+        applyDraft(); rebuild(); notice.text(Component.literal("Theme imported • review the preview before closing"))
+    }
+    override fun removed() {
+        if (dirty) {
+            if (widget != null) WidgetManager.save() else Scheduling.schedule(0.milliseconds) {
+                runCatching { SkyMyce.config.save() }.onFailure { SkyMyce.logger.warn("Could not save shared theme") }
+            }
+            dirty = false
+        }
+        super.removed()
+    }
+    override fun onClose() { MC.instance.setScreen(parent) }
+    private fun rebuild() { uiAdapter.rootComponent.clearChildren(); build(uiAdapter.rootComponent); uiAdapter.inflateAndMount() }
+    private fun column() = UIContainers.verticalFlow(Sizing.fill(), Sizing.content()).apply { gap(5) }
+    private fun row() = UIContainers.horizontalFlow(Sizing.fill(), Sizing.content()).apply { gap(5); verticalAlignment(VerticalAlignment.CENTER) }
+    private fun label(text: String, color: Int = HudTheme.TEXT) = UIComponents.label(Component.literal(text).withColor(color)).apply { horizontalSizing(Sizing.fill()); shadow(HudTheme.SHADOW) }
+    private fun button(text: String, width: Int, action: (ButtonComponent) -> Unit) = UIComponents.button(Component.literal(text), action).themed().apply { sizing(Sizing.fixed(width), Sizing.fixed(20)) }
+}

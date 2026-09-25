@@ -9,20 +9,36 @@ import net.minecraft.client.gui.GuiGraphicsExtractor
 
 /** Shared Sky-Hawk palette used by retained owo HUD components and menus. */
 object HudTheme {
+    private var widget: ThemeOverrides? = null
+    var revision = 0L
+        private set
+    fun changed() { revision++ }
+    fun <T> withWidget(overrides: ThemeOverrides?, action: () -> T): T {
+        val previous = widget; widget = overrides
+        return try { action() } finally { widget = previous }
+    }
+    private val base get() = ThemeConfig.preset.palette
+    private fun color(local: Int?, global: Int, fallback: Int) = (local ?: global).takeIf { it in 0..0xFFFFFF } ?: fallback
+    private fun flag(local: Boolean?, global: Int, fallback: Boolean) = local ?: when (global) { 0 -> false; 1 -> true; else -> fallback }
     val HUD_ACCENT get() = ACCENT
-    val ACCENT get() = ThemeConfig.primary and 0xFFFFFF
-    val SECONDARY get() = ThemeConfig.secondary and 0xFFFFFF
-    const val PANEL = 0x10171E
-    const val CARD = 0x17212A
-    const val BORDER = 0x2C3944
-    const val TEXT = 0xEDF3F7
-    const val MUTED = 0x91A2AF
-    const val GREEN = 0x87D6A2
-    const val YELLOW = 0xE8BF71
-    const val RED = 0xF18C8C
+    val ACCENT get() = color(widget?.primary, ThemeConfig.primary, base.primary)
+    val SECONDARY get() = color(widget?.secondary, ThemeConfig.secondary, base.secondary)
+    val PANEL get() = color(widget?.panel, ThemeConfig.panel, base.panel)
+    val CARD get() = color(widget?.card, ThemeConfig.card, base.card)
+    val BORDER get() = color(widget?.border, ThemeConfig.border, base.border)
+    val TEXT get() = color(widget?.text, ThemeConfig.text, base.text)
+    val MUTED get() = color(widget?.muted, ThemeConfig.muted, base.muted)
+    val GREEN get() = base.success
+    val YELLOW get() = base.warning
+    val RED get() = base.error
+    val OPACITY get() = (widget?.opacity ?: ThemeConfig.opacity).takeIf { it in 20..100 } ?: base.opacity
+    val PADDING get() = (widget?.padding ?: ThemeConfig.padding).takeIf { it in 2..12 } ?: base.padding
+    val ROUNDED get() = flag(widget?.rounded, ThemeConfig.rounded, base.rounded)
+    val SHADOW get() = flag(widget?.shadow, ThemeConfig.shadow, base.shadow)
+    val BORDERS get() = flag(widget?.borders, ThemeConfig.borders, base.borders)
     val PURPLE get() = SECONDARY
 
-    fun alpha(rgb: Int, percent: Int = ThemeConfig.opacity) = (percent.coerceIn(0, 100) * 255 / 100 shl 24) or (rgb and 0xFFFFFF)
+    fun alpha(rgb: Int, percent: Int = OPACITY) = (percent.coerceIn(0, 100) * 255 / 100 shl 24) or (rgb and 0xFFFFFF)
     fun blend(a: Int, b: Int, weight: Int): Int {
         val w = weight.coerceIn(0, 100)
         fun channel(shift: Int) = (((a shr shift and 255) * (100 - w) + (b shr shift and 255) * w) / 100) shl shift
@@ -32,7 +48,7 @@ object HudTheme {
     /** Five non-overlapping rectangles, no shaders, textures, allocations, or double-blended edges. */
     fun rounded(g: GuiGraphicsExtractor, x: Int, y: Int, width: Int, height: Int, color: Int) {
         if (width <= 0 || height <= 0) return
-        if (width < 6 || height < 6) { g.fill(x, y, x + width, y + height, color); return }
+        if (!ROUNDED || width < 6 || height < 6) { g.fill(x, y, x + width, y + height, color); return }
         g.fill(x + 2, y, x + width - 2, y + 1, color)
         g.fill(x + 1, y + 1, x + width - 1, y + 2, color)
         g.fill(x, y + 2, x + width, y + height - 2, color)
@@ -41,7 +57,16 @@ object HudTheme {
     }
 
     fun panel(card: Boolean = false): Surface = Surface { g, c ->
-        rounded(g, c.x(), c.y(), c.width(), c.height(), alpha(blend(if (card) CARD else PANEL, ACCENT, 5)))
+        rounded(g, c.x(), c.y(), c.width(), c.height(), alpha(if (card) CARD else PANEL))
+        if (BORDERS && c.width() > 5 && c.height() > 5) {
+            val x = c.x(); val y = c.y(); val w = c.width(); val h = c.height(); val inset = if (ROUNDED) 2 else 0
+            // Opaque, one-pixel outline; the panel interior retains exactly the selected opacity.
+            val border = alpha(BORDER, 100)
+            g.fill(x + inset, y, x + w - inset, y + 1, border)
+            g.fill(x + inset, y + h - 1, x + w - inset, y + h, border)
+            g.fill(x, y + inset, x + 1, y + h - inset, border)
+            g.fill(x + w - 1, y + inset, x + w, y + h - inset, border)
+        }
     }
     fun tintedPanel(color: () -> Int): Surface = Surface { g, c -> rounded(g, c.x(), c.y(), c.width(), c.height(), alpha(color())) }
     val backdrop = Surface { g, c -> rounded(g, c.x(), c.y(), c.width(), c.height(), alpha(0x090D12, 55)) }
@@ -61,4 +86,7 @@ class ThemeSlider : SliderComponent(Sizing.fill()) {
     }
 }
 
-fun ButtonComponent.themed(): ButtonComponent = apply { renderer(HudTheme.buttonRenderer); textShadow(false) }
+fun ButtonComponent.themed(): ButtonComponent = apply {
+    renderer(HudTheme.buttonRenderer); textShadow(HudTheme.SHADOW)
+    if (message.style.color == null) message = message.copy().withColor(HudTheme.TEXT)
+}

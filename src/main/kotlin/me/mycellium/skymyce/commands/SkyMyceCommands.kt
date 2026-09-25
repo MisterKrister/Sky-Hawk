@@ -16,6 +16,7 @@ import me.mycellium.skymyce.features.digest.DailyDigest
 import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriendsScreen
 import me.mycellium.skymyce.features.instances.dungeons.friends.DungeonFriends
+import me.mycellium.skymyce.features.instances.dungeons.friends.RelayMessages
 import me.mycellium.skymyce.features.instances.dungeons.friends.FriendsSocialScreen
 import me.mycellium.skymyce.hud.widget.WidgetEditorScreen
 import me.mycellium.skymyce.utils.MC
@@ -77,16 +78,32 @@ object SkyMyceCommands : SkyMyceModule() {
                 MC.instance.execute { MC.instance.setScreen(FriendsSocialScreen(FriendsSocialScreen.Tab.LENDING)) }
                 1
             })
-            .then(literal("relaymsg").then(argument("name", StringArgumentType.word())
-                .then(argument("message", StringArgumentType.greedyString()).executes {
-                    DungeonFriends.relayReply(StringArgumentType.getString(it, "name"), StringArgumentType.getString(it, "message"))
-                    1
-                })))
+            .then(messageCommand("msg", RelayMessages::send))
+            .then(messageCommand("relaymsg", RelayMessages::legacy))
+            .then(messageCommand("lfgreply", RelayMessages::action))
+            .then(replyCommand("reply"))
+            .then(replyCommand("r"))
+            .then(literal("cosmetics").executes {
+                MC.instance.execute { MC.instance.setScreen(me.mycellium.skymyce.features.social.CosmeticsScreen()) }; 1
+            }.then(literal("link").executes {
+                MC.instance.execute { MC.instance.setScreen(me.mycellium.skymyce.features.social.CosmeticsScreen(true)) }; 1
+            }))
             .then(auction())
             .then(hud())
             .then(modules())
             .then(troll())
     }
+
+    private fun messageCommand(name: String, send: (String, String) -> Unit) = literal(name)
+        .then(argument("name", StringArgumentType.word()).suggests { _, builder ->
+            RelayMessages.recipients(builder.remaining).forEach(builder::suggest)
+            builder.buildFuture()
+        }.then(argument("message", StringArgumentType.greedyString()).executes {
+            send(StringArgumentType.getString(it, "name"), StringArgumentType.getString(it, "message")); 1
+        }))
+    private fun replyCommand(name: String) = literal(name).then(argument("message", StringArgumentType.greedyString()).executes {
+        RelayMessages.reply(StringArgumentType.getString(it, "message")); 1
+    })
 
     fun dungeon(): LiteralArgumentBuilder<FabricClientCommandSource> {
         return literal("dungeon")

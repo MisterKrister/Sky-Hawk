@@ -1,0 +1,110 @@
+package me.mycellium.skymyce.features.instances.dungeons.tracker
+
+import com.google.gson.Gson
+import me.mycellium.skymyce.SkyMyce
+import me.mycellium.skymyce.SkyMyceModule
+import me.mycellium.skymyce.features.digest.DetectedRng
+import me.mycellium.skymyce.features.digest.DigestStateStore
+import me.mycellium.skymyce.utils.AtomicJsonFile
+import me.mycellium.skymyce.utils.StateWriter
+import me.mycellium.skymyce.utils.MC
+import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
+import tech.thatgravyboat.skyblockapi.api.profile.profile.ProfileAPI
+import tech.thatgravyboat.skyblockapi.utils.Scheduling
+import java.nio.file.Files
+import kotlin.time.Duration.Companion.milliseconds
+
+/** Permanent personal records. Neither community feed retention nor clear-recent-history touches this file. */
+object AcquisitionRepository : SkyMyceModule() {
+    var state = AcquisitionArchive()
+        private set
+    var preferences = TrackerFilter()
+        private set
+    var revision = 0L
+        private set
+    var status = "Loading local records…"
+        private set
+    private var loaded = false
+    private var writable = true
+    private val pending = mutableListOf<(AcquisitionArchive) -> AcquisitionArchive>()
+    private var preferencesEdited = false
+    private lateinit var writer: StateWriter<AcquisitionArchive>
+    private lateinit var preferenceWriter: StateWriter<TrackerFilter>
+
+    override fun init() {
+        val file = AtomicJsonFile(SkyMyce.configPath.resolve("acquisitions.json"), 32 * 1024 * 1024)
+        val viewFile = AtomicJsonFile(SkyMyce.configPath.resolve("tracker_view.json"))
+        writer = StateWriter({ file.write(Gson().toJsonTree(it)) }, { work -> Scheduling.schedule(500.milliseconds) { work() } }, {
+            MC.instance.execute { status = "Local save failed • previous file retained"; revision++ }
+            SkyMyce.logger.warn("Could not save personal acquisition archive; previous file retained")
+        })
+        preferenceWriter = StateWriter({ viewFile.write(Gson().toJsonTree(it)) }, { work -> Scheduling.schedule(500.milliseconds) { work() } })
+        Scheduling.schedule(0.milliseconds) {
+            var storageError = false
+            var saved = runCatching { parseAcquisitionArchive(file.read()) }.getOrElse { storageError = true; AcquisitionArchive() }
+            // A corrupt/future archive is read-only: never silently replace permanent history.
+            storageError = storageError || file.damaged
+            val original = saved
+            var migrationError = false
+            if (!storageError) {
+                val legacyFile = AtomicJsonFile(SkyMyce.configPath.resolve("dungeon_tracker.json"), 16 * 1024 * 1024)
+                val digestPath = SkyMyce.configPath.resolve("daily_digest.json")
+                val digestStore = DigestStateStore(digestPath)
+                val tracker = if ("tracker-v1" !in saved.imports) legacyFile.read() else null
+                val digest = if ("digest-v1" !in saved.imports && Files.exists(digestPath)) digestStore.load().takeUnless { digestStore.recovered } else null
+                runCatching {
+                    if (tracker != null) legacyFile.preserveOriginal("before-acquisitions")
+                    if (digest != null) AtomicJsonFile(digestPath).preserveOriginal("before-acquisitions")
+                    saved = importLegacyAcquisitions(saved, tracker, digest)
+                    parseAcquisitionArchive(Gson().toJsonTree(saved))
+                    if (saved != original) { file.preserveOriginal("before-migration"); file.write(Gson().toJsonTree(saved)) }
+                }.onFailure { saved = original; migrationError = true }
+            }
+            val restoredView = runCatching { parseTrackerPreferences(viewFile.read()) }.getOrElse { viewFile.preserveOriginal(); TrackerFilter() }
+            MC.instance.execute {
+                state = saved; writable = !storageError; loaded = true
+                if (!preferencesEdited) preferences = restoredView else preferenceWriter.submit(preferences)
+                status = when { storageError -> "Archive unreadable • original preserved; recording paused"; migrationError -> "Legacy import needs attention • original saves preserved"; else -> "Saved on this computer • usable offline" }
+                val queued = pending.toList(); pending.clear(); queued.forEach { update(it) }; revision++
+            }
+        }
+        Runtime.getRuntime().addShutdownHook(Thread({ runCatching { writer.flush(); preferenceWriter.flush() } }, "Sky-Hawk-Acquisitions-Save"))
+    }
+
+    fun currentContext(): AcquisitionContext? {
+        if (!LocationAPI.isOnSkyBlock || !ProfileAPI.isLoaded || MC.instance.player == null) return null
+        val name = ProfileAPI.profileName?.takeIf { it.isNotBlank() } ?: return null
+        return AcquisitionContext(MC.instance.user.profileId.toString(), ProfileAPI.profileId?.toString(), name, if (LocationAPI.onAlpha) "alpha" else "main")
+    }
+    private fun update(change: (AcquisitionArchive) -> AcquisitionArchive) {
+        if (!loaded) { if (pending.size < 1000) pending += change; return }
+        if (!writable) return
+        val next = change(state)
+        if (next.events.size > 100000 || next.runs.size > 100000) { status = "Archive capacity reached • existing records retained; back up before archiving"; revision++; return }
+        if (next != state) { state = next; revision++; writer.submit(state) }
+    }
+    fun record(event: AcquisitionEvent) = update { archive -> mergeAcquisition(archive, event) }
+    fun confirmed(drop: DetectedRng) {
+        val context = currentContext() ?: return
+        record(AcquisitionEvent(drop.confirmation?.let(::acquisitionId) ?: drop.id, drop.item, drop.occurredAt,
+            drop.activity, context, floor = if (drop.activity == "dungeon") tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonAPI.dungeonFloor?.name else null, player = MC.instance.user.name))
+    }
+    fun run(record: DungeonRunRecord) = update { archive -> archive.copy(runs = archive.runs.filterNot { it.id == record.id } + record) }
+    fun pin(item: String, context: AcquisitionContext?) = update { archive ->
+        val key = "${context?.key ?: "legacy"}|$item"
+        archive.copy(pins = if (key in archive.pins) archive.pins - key else if (archive.pins.size < 2048) archive.pins + key else archive.pins)
+    }
+    fun pinned(item: String, context: AcquisitionContext?) = "${context?.key ?: "legacy"}|$item" in state.pins
+    fun remember(filter: TrackerFilter) { preferencesEdited = true; preferences = filter; if (loaded) preferenceWriter.submit(filter) }
+}
+
+internal fun parseTrackerPreferences(json: com.google.gson.JsonElement?): TrackerFilter {
+    if (json == null) return TrackerFilter()
+    val filter = Gson().fromJson(json, TrackerFilter::class.java)
+    require(filter.page in TrackerPage.entries && filter.sort in LootOrder.entries && filter.scope in TrackerScope.entries)
+    require(filter.query.length <= 100 && filter.floor?.matches(Regex("[FM][1-7]|ENTRANCE")) != false && filter.mode in listOf(null, "F", "M"))
+    if (filter.from.isNotEmpty()) java.time.LocalDate.parse(filter.from)
+    if (filter.until.isNotEmpty()) java.time.LocalDate.parse(filter.until)
+    require(filter.chest?.length?.let { it <= 16 } != false && filter.session?.length?.let { it <= 40 } != false && filter.activity?.length?.let { it <= 30 } != false)
+    return filter
+}

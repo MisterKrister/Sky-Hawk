@@ -81,6 +81,14 @@ Only four small fields are stored per registered account, with one upsert per au
 
 ## Verification
 
+### Cosmetics and ordinary private messages
+
+The new capability-negotiated `cosmetics` and `userMessages` paths reuse this authenticated relay and its SQLite Durable Object. They preserve existing news, RNG, stats, wealth and LFG routes. `user_message` requires a recipient acknowledgement; ordinary messages never become tokenized invitation actions or automatic Hypixel chat fallbacks. No message history is stored.
+
+Server-owned UUID cosmetics add signed Discord HTTP interactions at `/discord/interactions`, single-use Minecraft-bound link challenges, private ownership tables, bounded public lookups and revisioned live updates/resets. Self-only commands in `1552057526969835612` manage styled names and independent X/Y/Z sizes. No Discord gateway process or additional Cloudflare service is required. The operator-run command script defaults to a local dry run and preserves unrelated Discord commands when explicitly applied. See [account linking, permissions, configuration and migration](../docs/cosmetics-discord.md); the existing news channel `1552585927086440459` stays unchanged.
+
+See [commands, trusted configuration, Discord registration, privacy and protocol](../docs/cosmetics-messaging.md) and the [two-client validation checklist](../docs/upgrade-validation.md). Production deployment and command registration require separate operator authorization. This upgrade's local tests do not establish production readiness of an unconfigured Discord application.
+
 ### Daily Digest news and RNG
 
 The Daily Digest reuses this authenticated WebSocket and SQLite room. It adds no service, binding, cron job, or background polling loop. Old clients receive no RNG packets unless they explicitly subscribe. `ready` advertises `digestNews` and `rngFeed` so new clients also work with older relays.

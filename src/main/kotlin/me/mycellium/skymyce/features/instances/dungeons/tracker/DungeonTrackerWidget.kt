@@ -48,20 +48,19 @@ object DungeonTrackerWidget : SkyMyceModule() {
                             1
                         )).milliseconds.inWholeSeconds.seconds
                     }§7/run)"
-                lines += "§7Runs: §a${stats.totalRuns}§7 (§a${round((stats.totalRuns / stats.totalTimeHours) * 100) / 100}§7/h)"
+                lines += "§7Runs: §a${stats.totalRuns}§7 (§a${hourly(stats.totalRuns.toDouble(), stats.totalTimeHours)}§7/h)"
                 lines += "§7Chests: §a${stats.totalChestsOpened}§7 (§b${stats.totalRerolled} rerolls§7)"
                 lines += ""
-                lines += "§7Profit: ${TextUtils.parseProfit(stats.netProfit)}§7 (${TextUtils.parseProfit(stats.netProfit / stats.totalTimeHours)}§7/h)"
+                lines += "§7Profit: ${TextUtils.parseProfit(stats.netProfit)}§7 (${hourly(stats.netProfit, stats.totalTimeHours)}§7/h)"
 
                 lines +=
                     "§7Cata Exp: §b${NumberUtils.condense(stats.totalXp)} §7(§b${
-                        NumberUtils.condense(
-                            stats.totalXp / stats.totalTimeHours
-                        )
+                        hourly(stats.totalXp, stats.totalTimeHours)
                     }§7/h)"
             }
         }
 
         content.updateTextLines(lines)
     }
+    private fun hourly(value: Double, hours: Double): String = if (hours.isFinite() && hours > 0 && value.isFinite()) NumberUtils.condense(value / hours) else "—"
 }

@@ -9,6 +9,7 @@ import io.wispforest.owo.ui.core.Positioning
 import io.wispforest.owo.ui.core.Sizing
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.hud.HudTheme
+import me.mycellium.skymyce.hud.ThemeEditorScreen
 import me.mycellium.skymyce.hud.themed
 import net.minecraft.client.gui.GuiGraphicsExtractor
 import net.minecraft.client.gui.components.events.GuiEventListener
@@ -105,6 +106,7 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
         graphics.text(MC.font, "§e[SHIFT]§7 Toggle Grid Snap ${if (snapPosition) "§a[ON]" else "§c[OFF]"}", 10, height - 10 - MC.font.lineHeight, 0xFFFFFFFF.toInt())
         graphics.text(MC.font, "§e[SCROLL]§7 Change Scale", 10, height - 10 - (MC.font.lineHeight * 2) - 2, 0xFFFFFFFF.toInt())
         graphics.text(MC.font, "§e[CTRL]§7 Change Anchor", 10, height - 10 - (MC.font.lineHeight * 3) - 4, 0xFFFFFFFF.toInt())
+        graphics.text(MC.font, "§e[RIGHT CLICK]§7 Widget theme", 10, height - 10 - (MC.font.lineHeight * 4) - 6, 0xFFFFFFFF.toInt())
 
         super.extractRenderState(graphics, mouseX, mouseY, a)
     }
@@ -126,6 +128,12 @@ object WidgetEditorScreen : Screen(MC.instance, MC.font, Component.literal("Widg
 
     override fun mouseClicked(button: MouseButtonEvent, doubled: Boolean): Boolean {
         if (super.mouseClicked(button, doubled)) return true
+        if (button.button() == 1) {
+            val widget = screenWidgets.asReversed().firstOrNull { it.inBounds(button.x.toInt(), button.y.toInt()) } ?: return false
+            WidgetManager.save()
+            MC.instance.setScreen(ThemeEditorScreen(this, widget))
+            return true
+        }
         if (button.button() != 0) return false
         clickedWidget = screenWidgets.asReversed().firstOrNull {
             it.inBounds(button.x.toInt(), button.y.toInt())
