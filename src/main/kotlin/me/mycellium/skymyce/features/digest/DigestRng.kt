@@ -13,8 +13,11 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.concurrent.ScheduledFuture
 import kotlin.time.Duration.Companion.milliseconds
+import me.mycellium.skymyce.features.instances.dungeons.tracker.AcquisitionRepository
+import me.mycellium.skymyce.features.instances.dungeons.tracker.DungeonTracker
+import me.mycellium.skymyce.features.instances.dungeons.tracker.canonicalItemId
 
-data class DetectedRng(val id: String, val item: String, val activity: String, val occurredAt: Long)
+data class DetectedRng(val id: String, val item: String, val activity: String, val occurredAt: Long, val confirmation: String? = null)
 data class DigestRareItem(val name: String, val activity: String)
 
 object DigestRngCatalog {
@@ -65,7 +68,7 @@ object DigestRngParser {
 class DigestDungeonAcquisition {
     private var counts: Map<String, Int>? = null
     private val pending = linkedMapOf<String, DetectedRng>()
-    private val increased = mutableMapOf<String, Long>()
+    private val increased = mutableMapOf<String, Pair<Long, String?>>()
 
     fun seed(snapshot: Map<String, Int>) { counts = snapshot.toMap(); pending.clear(); increased.clear() }
     fun clear() { counts = null; pending.clear(); increased.clear() }
@@ -73,12 +76,12 @@ class DigestDungeonAcquisition {
     fun announce(drop: DetectedRng, now: Long): DetectedRng? {
         if (counts == null || drop.activity != "dungeon") return null
         prune(now)
-        if (increased.remove(drop.item)?.let { now - it in 0..3000 } == true) return drop
+        increased.remove(drop.item)?.takeIf { now - it.first in 0..3000 }?.let { return drop.copy(confirmation = it.second) }
         pending[drop.item] = drop
         return null
     }
 
-    fun inventory(snapshot: Map<String, Int>, now: Long): List<DetectedRng> {
+    fun inventory(snapshot: Map<String, Int>, now: Long, observation: String? = null): List<DetectedRng> {
         val previous = counts ?: run { seed(snapshot); return emptyList() }
         counts = snapshot.toMap()
         prune(now)
@@ -86,14 +89,15 @@ class DigestDungeonAcquisition {
         snapshot.forEach { (item, count) ->
             if (!DigestRngCatalog.valid(item, "dungeon") || count <= (previous[item] ?: 0)) return@forEach
             val drop = pending.remove(item)
-            if (drop != null) found += drop else increased[item] = now
+            val confirmation = observation?.let { "$it/$item" }
+            if (drop != null) found += drop.copy(confirmation = confirmation) else increased[item] = now to confirmation
         }
         return found
     }
 
     private fun prune(now: Long) {
         pending.entries.removeIf { now - it.value.occurredAt !in 0..15_000 }
-        increased.entries.removeIf { now - it.value !in 0..3000 }
+        increased.entries.removeIf { now - it.value.first !in 0..3000 }
     }
 }
 
@@ -128,27 +132,30 @@ object DigestRng : SkyMyceModule() {
 
     @Subscription fun onInventory(event: PlayerInventoryChangeEvent) {
         if (!LocationAPI.isOnSkyBlock || !contextReady() || inventoryCheck != null) return
-        if (!DigestRngCatalog.valid(event.item.getSkyBlockId()?.id.orEmpty(), "dungeon") && event.slotIndex !in rareSlots) return
+        if (!DigestRngCatalog.valid(canonicalItemId(event.item.getSkyBlockId()?.id.orEmpty()), "dungeon") && event.slotIndex !in rareSlots && !DungeonTracker.awaitsInventory()) return
         val token = context
         // Coalesce the source/destination updates of item moves before comparing total counts.
         inventoryCheck = Scheduling.schedule(200.milliseconds) { MC.instance.execute {
             if (token != context) return@execute
             inventoryCheck = null
-            if (contextReady()) acquisition.inventory(inventoryCounts(), System.currentTimeMillis()).forEach(::publish)
+            if (contextReady()) {
+                val counts = inventoryCounts(); val now = System.currentTimeMillis(); val observation = java.util.UUID.randomUUID().toString()
+                DungeonTracker.inventoryObserved(counts, now, observation)
+                acquisition.inventory(counts, now, observation).forEach(::publish)
+            }
         } }
     }
 
-    private fun inventoryCounts(): Map<String, Int> {
+    fun inventoryCounts(): Map<String, Int> {
         val inventory = MC.instance.player?.inventoryMenu ?: return emptyMap()
         val counts = mutableMapOf<String, Int>()
         val slots = mutableSetOf<Int>()
         for (slot in inventory.slots) {
             if (slot.container !is Inventory) continue
             val item = slot.item
-            val id = item.getSkyBlockId()?.id ?: continue
-            if (!DigestRngCatalog.valid(id, "dungeon")) continue
+            val id = item.getSkyBlockId()?.id?.let(::canonicalItemId) ?: continue
             counts[id] = (counts[id] ?: 0) + item.count
-            slots += slot.index
+            if (DigestRngCatalog.valid(id, "dungeon")) slots += slot.index
         }
         rareSlots = slots
         return counts
@@ -157,9 +164,10 @@ object DigestRng : SkyMyceModule() {
     private fun publish(drop: DetectedRng) {
         val now = System.currentTimeMillis()
         recent.entries.removeIf { it.value + 3000 < now }
-        val key = "${drop.activity}|${drop.item}"
+        val key = drop.confirmation ?: "${drop.activity}|${drop.item}"
         if (key in recent) return
         recent[key] = now
+        AcquisitionRepository.confirmed(drop)
         detected?.invoke(drop)
     }
 }
