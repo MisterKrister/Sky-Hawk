@@ -1,5 +1,6 @@
 package me.mycellium.skymyce.features.instances.dungeons.tracker
 
+import tech.thatgravyboat.skyblockapi.api.area.dungeon.DungeonFloor
 data class TrackerSummary(val runs: Long = 0, val time: Long = 0, val timedRuns: Long = 0,
     val gross: Double = 0.0, val chestCost: Double = 0.0, val rerollCost: Double? = 0.0,
     val cataXp: Double = 0.0, val classXp: Map<String, Double> = emptyMap(), val chests: Int = 0,
@@ -44,10 +45,10 @@ fun trackerView(archive: AcquisitionArchive, legacy: List<LegacyFloorView>, filt
 private fun mergeXp(values: List<Map<String, Double>>) = values.flatMap { it.entries }.groupBy({ it.key }, { it.value }).mapValues { it.value.sum() }
 
 /** Captured on the client thread; immutable primitives are safe for background queries. */
-fun legacyTrackerView(): List<LegacyFloorView> = DungeonTracker.profitData.map { (floor, data) ->
+fun legacyTrackerView(totals: Map<DungeonFloor, FloorTracker> = DungeonTracker.profitData): List<LegacyFloorView> = totals.map { (floor, data) ->
     fun Double.safe() = takeIf { it.isFinite() && it >= 0 } ?: 0.0
-    LegacyFloorView(floor.name, TrackerSummary(data.totalRuns.coerceAtLeast(0).toLong(), data.totalTimeMillis.coerceAtLeast(0),
-        if (data.totalTimeMillis > 0) data.totalRuns.coerceAtLeast(0).toLong() else 0, cataXp = data.totalXp.safe(),
+    LegacyFloorView(floor.name, TrackerSummary(data.totalRuns.coerceAtLeast(0).toLong(), if (data.invalidTime) 0 else data.totalTimeMillis,
+        data.timedRunCount.toLong(), cataXp = data.totalXp.safe(),
         classXp = data.classXp.mapKeys { it.key.name }.mapValues { it.value.safe() }, rerolls = data.totalRerolled.coerceAtLeast(0)),
         data.chests.mapKeys { it.key.name }.mapValues { (_, chest) -> chest.trackedItems.map { (id, loot) ->
             TrackerLootRow(canonicalItemId(id.id), loot.count.coerceAtLeast(0).toLong(), loot.value.safe(), null, chest.chestCount.coerceAtLeast(0)) } },

@@ -135,20 +135,21 @@ object PartyCommands : SkyMyceModule() {
                     val floor = DungeonFloor.getByName(args.firstOrNull() ?: return@let)
                     val data = DungeonTracker.profitData[floor]
                     if (floor != null && data != null) {
+                        fun rate(value: Double) = data.hourlyRate(value)?.let(NumberUtils::condense) ?: "Unknown"
                         when (args.getOrNull(1)?.lowercase()) {
                             "xp" -> {
                                 when (args.getOrNull(2)?.lowercase()) {
-                                    "avg" -> sendModMessage("Avg Cata XP: ${NumberUtils.condense(data.totalXp / data.totalTimeHours)} | ${data.classXp.map { xp -> "${xp.key.displayName}: ${NumberUtils.condense(xp.value / data.totalTimeHours)}" }.joinToString(" | ")}", ChatChannel.PARTY)
+                                    "avg" -> sendModMessage("Cata XP/h: ${rate(data.totalXp)} | ${data.classXp.map { xp -> "${xp.key.displayName}/h: ${rate(xp.value)}" }.joinToString(" | ")}", ChatChannel.PARTY)
                                     else -> sendModMessage("Total Cata XP: ${NumberUtils.condense(data.totalXp)} | ${data.classXp.map { xp -> "${xp.key.displayName}: ${NumberUtils.condense(xp.value)}" }.joinToString(" | ")}", ChatChannel.PARTY)
                                 }
                             }
                             else -> {
-                                val time = data.totalTimeMillis.milliseconds.inWholeSeconds.seconds
+                                val time = if (data.timedRunCount > 0) data.totalTimeMillis.milliseconds.inWholeSeconds.seconds.toString() +
+                                    (if (data.incompleteTime) " (partial)" else "") else "Unknown"
                                 val runs = data.totalRuns
                                 val chests = data.totalChestsOpened
                                 val profit = NumberUtils.condense(data.netProfit)
-                                val rate = NumberUtils.condense(data.netProfit / data.totalTimeHours)
-                                sendModMessage("Time: $time | Runs: $runs | Chests: $chests | Profit: $profit ($rate/h)", ChatChannel.PARTY)
+                                sendModMessage("Time: $time | Runs: $runs | Chests: $chests | Profit: $profit (${rate(data.netProfit)}/h)", ChatChannel.PARTY)
                             }
                         }
                     }
