@@ -117,6 +117,7 @@ object DungeonFriends : SkyMyceModule() {
 
     override fun init() {
         DungeonFriendsSettings.load()
+        RelayMessages.init()
         DungeonFriendStatsCache.initialize(SkyMyce.configPath.resolve("dungeon_friend_stats.json"))
         FriendWealthCache.initialize(SkyMyce.configPath.resolve("friend_wealth.json"))
         ClientLifecycleEvents.CLIENT_STOPPING.register { saveFriends(true); DungeonFriendStatsCache.save(true); FriendWealthCache.save(true); DungeonFriendRelay.disconnect() }

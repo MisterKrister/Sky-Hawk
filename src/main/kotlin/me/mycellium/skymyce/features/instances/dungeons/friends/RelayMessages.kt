@@ -2,6 +2,9 @@ package me.mycellium.skymyce.features.instances.dungeons.friends
 
 import me.mycellium.skymyce.utils.MC
 import me.mycellium.skymyce.hud.HudTheme
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents
+import net.minecraft.client.gui.screens.ChatScreen
 import net.minecraft.network.chat.Component
 import net.minecraft.network.chat.ClickEvent
 import net.minecraft.network.chat.HoverEvent
@@ -9,6 +12,7 @@ import tech.thatgravyboat.skyblockapi.api.location.LocationAPI
 import tech.thatgravyboat.skyblockapi.api.profile.friends.FriendsAPI
 
 internal val lfgButtonAction = Regex("^(yes|no) ([a-f0-9]{16})$")
+private val chatChannelCommand = Regex("(?i)^chat\\s+(?:a|all|p|party|g|guild|o|officer|c|co|coop|co-op)$")
 internal fun userMessageError(name: String, message: String): String? = when {
     !name.matches(Regex("[A-Za-z0-9_]{1,16}")) -> "Use the player's real Minecraft name."
     message.isBlank() || message.length > 256 -> "Messages must contain 1–256 characters."
@@ -22,9 +26,24 @@ internal class RelayConversation {
     private var session = ""
     var replyTarget: String? = null
         private set
-    fun session(key: String) { if (key != session) { session = key; replyTarget = null } }
+    var chatTarget: String? = null
+        private set
+    fun session(key: String) { if (key != session) { clear(); session = key } }
     fun conversation(name: String) { if (name.matches(Regex("[A-Za-z0-9_]{1,16}"))) replyTarget = name }
-    fun clear() { session = ""; replyTarget = null }
+    fun chat(name: String) { if (name.matches(Regex("[A-Za-z0-9_]{1,16}"))) chatTarget = name }
+    fun leaveChat() { chatTarget = null }
+    fun channelCommand(command: String): Boolean {
+        if (chatTarget == null || !chatChannelCommand.matches(command.trim())) return false
+        leaveChat()
+        return true
+    }
+    fun allowChat(text: String, send: (String, String) -> Unit): Boolean {
+        val target = chatTarget ?: return true
+        send(target, text)
+        return false // Even failed delivery must never fall through to public chat.
+    }
+    fun relayDisconnected() { replyTarget = null }
+    fun clear() { session = ""; replyTarget = null; chatTarget = null }
 }
 
 /** Ordinary private messages never enter the LFG parser and never fall back to Hypixel chat. */
@@ -33,18 +52,25 @@ object RelayMessages {
     private val quiet = ThreadLocal.withInitial { false }
     private var nextSend = 0L
     @JvmStatic fun suppressChatLog() = quiet.get()
-    fun reset() { conversations.clear(); nextSend = 0 }
-    private fun session() { conversations.session("${MC.instance.user.profileId}|${LocationAPI.onHypixel}") }
+    // Reconnecting the relay must not silently turn a private conversation into public chat.
+    fun reset() { conversations.relayDisconnected(); nextSend = 0 }
+    private fun session() { conversations.session(MC.instance.user.profileId.toString()) }
+    fun init() {
+        ClientSendMessageEvents.ALLOW_CHAT.register { text ->
+            session()
+            conversations.allowChat(text, ::send)
+        }
+        ClientSendMessageEvents.COMMAND.register { command ->
+            if (conversations.channelCommand(command)) chatClosed()
+        }
+        ClientPlayConnectionEvents.DISCONNECT.register { _, _ -> conversations.clear(); nextSend = 0 }
+    }
     fun recipients(prefix: String): List<String> = relayRecipients(FriendsAPI.friends.map { it.name } + DungeonFriends.scanner.online.values.map { it.name }, prefix)
     fun send(name: String, text: String) {
         session()
         val problem = userMessageError(name, text)
         if (problem != null) { error(problem); return }
-        if (!LocationAPI.isOnSkyBlock || MC.instance.player == null) { error("Join SkyBlock before messaging friends."); return }
-        if (!DungeonFriends.isRelayFriend(name)) { error("That player is not in your cached friends list."); return }
-        if (name.equals(MC.instance.user.name, true)) { error("Choose another player."); return }
-        if (!DungeonFriendRelay.connected) { error("Relay unavailable. Reconnect and try again; nothing was sent to Hypixel chat."); return }
-        if (!DungeonFriendRelay.userMessagesAvailable) { error("This relay does not support private messages yet."); return }
+        recipientError(name)?.let { error(it); return }
         val now = System.currentTimeMillis()
         if (now < nextSend) { error("Wait a moment before sending another message."); return }
         nextSend = now + 1000
@@ -56,10 +82,39 @@ object RelayMessages {
             }
         }, { reason -> if (MC.instance.user.profileId == account) error(deliveryFailure(reason)) })
         if (accepted) display(Component.literal("Me → $name: ").withColor(HudTheme.ACCENT)
-            .append(Component.literal(text).withColor(HudTheme.TEXT))
-            .append(Component.literal("  [sending…]").withColor(HudTheme.MUTED)))
+            .append(Component.literal(text).withColor(HudTheme.TEXT)))
         else error("Message queue unavailable. Nothing was sent to Hypixel chat.")
     }
+    private fun recipientError(name: String): String? = when {
+        !name.matches(Regex("[A-Za-z0-9_]{1,16}")) -> "Use the player's real Minecraft name."
+        !LocationAPI.isOnSkyBlock || MC.instance.player == null -> "Join SkyBlock before messaging friends."
+        !DungeonFriends.isRelayFriend(name) -> "That player is not in your cached friends list."
+        name.equals(MC.instance.user.name, true) -> "Choose another player."
+        !DungeonFriendRelay.connected -> "Relay unavailable. Reconnect and try again; nothing was sent to Hypixel chat."
+        !DungeonFriendRelay.userMessagesAvailable -> "This relay does not support private messages yet."
+        else -> null
+    }
+    fun chat(name: String) {
+        session()
+        recipientError(name)?.let { error(it); return }
+        conversations.chat(name)
+        display(Component.literal("Relay chat → $name. Type normally to message them; /chat a or /sm chat exits.").withColor(HudTheme.ACCENT))
+        val client = MC.instance
+        val connection = client.connection
+        val account = client.user.profileId
+        // Queue after vanilla closes the command input, without opening over another menu.
+        client.schedule {
+            if (client.connection === connection && client.user.profileId == account && client.player != null &&
+                conversations.chatTarget == name && (client.screen == null || client.screen is ChatScreen)) {
+                client.setScreen(ChatScreen("", false))
+            }
+        }
+    }
+    fun leaveChat() {
+        conversations.leaveChat()
+        chatClosed()
+    }
+    private fun chatClosed() = display(Component.literal("Relay chat off. Normal messages use your Hypixel chat channel.").withColor(HudTheme.MUTED))
     fun reply(text: String) {
         session()
         val name = conversations.replyTarget

@@ -79,6 +79,11 @@ object SkyMyceCommands : SkyMyceModule() {
                 1
             })
             .then(messageCommand("msg", RelayMessages::send))
+            .then(literal("chat").executes { RelayMessages.leaveChat(); 1 }
+                .then(argument("name", StringArgumentType.word()).suggests { _, builder ->
+                    RelayMessages.recipients(builder.remaining).forEach(builder::suggest)
+                    builder.buildFuture()
+                }.executes { RelayMessages.chat(StringArgumentType.getString(it, "name")); 1 }))
             .then(messageCommand("relaymsg", RelayMessages::legacy))
             .then(messageCommand("lfgreply", RelayMessages::action))
             .then(replyCommand("reply"))

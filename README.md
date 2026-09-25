@@ -87,7 +87,7 @@ From dungeon prep and chest safety to party coordination and daily tracking, Sky
   Send requests, check availability, and coordinate party selection directly from the mod interface without having to manually message everyone.
 
 - Relay-backed communication  
-  `/sm msg <ign> <message>` and `/sm reply` (`/sm r`) provide private friend conversations with recipient acknowledgements, separately from LFG controls. Messages never silently fall back to Hypixel chat.
+  `/sm msg <ign> <message>` and `/sm reply` (`/sm r`) provide private friend conversations with recipient acknowledgements, separately from LFG controls. `/sm chat <ign>` routes normal typed chat to that friend until `/sm chat` or a Hypixel `/chat <channel>` switch. Messages never silently fall back to Hypixel chat.
 
 - Visual cosmetics (`/sm cosmetics`)
   Authenticated Discord account linking controls styled custom names and independent X/Y/Z visual player sizes. Only enabled, supporting Sky-Hawk clients see them; real identities remain authoritative. See [player commands, channel permissions and operator setup](docs/cosmetics-discord.md).

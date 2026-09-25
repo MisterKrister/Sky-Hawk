@@ -3,6 +3,7 @@ package me.mycellium.skymyce.features.instances.dungeons.friends
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.google.gson.JsonObject
+import me.mycellium.mixin.MinecraftAccountKeyAccessor
 import me.mycellium.skymyce.SkyMyce
 import me.mycellium.skymyce.config.instances.dungeons.DungeonFriendsSettings
 import me.mycellium.skymyce.utils.MC
@@ -164,7 +165,9 @@ object DungeonFriendRelay {
         stage = "websocket_upgrade"
         val token = generation
         val sessionService = MC.instance.services().sessionService()
-        val keyManager = MC.instance.profileKeyPairManager
+        // No Chat Reports masks the public getter. Use the existing account manager only for our
+        // domain-separated relay proof; never enable chat signing or replace Minecraft's manager.
+        val keyManager = (MC.instance as MinecraftAccountKeyAccessor).`skymyce$getAccountKeyPairManager`()
         val listener = object : WebSocket.Listener {
             private val text = StringBuilder()
             override fun onOpen(webSocket: WebSocket) {

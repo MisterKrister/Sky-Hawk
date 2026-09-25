@@ -6,6 +6,7 @@
     "AbstractContainerScreenMixin"
   ],
   "client": [
+    "MinecraftAccountKeyAccessor",
     "RelayChatPrivacyMixin",
     "AvatarCosmeticsMixin",
     "AvatarCosmeticStateMixin",
