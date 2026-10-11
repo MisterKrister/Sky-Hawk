@@ -148,7 +148,7 @@ export async function minecraftContent(packet: Json, scope = "global", room = GL
   if (!body) return null;
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(packet.id)));
   const nonce = [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("").slice(0, 24);
-  return { ...body, allowed_mentions: { parse: [], replied_user: false }, nonce, enforce_nonce: true };
+  return { ...body, nonce, enforce_nonce: true };
 }
 
 export const REACTION_EMOJI = ['👍', '❤️', '😂', '🎉', '👀', '🔥'];
@@ -217,6 +217,9 @@ export function minecraftCard(packet: Json, scope: string, room: string): Json |
       packet.room !== room || !minecraftId.test(packet.id ?? '') || packet.message_id !== packet.id ||
       !/^[A-Za-z0-9_]{1,16}$/u.test(packet.from ?? '') || typeof packet.text !== 'string' ||
       !packet.text.trim() || packet.text.length > maximum || /[\x00-\x08\x0b-\x1f\x7f-\x9f\u00a7\u202a-\u202e\u2066-\u2069]/u.test(packet.text)) return null;
+  if (packet.mentions !== undefined && (!Array.isArray(packet.mentions) || packet.mentions.length > 8 ||
+      packet.mentions.some((id: unknown) => typeof id !== 'string' || !snowflake.test(id)))) return null;
+  const users = scope === 'global' ? [...new Set<string>(packet.mentions ?? [])] : [];
   const escape = (value: string) => value.replace(/[\\`*_~|>]/g, '\\$&');
   const metadata = packet.sender?.name === packet.from ? packet.sender : {};
   const cosmetic = typeof metadata.cosmeticName === 'string' ? bounded(metadata.cosmeticName.replace(unsafeDisplay, ''), 64).trim() : '';
@@ -240,7 +243,8 @@ export function minecraftCard(packet: Json, scope: string, room: string): Json |
   }
   if (links.length) fields.push({ name: 'Media', value: bounded(links.join(' · '), 1024) });
   if (fields.length) embed.fields = fields;
-  const body: Json = { embeds: [embed], allowed_mentions: { parse: [], replied_user: false } };
+  const body: Json = { embeds: [embed], allowed_mentions: users.length ? { parse: [], users, replied_user: false } : { parse: [], replied_user: false } };
+  if (users.length) body.content = users.map(id => `<@${id}>`).join(' ');
   if (snowflake.test(packet.reply?.discordMessageId ?? '')) body.message_reference = { message_id: packet.reply.discordMessageId, fail_if_not_exists: false };
   return body;
 }

@@ -552,7 +552,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
       const attachments = discordMedia(merged).map(item => ({ id: item.id, filename: item.name, url: item.url,
         content_type: item.mime, size: item.bytes, width: item.width, height: item.height }));
       const recovery = { ...JSON.parse(source.value), content: typeof merged.content === "string" ? merged.content.slice(0, 4096) : "",
-        embeds: previous.mapped ? [{ description: packet.text.replace(/[\\`*_~|>]/g, "\\        embeds: [], attachments, text: packet.text, media: packet.media, mentions: [], links: discordMessageLinks({ content: packet.text }) };") }] : [],
+        embeds: previous.mapped ? [{ description: packet.text.replace(/[\\`*_~|>]/g, "\\$&") }] : [],
         attachments, text: packet.text, media: packet.media, mentions: [], links: discordMessageLinks({ content: packet.text }) };
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_previews VALUES (?, ?, ?)", sourceId, JSON.stringify(recovery), Math.min(source.expires, Date.now() + TTL));
     }
@@ -600,9 +600,9 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
         let method = "DELETE", url = endpoint, body: Json | undefined;
         if (packet.operation === "edit") {
           body = minecraftCard({ ...packet, type: "irc_message", source: "minecraft", id: packet.messageId, message_id: packet.messageId,
-            from: packet.sender?.name }, this.scope, this.room) ?? undefined;
+            from: packet.sender?.name, mentions: [] }, this.scope, this.room) ?? undefined;
           if (!body) { this.operationError(packet, "invalid_message"); return; }
-          delete body.message_reference; method = "PATCH";
+          body.content = ""; delete body.message_reference; method = "PATCH";
           const hash = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body.embeds[0].description)));
           metadata.expectedEdits = [...(Array.isArray(metadata.expectedEdits) ? metadata.expectedEdits.filter((row: Json) => row.until > Date.now()) : []), { hash, until: Date.now() + 15_000 }].slice(-8);
           this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = ? WHERE id = ?", JSON.stringify(metadata), packet.discordMessageId);

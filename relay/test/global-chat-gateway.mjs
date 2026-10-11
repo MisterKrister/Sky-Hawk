@@ -51,6 +51,15 @@ assert.deepEqual(discordMedia({embeds:[{thumbnail:{url:videoPoster}}]}),[{id:'me
 const plainMc={type:'irc_message',scope:'global',room:'global-chat',source:'minecraft',id:'a'.repeat(32),message_id:'a'.repeat(32),from:'Steve',text:'hello'};
 assert.equal((await minecraftContent(plainMc)).content,undefined);assert.equal((await minecraftContent(plainMc)).embeds[0].author.name,'Steve');assert.equal((await minecraftContent(plainMc)).embeds[0].description,'hello');
 assert.equal((await minecraftContent({...plainMc,text:'*'.repeat(1024)})).embeds[0].author.name,'Steve');
+const namedMention='100000000000000099';
+const mentionCard=await minecraftContent({...plainMc,text:`@everyone @here @Linked <@${bot}> <@&${bot}>`,mentions:[namedMention,namedMention]});
+assert.equal(mentionCard.content,`<@${namedMention}>`);
+assert.deepEqual(mentionCard.allowed_mentions,{parse:[],users:[namedMention],replied_user:false});
+assert.equal((await minecraftContent({...plainMc,text:`@everyone <@${bot}>`})).content,undefined);
+assert.deepEqual((await minecraftContent({...plainMc,text:'@everyone @here'})).allowed_mentions,{parse:[],replied_user:false});
+assert.equal(minecraftCard({...plainMc,scope:'room',room:'testing',mentions:[namedMention]},'room','testing').content,undefined);
+for(const mentions of ['everyone',['everyone'],[null],Array(9).fill(namedMention)])assert.equal(await minecraftContent({...plainMc,mentions}),null);
+
 
 const fixture = `
 import { DurableObject } from 'cloudflare:workers';
@@ -480,7 +489,7 @@ try {
   await inject('bridge',{type:'bridge_ready',protocol:3,room:'global-chat',globalChat:true,richChatVersion:1});
   const capability=await until(async()=>frames(await snapshot(),'bridge','bridge_capabilities').at(-1),'capability offer reached backend');
   assert.equal((await health()).richChatVersion,0,'offered rich capability is not ACKed yet');
-  const richMc={...mc('c'.repeat(32)),model:1,sender:{name:'Alice',uuid:'a'.repeat(32),cosmeticName:'Champion'},media:[{id:'gif',type:'gif',url:signedGif}],revision:0};
+  const richMc={...mc('c'.repeat(32)),mentions:[namedMention],model:1,sender:{name:'Alice',uuid:'a'.repeat(32),cosmeticName:'Champion'},media:[{id:'gif',type:'gif',url:signedGif}],revision:0};
   await inject('bridge',richMc); await new Promise(resolve=>setTimeout(resolve,100));
   assert.equal((await snapshot()).posts.length,0,'first rich card waits for capability ACK');
   await inject('bridge',{type:'irc_result',scope:'global',room:'global-chat',id:capability.id});
@@ -488,6 +497,9 @@ try {
   await until(async()=>(await health()).richChatVersion===1,'rich capabilities require server ACK before mutations');
   await until(async()=>(await sql.exec('SELECT discord_id FROM gateway_receipts WHERE id=?',richMc.id)).length===1,'rich card obtains authoritative destination receipt');
   const destination=(await sql.exec('SELECT discord_id FROM gateway_receipts WHERE id=?',richMc.id))[0].discord_id;
+  const mentionedPost=(await snapshot()).posts.find(row=>row.id===destination);
+  assert.equal(mentionedPost.body.content,`<@${namedMention}>`);
+  assert.deepEqual(mentionedPost.body.allowed_mentions,{parse:[],users:[namedMention],replied_user:false});
   const outgoingOp=(id,operation,revision,extra={})=>{const now=Date.now();return {type:'irc_operation',id,scope:'global',room:'global-chat',messageId:richMc.id,discordMessageId:destination,operation,revision,timestamp:now,expiresAt:now+120000,...extra};};
   const editOp=outgoingOp('d'.repeat(32),'edit',1,{text:'Edited in Minecraft',sender:richMc.sender,media:[]});
   await inject('bridge',editOp);
@@ -495,6 +507,7 @@ try {
   const edits=frames(await snapshot(),'rest').filter(row=>row.method==='PATCH');
   assert.equal(edits.at(-1).body.embeds[0].description,'Edited in Minecraft');assert.equal(edits.at(-1).body.embeds[0].author.name,'Champion (Alice)');
   assert.deepEqual(edits.at(-1).body.allowed_mentions,{parse:[],replied_user:false});
+  assert.equal(edits.at(-1).body.content,'','Edits clear notification tags without notifying again');
   await inject('bridge',editOp);await new Promise(resolve=>setTimeout(resolve,100));
   assert.equal(frames(await snapshot(),'rest').filter(row=>row.method==='PATCH').length,edits.length,'operation receipt prevents a retry patch');
 
@@ -511,15 +524,18 @@ try {
   await inject('gateway',delayedOwnEcho);
   await until(async()=>String((await sql.exec('SELECT value FROM gateway_state'))[0].value).includes('"sequence":46'),'old self echo was handled');
   assert.equal(frames(await snapshot(),'bridge','discord_operation').filter(row=>row.message_id===destination&&row.operation==='edit').length,0,'older expected edit echo cannot undo a newer edit');
-  await inject('gateway',{op:0,t:'MESSAGE_UPDATE',s:47,d:{...delayedOwnEcho.d,embeds:[{description:'Genuine external card edit',author:{name:'Not message text'},footer:{text:'Not message text'}}]}});
+  const genuineBody='Genuine *external* card edit', genuineDescription='Genuine \\*external\\* card edit';
+  await inject('gateway',{op:0,t:'MESSAGE_UPDATE',s:47,d:{...delayedOwnEcho.d,embeds:[{description:genuineDescription,author:{name:'Not message text'},footer:{text:'Not message text'}}]}});
   await until(async()=>frames(await snapshot(),'bridge','discord_operation').some(row=>row.message_id===destination&&row.operation==='edit'),'genuine mapped bot card edit is propagated');
   const genuine=frames(await snapshot(),'bridge','discord_operation').find(row=>row.message_id===destination&&row.operation==='edit');
-  assert.equal(genuine.text,'Genuine external card edit');assert.equal(genuine.discordId,bot,'backend retains original Minecraft ownership for mapped bot cards');
+  const recoveredCard=JSON.parse((await sql.exec('SELECT value FROM gateway_previews WHERE id=?',destination))[0].value);
+  assert.equal(recoveredCard.embeds[0].description,genuineDescription,'Mapped recovery preserves markdown escaping without code fragments');
+  assert.equal(genuine.text,genuineBody);assert.equal(genuine.discordId,bot,'backend retains original Minecraft ownership for mapped bot cards');
 
   await inject('gateway',{op:0,t:'MESSAGE_UPDATE',s:48,d:{id:destination,guild_id:guild,channel_id:channel,attachments:[{id:'100000000000000009',filename:'new.gif',url:signedGif}]}});
   await until(async()=>frames(await snapshot(),'bridge','discord_operation').some(row=>row.message_id===destination&&row.media?.length===1),'genuine mapped partial media update keeps its message body');
   const partial=frames(await snapshot(),'bridge','discord_operation').find(row=>row.message_id===destination&&row.media?.length===1);
-  assert.equal(partial.text,'Genuine external card edit');
+  assert.equal(partial.text,genuineBody);
 
   const source={id:String(((BigInt(Date.now())-1420070400000n)<<22n)+77n),guild_id:guild,channel_id:channel,author:{id:'100000000000000007',username:'Human'},content:'Original human text',attachments:[],embeds:[]};
   await call('/test/human-source',source);
