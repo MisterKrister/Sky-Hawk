@@ -42,6 +42,28 @@ assert.equal(usefulGif.text,'GIF information\nA genuine additional description')
 assert.equal(usefulGif.part,'embeds');assert.deepEqual(usefulGif.mentions,[]);assert.ok(!Object.hasOwn(usefulGif,'reply'));
 const distinctGif=embedPacket(beforeGif,{...gifMessage,embeds:[{url:unsignedGif,image:{url:unsignedGif.replace('dance.gif','second.gif')}}]},guild,channel,bot);
 assert.equal(distinctGif.text,unsignedGif.replace('dance.gif','second.gif'),'a real additional media URL is preserved');
+// The original content is the view page; Discord's separate gifv fields supply actual media URLs.
+const tenorPage='https://tenor.com/view/sample-animation-gif-123456789';
+const tenorGif='https://media1.tenor.com/m/sampleAAAAC/sample.gif';
+const tenorVideo='https://media.tenor.com/sampleAAAPo/sample.mp4';
+const tenorEmbed={type:'gifv',url:tenorPage,video:{url:tenorVideo,width:400,height:300},thumbnail:{url:tenorGif,width:400,height:300}};
+const tenorBefore={...replyMessage,content:tenorPage,embeds:[]};
+const tenorMessage={...tenorBefore,embeds:[tenorEmbed]};
+const tenorExpected=[{id:'media-0',type:'gif',url:tenorGif,width:400,height:300}];
+const tenorPacket=discordPacket(tenorMessage,guild,channel,bot);
+assert.equal(tenorPacket.text,`${tenorPage}\n${tenorGif}`);
+assert.deepEqual(tenorPacket.media,tenorExpected,'gifv selects the actual supplied GIF, not its MP4 variant');
+const tenorContinuation=embedPacket(tenorBefore,tenorMessage,guild,channel,bot);
+assert.equal(tenorContinuation.text,tenorGif);assert.deepEqual(tenorContinuation.media,tenorExpected);
+assert.deepEqual(discordMedia({...tenorMessage,content:tenorGif}),tenorExpected,'a direct GIF and its embed stay one item');
+assert.deepEqual(discordMedia({embeds:[{...tenorEmbed,type:'video'}]}),
+ [{id:'media-0',type:'video',url:tenorVideo,thumbnailUrl:tenorGif,width:400,height:300}],'ordinary video keeps browser playback and its GIF poster');
+for(const invalid of ['http://media1.tenor.com/sample.gif','https://localhost/sample.gif','https://user:password@media1.tenor.com/sample.gif'])
+ assert.deepEqual(discordMedia({embeds:[{...tenorEmbed,thumbnail:{url:invalid}}]}),
+  [{id:'media-0',type:'video',url:tenorVideo,width:400,height:300}],'unsafe thumbnail cannot replace a video');
+const tenorPoster='https://media1.tenor.com/sample.png';
+assert.deepEqual(discordMedia({embeds:[{...tenorEmbed,thumbnail:{url:tenorPoster}}]}),
+ [{id:'media-0',type:'video',url:tenorVideo,thumbnailUrl:tenorPoster,width:400,height:300}],'gifv without actual GIF retains video and poster');
 const videoMedia='https://example.com/movie.mp4', videoPoster='https://example.com/poster.png';
 assert.deepEqual(discordMedia({content:videoMedia,embeds:[{video:{url:videoMedia,width:1280,height:720},thumbnail:{url:videoPoster}}]}),
  [{id:'media-0',type:'video',url:videoMedia,thumbnailUrl:videoPoster,width:1280,height:720}]);
