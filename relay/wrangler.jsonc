@@ -4,12 +4,19 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-21",
   "workers_dev": true,
-  "vars": { "ROOMS": "friends,testing" },
+  "vars": {
+    "ROOMS": "friends,testing",
+    "GLOBAL_CHAT_ENABLED": "true",
+    "GLOBAL_CHAT_CHANNEL_ID": "1553536927498506270",
+    "DISCORD_GUILD_ID": "1552053091493486594",
+    "USER_BOT_APPLICATION_ID": "1553617043914367068"
+  },
+  "services": [{"binding":"SKY_MYCE_BACKEND","service":"sky-myce-backend"}],
   "ratelimits": [{ "name": "CONNECT_LIMIT", "namespace_id": "7112026", "simple": { "limit": 20, "period": 60 } }],
   "durable_objects": {
-    "bindings": [{ "name": "RELAY_ROOMS", "class_name": "RelayRoom" }]
+    "bindings": [{ "name": "RELAY_ROOMS", "class_name": "RelayRoom" }, {"name":"GLOBAL_CHAT_GATEWAY","class_name":"GlobalChatGateway"}]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayRoom"] }, {"tag":"v2-global-chat-gateway","new_sqlite_classes":["GlobalChatGateway"]}],
   "observability": {
     "enabled": true,
     "logs": { "enabled": true, "invocation_logs": false },

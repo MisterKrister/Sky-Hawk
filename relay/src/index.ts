@@ -5,8 +5,10 @@ import { SharedWealth, WEALTH_TTL, validateWealth } from "./wealth";
 import { DigestNews, DigestRng, type DigestConfig } from "./digest";
 import { PlayerCosmetics, codeHash, newLinkCode, normalizedCode, cosmeticPayload, watchCosmetics, watchesCosmetic, type CosmeticsConfig, type DiscordCommand } from "./cosmetics";
 import { verifiedInteraction, discordCommand } from "./discord";
+import { globalChatRoute, type GlobalChatConfig } from "./global-chat-gateway";
+export { GlobalChatGateway } from "./global-chat-gateway";
 
-type RelayEnv = Env & DigestConfig & CosmeticsConfig;
+type RelayEnv = Env & DigestConfig & CosmeticsConfig & GlobalChatConfig;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };
 type Session = {
   started?: number;
@@ -48,6 +50,8 @@ const encoder = new TextEncoder();
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
+    const globalResponse = await globalChatRoute(request, env);
+    if (globalResponse) return globalResponse;
     if (url.pathname === "/discord/interactions") {
       if (!env.DISCORD_PUBLIC_KEY || !env.DISCORD_APPLICATION_ID) return new Response("Interactions not configured", { status: 503 });
       if (!(await env.CONNECT_LIMIT.limit({ key: `discord:${request.headers.get("CF-Connecting-IP") ?? "local"}` })).success) return new Response("Rate limited", { status: 429 });
