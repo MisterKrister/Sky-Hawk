@@ -6,6 +6,7 @@ import { DigestNews, DigestRng, type DigestConfig } from "./digest";
 import { PlayerCosmetics, codeHash, newLinkCode, normalizedCode, cosmeticPayload, watchCosmetics, watchesCosmetic, type CosmeticsConfig, type DiscordCommand } from "./cosmetics";
 import { verifiedInteraction, discordCommand } from "./discord";
 import { globalChatRoute, type GlobalChatConfig } from "./global-chat-gateway";
+import { communityBackendInteraction } from "./community-backend";
 export { GlobalChatGateway } from "./global-chat-gateway";
 
 type RelayEnv = Env & DigestConfig & CosmeticsConfig & GlobalChatConfig;
@@ -52,6 +53,8 @@ export default {
     const url = new URL(request.url);
     const globalResponse = await globalChatRoute(request, env);
     if (globalResponse) return globalResponse;
+    const communityResponse = await communityBackendInteraction(request, env);
+    if (communityResponse) return communityResponse;
     if (url.pathname === "/discord/interactions") {
       if (!env.DISCORD_PUBLIC_KEY || !env.DISCORD_APPLICATION_ID) return new Response("Interactions not configured", { status: 503 });
       if (!(await env.CONNECT_LIMIT.limit({ key: `discord:${request.headers.get("CF-Connecting-IP") ?? "local"}` })).success) return new Response("Rate limited", { status: 429 });

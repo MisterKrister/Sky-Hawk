@@ -120,8 +120,12 @@ export function discordPacket(message: Json, guild: string, channel: string, own
   const reference = message.message_reference, referenced = message.referenced_message;
   const referenceId = reference?.message_id ?? referenced?.id;
   if (snowflake.test(referenceId ?? "") && (reference?.channel_id ?? channel) === channel &&
-      (!referenced || referenced.channel_id === channel)) {
-    packet.reply = { message_id: referenceId, from: display(referenced?.author, referenced?.member), text: referenced ? discordBody(referenced, 256) : "" };
+      (!referenced || referenced.channel_id === channel && (referenced.guild_id === undefined || referenced.guild_id === guild))) {
+    const ownCard = referenced?.author?.id === ownBot && !referenced?.webhook_id ? list(referenced.embeds)[0] : undefined;
+    const cardName = typeof ownCard?.author?.name === "string" ? bounded(ownCard.author.name.replace(unsafeDisplay, ""), 64) : "";
+    const cardText = typeof ownCard?.description === "string" ? bounded(ownCard.description.replace(/\\([\\`*_~|>])/gu, "$1").replace(unsafeBody, ""), 256) : "";
+    packet.reply = { message_id: referenceId, from: referenced ? cardName || display(referenced.author, referenced.member) : "Unavailable message",
+      text: referenced ? cardText || discordBody(referenced, 256) : "The original message is no longer available." };
   }
   return packet;
 }
@@ -215,6 +219,34 @@ export function discordSender(message: Json): Json {
   if (snowflake.test(author.id ?? '') && /^[a-f0-9]{32}$/u.test(author.avatar ?? ''))
     sender.avatarUrl = `https://cdn.discordapp.com/avatars/${author.id}/${author.avatar}.png?size=64`;
   return sender;
+}
+
+const rngRarities = new Set(["COMMON", "UNCOMMON", "RARE", "EPIC", "LEGENDARY", "MYTHIC", "DIVINE", "ULTIMATE", "SPECIAL", "VERY_SPECIAL", "ADMIN"]);
+const rngItemNames: Record<string, string> = { NECRON_HANDLE: "Necron's Handle", GIANTS_SWORD: "Giant's Sword", DARK_CLAYMORE: "Dark Claymore",
+  SHADOW_FURY: "Shadow Fury", IMPLOSION_SCROLL: "Implosion", WITHER_SHIELD_SCROLL: "Wither Shield", SHADOW_WARP_SCROLL: "Shadow Warp",
+  WARDEN_HEART: "Warden Heart", JUDGEMENT_CORE: "Judgement Core", OVERFLUX_CAPACITOR: "Overflux Capacitor" };
+const unsafeRngPresentation = /[\x00-\x1f\x7f-\x9f\u00a7\u202a-\u202e\u2066-\u2069]/u;
+/** Match the community outbox's public projection; never add private identity fields to a Discord post. */
+export async function rngContent(event: Json, now = Date.now()): Promise<Json | null> {
+  if (!event || !minecraftId.test(event.id ?? "") || !/^[A-Z0-9_]{1,80}$/.test(event.item ?? "") ||
+      !["dungeon", "slayer", "kuudra", "fishing"].includes(event.activity) || !Number.isSafeInteger(event.occurredAt) ||
+      event.occurredAt > now + 60_000 || event.occurredAt < now - 900_000 || event.unverified !== true ||
+      !(event.player === "Anonymous" || /^[A-Za-z0-9_]{1,16}$/.test(event.player ?? ""))) return null;
+  if (event.rarity != null && !rngRarities.has(event.rarity) ||
+      event.displayName != null && (typeof event.displayName !== "string" || event.displayName.length < 1 || event.displayName.length > 120 ||
+        event.displayName !== event.displayName.trim() || unsafeRngPresentation.test(event.displayName)) ||
+      event.floor != null && (event.activity !== "dungeon" || typeof event.floor !== "string" || !/^(?:E|[FM][1-7])$/.test(event.floor))) return null;
+  const inert = (value: string): string => value.replace(/[\\`*_~|><\[\]()]/g, "\\$&").replace(/@/g, "@\u200b").replace(/:/g, ":\u200b");
+  const display = event.displayName ?? rngItemNames[event.item] ?? event.item.toLowerCase().split("_").map((word: string) => word[0].toUpperCase() + word.slice(1)).join(" ");
+  const fields = [{ name: "Activity", value: event.activity }];
+  if (event.rarity != null) fields.push({ name: "Observed rarity", value: event.rarity.toLowerCase().replace(/_/g, " ") });
+  if (event.floor != null) fields.push({ name: "Observed floor", value: event.floor });
+  fields.push({ name: "Source", value: "Community submitted · unverified client acquisition report" }, { name: "Item variant", value: inert(event.item) });
+  const nonce = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`rng:${event.id}`)))].map(byte => byte.toString(16).padStart(2, "0")).join("").slice(0, 24);
+  return { embeds: [{ title: `Rare drop · ${inert(display)}`, color: 0x8b61eb,
+    description: `**${event.player.replace(/_/g, "\\_")}** reported a supported rare drop.`, fields,
+    timestamp: new Date(event.occurredAt).toISOString(), footer: { text: "Sky-Myce RNG · shared with consent; counts are not game drop probabilities" } }],
+    allowed_mentions: { parse: [], replied_user: false }, nonce, enforce_nonce: true };
 }
 /** Only the authenticated backend may supply Minecraft identity and cosmetics metadata. */
 export function minecraftCard(packet: Json, scope: string, room: string): Json | null {

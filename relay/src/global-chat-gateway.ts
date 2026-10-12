@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { GLOBAL_ROOM, discordPacket, discordMessageLinks, embedPacket, minecraftContent, minecraftCard, discordOperation, discordMedia, validBridgeOperation, minecraftId, snowflake } from "./gateway-chat";
+import { GLOBAL_ROOM, discordPacket, discordMessageLinks, embedPacket, minecraftContent, minecraftCard, discordOperation, discordMedia, validBridgeOperation, minecraftId, snowflake, rngContent } from "./gateway-chat";
 
 export type GlobalChatConfig = {
   GLOBAL_CHAT_GATEWAY?: DurableObjectNamespace<GlobalChatGateway>;
@@ -7,6 +7,7 @@ export type GlobalChatConfig = {
   GLOBAL_CHAT_CHANNEL_ID?: string;
   DISCORD_IRC_CHANNEL_ID?: string;
   DISCORD_IRC_TEST_CHANNEL_ID?: string;
+  DISCORD_RNG_CHANNEL_ID?: string;
   IRC_ROOMS?: string;
   DISCORD_GUILD_ID?: string;
   USER_BOT_APPLICATION_ID?: string;
@@ -18,7 +19,8 @@ export type GlobalChatConfig = {
 type Json = Record<string, any>;
 type BridgeAttempt = { generation: number; controller: AbortController; deadline: number };
 type State = { running: boolean; room?: string; channel?: string; guild?: string; application?: string; session?: string; resume?: string; sequence?: number; ownBot?: string;
-  gatewayDue: number; bridgeDue: number; gatewayFailures: number; bridgeFailures: number; blocked?: string; lastError?: string; lastAck?: number; postDue?: number };
+  gatewayDue: number; bridgeDue: number; gatewayFailures: number; bridgeFailures: number; blocked?: string; lastError?: string; lastAck?: number; postDue?: number;
+  rngDue?: number; rngFailures?: number; rngError?: string; rngLastAck?: number; rngReceiptCursor?: string };
 const LIFETIME = 900_000;
 const TTL = 120_000, MAX_PENDING = 256, MAX_RECEIPTS = 1024;
 /** Keep Discord's full cooldown, rounding up; invalid/overflowing values use a safe retry delay. */
@@ -30,6 +32,22 @@ function retryAfterDeadline(value: string | null, minimum = 1000, fallback = 500
 }
 const encoder = new TextEncoder();
 const hex = (bytes: ArrayBuffer): string => [...new Uint8Array(bytes)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+async function boundedJson(response: Response, maximum = 16_384): Promise<Json> {
+  const reader = response.body?.getReader(); if (!reader) throw new Error("Missing response body");
+  const chunks: Uint8Array[] = []; let length = 0;
+  try {
+    while (true) {
+      const next = await reader.read(); if (next.done) break;
+      length += next.value.byteLength; if (length > maximum) throw new Error("Response too large");
+      chunks.push(next.value);
+    }
+  } finally { await reader.cancel(); }
+  const bytes = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  const result = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid response body");
+  return result;
+}
 function gatewayUrl(value: unknown): URL | null {
   if (typeof value !== "string" || value.length > 256) return null;
   try {
@@ -51,6 +69,10 @@ function selectedChannel(env: GlobalChatConfig, room: string): string | undefine
 function configured(env: GlobalChatConfig, room = GLOBAL_ROOM): boolean {
   return !!env.SKY_MYCE_BACKEND && [selectedChannel(env, room), env.DISCORD_GUILD_ID, env.USER_BOT_APPLICATION_ID].every(id => typeof id === "string" && snowflake.test(id)) &&
     [env.USER_BOT_TOKEN, env.DISCORD_BRIDGE_SECRET, env.GLOBAL_CHAT_CONTROL_SECRET].every(secret => typeof secret === "string" && secret.length >= 32 && secret.length <= 512);
+}
+function rngChannel(env: GlobalChatConfig): string | undefined {
+  const channel = env.DISCORD_RNG_CHANNEL_ID;
+  return snowflake.test(channel ?? "") && ![env.GLOBAL_CHAT_CHANNEL_ID, env.DISCORD_IRC_CHANNEL_ID, env.DISCORD_IRC_TEST_CHANNEL_ID].includes(channel) ? channel : undefined;
 }
 function routedRoom(path: string): string | undefined {
   if (path === "/global-chat/health" || path === "/global-chat/control") return GLOBAL_ROOM;
@@ -101,6 +123,9 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private bridgePingDue = Infinity;
   private bridgePongPending = false;
   private readonly deliveries = new Set<string>();
+  private readonly replies = new Set<string>();
+  private rngRunning = false;
+  private rngVerified?: string;
   private chain: Promise<unknown> = Promise.resolve();
   private queued = 0;
 
@@ -114,7 +139,8 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
       CREATE TABLE IF NOT EXISTS gateway_receipts (id TEXT PRIMARY KEY, discord_id TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS gateway_previews (id TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS gateway_sources (id TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS gateway_operations (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, revision INTEGER NOT NULL, discord_id TEXT NOT NULL, expires INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS gateway_operations (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, revision INTEGER NOT NULL, discord_id TEXT NOT NULL, expires INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS gateway_rng_receipts (id TEXT PRIMARY KEY, channel TEXT NOT NULL, discord_id TEXT NOT NULL, acknowledged INTEGER NOT NULL, expires INTEGER NOT NULL);`);
     const saved = ctx.storage.sql.exec<{ value: string }>("SELECT value FROM gateway_state WHERE id = 1").toArray()[0];
     this.state = saved ? JSON.parse(saved.value) : { running: false, room, channel, guild: env.DISCORD_GUILD_ID,
       application: env.USER_BOT_APPLICATION_ID, gatewayDue: 0, bridgeDue: 0, gatewayFailures: 0, bridgeFailures: 0 };
@@ -129,6 +155,8 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private prune(): void {
     const now = Date.now();
     for (const table of ["gateway_pending", "gateway_seen", "gateway_receipts", "gateway_previews", "gateway_sources", "gateway_operations"]) this.ctx.storage.sql.exec(`DELETE FROM ${table} WHERE expires <= ?`, now);
+    // An unacknowledged publication may already be on Discord. Keep its receipt for consent cancellation, even after a long outage.
+    this.ctx.storage.sql.exec("DELETE FROM gateway_rng_receipts WHERE acknowledged=1 AND expires<=?", now);
     this.ctx.storage.sql.exec("DELETE FROM gateway_operations WHERE id IN (SELECT id FROM gateway_operations ORDER BY expires DESC, id DESC LIMIT -1 OFFSET 4096)");
     for (const table of ["gateway_seen", "gateway_receipts", "gateway_previews", "gateway_sources"]) this.ctx.storage.sql.exec(`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} ORDER BY expires DESC, id DESC LIMIT -1 OFFSET ?)`, MAX_RECEIPTS);
   }
@@ -171,7 +199,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
         if (this.env.GLOBAL_CHAT_ENABLED !== "true" || !configured(this.env, this.room)) return Response.json({ ...this.health(), error: "gateway_disabled_or_unconfigured" }, { status: 503 });
         this.state.running = true; delete this.state.blocked;
         this.state.channel = this.channelId; this.state.guild = this.env.DISCORD_GUILD_ID; this.state.application = this.env.USER_BOT_APPLICATION_ID;
-        this.state.gatewayDue = this.state.bridgeDue = Date.now();
+        this.state.gatewayDue = this.state.bridgeDue = this.state.rngDue = Date.now();
         this.persist(); await this.tick();
       } else if (body.action === "stop") {
         this.state.running = false; this.persist();
@@ -187,6 +215,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     return { room: this.room, scope: this.scope, enabled: this.env.GLOBAL_CHAT_ENABLED === "true", configured: configured(this.env, this.room), running: this.state.running,
       gatewayReady: this.gatewayReady, bridgeReady: this.bridgeReady, richChatVersion: this.richReady ? 1 : 0, blocked: this.state.blocked ?? null,
       lastError: this.state.lastError ?? null, lastDeliveryAt: this.state.lastAck ?? null,
+      rngFeedConfigured: this.room === GLOBAL_ROOM && !!rngChannel(this.env), rngFeedLastError: this.state.rngError ?? null, rngFeedLastDeliveryAt: this.state.rngLastAck ?? null,
       pendingMessages: this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gateway_pending").one().count };
   }
   async alarm(): Promise<void> { await this.enqueue(() => this.tick()); }
@@ -195,7 +224,8 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     const pending = this.ctx.storage.sql.exec<{ due: number }>("SELECT MIN(due) AS due FROM gateway_pending WHERE ? = 1 OR id NOT LIKE 'op:%'", this.richReady ? 1 : 0).one().due;
     const next = Math.min(this.gateway ? this.heartbeatDue : this.state.gatewayDue,
       this.bridge ? this.bridgePingDue : this.bridgeConnecting?.deadline ?? this.state.bridgeDue, this.gatewayDeadline, this.bridgeDeadline,
-      this.bridgeReady && (!this.richOffered || this.richReady) && pending != null ? pending : Infinity, Date.now() + TTL);
+      this.bridgeReady && (!this.richOffered || this.richReady) && pending != null ? pending : Infinity,
+      this.room === GLOBAL_ROOM && this.gatewayReady && rngChannel(this.env) && !this.rngRunning ? Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0) : Infinity, Date.now() + TTL);
     await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, next));
   }
   private async tick(): Promise<void> {
@@ -221,6 +251,12 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
       this.ctx.waitUntil(this.connectBridge(attempt));
     }
     this.flushDiscord();
+    const channel = this.room === GLOBAL_ROOM ? rngChannel(this.env) : undefined;
+    if (channel && this.gatewayReady && !this.rngRunning && now >= Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0)) {
+      this.rngRunning = true;
+      // Feed HTTP calls share the Discord cooldown without holding the heartbeat/control queue.
+      this.ctx.waitUntil(this.drainRng(channel));
+    }
     await this.schedule();
   }
   private closeGateway(): void {
@@ -414,7 +450,8 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     if (count >= MAX_PENDING) { this.state.lastError = "discord_queue_full"; this.persist(); return; }
     const expires = Math.min(created + TTL, Date.now() + TTL);
     this.ctx.storage.sql.exec("INSERT INTO gateway_seen VALUES (?, ?)", id, expires);
-    this.ctx.storage.sql.exec("INSERT INTO gateway_pending VALUES (?, ?, ?, ?)", id, JSON.stringify(packet), expires, Date.now());
+    const lookupReply = !update && !!packet.reply && !data.referenced_message && this.replies.size < 16 && Date.now() >= (this.state.postDue ?? 0);
+    this.ctx.storage.sql.exec("INSERT INTO gateway_pending VALUES (?, ?, ?, ?)", id, JSON.stringify(packet), expires, Date.now() + (lookupReply ? 3000 : 0));
     // Retain only the bounded data required for one delayed preview, never a durable chat history.
     if (!update) {
       const user = (raw: Json): Json => ({ id: raw?.id, username: typeof raw?.username === "string" ? raw.username.slice(0, 64) : undefined,
@@ -431,7 +468,39 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
       const source = { id: data.id, guild_id: data.guild_id, channel_id: data.channel_id, author: user(data.author), member, webhook_id: data.webhook_id, mapped: false };
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_sources VALUES (?, ?, ?)", data.id, JSON.stringify(source), created + LIFETIME);
     }
+    if (lookupReply) {
+      this.replies.add(id);
+      // Start after the dispatch transaction commits; the durable fallback still delivers after a timeout/restart.
+      this.ctx.waitUntil(Promise.resolve().then(() => this.resolveReply(data, id)).finally(() => this.replies.delete(id)));
+    }
     this.flushDiscord();
+  }
+  private async resolveReply(data: Json, id: string): Promise<void> {
+    let reply: Json | undefined;
+    const referenceId = data.message_reference?.message_id;
+    try {
+      if (!this.state.running || data.guild_id !== this.env.DISCORD_GUILD_ID || data.channel_id !== this.channelId ||
+          (data.message_reference?.channel_id ?? this.channelId) !== this.channelId || !snowflake.test(referenceId ?? "") ||
+          !this.ctx.storage.sql.exec("SELECT id FROM gateway_pending WHERE id=?", id).toArray().length) return;
+      const response = await this.externalFetch(new Request(`https://discord.com/api/v10/channels/${this.channelId}/messages/${referenceId}`, {
+        headers: { Authorization: `Bot ${this.env.USER_BOT_TOKEN}` }, redirect: "manual", signal: AbortSignal.timeout(3000) }));
+      if (response.status === 429) {
+        this.state.postDue = Math.max(this.state.postDue ?? 0, retryAfterDeadline(response.headers.get("Retry-After"))); this.persist();
+      }
+      if (response.ok) {
+        const parent = await boundedJson(response);
+        if (parent.id === referenceId && parent.channel_id === this.channelId && (parent.guild_id === undefined || parent.guild_id === this.env.DISCORD_GUILD_ID))
+          reply = discordPacket({ ...data, referenced_message: parent }, this.env.DISCORD_GUILD_ID!, this.channelId!, this.state.ownBot!)?.reply;
+      } else await response.body?.cancel();
+    } catch { /* Explicit unavailable context stays in the already-durable message. */ }
+    await this.enqueue(async () => {
+      const row = this.ctx.storage.sql.exec<{ packet: string; expires: number }>("SELECT packet,expires FROM gateway_pending WHERE id=?", id).toArray()[0];
+      if (!row || row.expires <= Date.now() || !this.state.running) return;
+      const packet = JSON.parse(row.packet);
+      if (reply && packet.reply?.message_id === referenceId) packet.reply = reply;
+      this.ctx.storage.sql.exec("UPDATE gateway_pending SET packet=?,due=? WHERE id=?", JSON.stringify(packet), Date.now(), id);
+      this.flushDiscord(); await this.schedule();
+    });
   }
   private flushDiscord(): void {
     if (!this.bridgeReady || !this.bridge || this.richOffered && !this.richReady) return;
@@ -524,6 +593,131 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
       this.prune(); this.state.lastAck = Date.now(); this.persist();
       if (packet.expiresAt > Date.now()) this.ack(packet.id, posted.id);
     } catch { this.state.lastError = "discord_post_failed"; this.persist(); }
+  }
+
+  private rngActive(channel: string): boolean {
+    return this.room === GLOBAL_ROOM && this.state.running && this.env.GLOBAL_CHAT_ENABLED === "true" && !this.state.blocked &&
+      this.gatewayReady && this.state.ownBot === this.env.USER_BOT_APPLICATION_ID && rngChannel(this.env) === channel;
+  }
+  private async rngRequest(raw: Json, channel: string): Promise<Json> {
+    const body = JSON.stringify({ ...raw, channelId: channel }), timestamp = String(Date.now()), nonce = hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
+    const hash = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body)));
+    const key = await crypto.subtle.importKey("raw", encoder.encode(this.env.DISCORD_BRIDGE_SECRET!), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const signature = hex(await crypto.subtle.sign("HMAC", key, encoder.encode(`sky-myce-community-feed\nPOST\n/discord/community-feed\n${timestamp}\n${nonce}\n${hash}`)));
+    const response = await this.env.SKY_MYCE_BACKEND!.fetch(new Request("https://sky-myce-backend/discord/community-feed", { method: "POST",
+      headers: { "Content-Type": "application/json", "X-SkyMyce-Timestamp": timestamp, "X-SkyMyce-Nonce": nonce, "X-SkyMyce-Signature": signature },
+      body, redirect: "manual", signal: AbortSignal.timeout(8000) }));
+    if (!response.ok) { await response.body?.cancel(); throw new Error("RNG feed unavailable"); }
+    const result = await boundedJson(response);
+    if (result.ok !== true) throw new Error("RNG feed unavailable");
+    return result;
+  }
+  private async rngRest(request: Request): Promise<Response> {
+    if (Date.now() < (this.state.postDue ?? 0)) throw new Error("Discord cooldown");
+    const response = await this.externalFetch(request);
+    if (response.status === 429) {
+      this.state.postDue = Math.max(this.state.postDue ?? 0, retryAfterDeadline(response.headers.get("Retry-After"))); this.persist();
+      await response.body?.cancel(); throw new Error("Discord cooldown");
+    }
+    if (response.headers.get("X-RateLimit-Remaining") === "0") {
+      this.state.postDue = Math.max(this.state.postDue ?? 0, retryAfterDeadline(response.headers.get("X-RateLimit-Reset-After"))); this.persist();
+    }
+    return response;
+  }
+  private rngDiscordRequest(channel: string, suffix = "", method = "GET", body?: Json): Request {
+    return new Request(`https://discord.com/api/v10/channels/${channel}${suffix}`, { method,
+      headers: { Authorization: `Bot ${this.env.USER_BOT_TOKEN}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}), redirect: "manual", signal: AbortSignal.timeout(8000) });
+  }
+  private async removeRngMessage(channel: string, messageId: string): Promise<void> {
+    const current = await this.rngRest(this.rngDiscordRequest(channel, `/messages/${messageId}`));
+    if (current.status === 404) { await current.body?.cancel(); return; }
+    if (!current.ok) { await current.body?.cancel(); throw new Error("RNG deletion unavailable"); }
+    const found = await boundedJson(current);
+    if (found.id !== messageId || found.channel_id !== channel || found.author?.id !== this.env.USER_BOT_APPLICATION_ID) throw new Error("RNG deletion owner mismatch");
+    const removed = await this.rngRest(this.rngDiscordRequest(channel, `/messages/${messageId}`, "DELETE"));
+    await removed.body?.cancel();
+    if (!removed.ok && removed.status !== 404) throw new Error("RNG deletion unavailable");
+  }
+  private async drainRng(channel: string): Promise<void> {
+    let failed = false;
+    try {
+      if (!this.rngActive(channel)) return;
+      this.prune();
+      if (this.rngVerified !== channel) {
+        const response = await this.rngRest(this.rngDiscordRequest(channel));
+        if (!response.ok) { await response.body?.cancel(); throw new Error("RNG channel unavailable"); }
+        const selected = await boundedJson(response);
+        if (selected.id !== channel || selected.guild_id !== this.env.DISCORD_GUILD_ID || ![0, 5].includes(selected.type)) throw new Error("RNG channel mismatch");
+        this.rngVerified = channel;
+      }
+      // Recover publish ACKs committed by the account service when their responses were lost.
+      const cursor = this.state.rngReceiptCursor ?? "";
+      const selection = "SELECT id,discord_id FROM gateway_rng_receipts WHERE channel=? AND acknowledged=0";
+      const receipts = this.ctx.storage.sql.exec<{ id: string; discord_id: string }>(`${selection} AND id>? ORDER BY id LIMIT 32`, channel, cursor).toArray();
+      if (receipts.length < 32 && cursor) receipts.push(...this.ctx.storage.sql.exec<{ id: string; discord_id: string }>(`${selection} AND id<=? ORDER BY id LIMIT ?`, channel, cursor, 32 - receipts.length).toArray());
+      if (receipts.length) { this.state.rngReceiptCursor = receipts.at(-1)!.id; this.persist(); }
+      const requested = new Map(receipts.map(receipt => [receipt.id, receipt.discord_id]));
+      const result = await this.rngRequest({ action: "claim", ...(receipts.length ? { receipts: receipts.map(receipt => ({ id: receipt.id, messageId: receipt.discord_id })) } : {}) }, channel);
+      if (!Array.isArray(result.deliveries) || result.deliveries.length > 3) throw new Error("Invalid RNG feed response");
+      if (result.acknowledged !== undefined) {
+        if (!Array.isArray(result.acknowledged) || result.acknowledged.length > receipts.length || new Set(result.acknowledged).size !== result.acknowledged.length ||
+            result.acknowledged.some((id: unknown) => typeof id !== "string" || !minecraftId.test(id) || !requested.has(id))) throw new Error("Invalid RNG receipt confirmations");
+        for (const id of result.acknowledged) this.ctx.storage.sql.exec("UPDATE gateway_rng_receipts SET acknowledged=1,expires=? WHERE id=? AND channel=? AND discord_id=? AND acknowledged=0", Date.now() + LIFETIME, id, channel, requested.get(id)!);
+      }
+      for (const delivery of result.deliveries) {
+        if (!this.rngActive(channel)) break;
+        if (!minecraftId.test(delivery?.id ?? "") || !/^[A-Za-z0-9_-]{43}$/.test(delivery.claim ?? "") || delivery.channelId !== channel ||
+            !["publish", "delete"].includes(delivery.operation)) throw new Error("Invalid RNG delivery");
+        const workId = `rng:${delivery.id}`;
+        if (this.deliveries.size >= 8 || this.deliveries.has(workId)) throw new Error("Discord delivery busy");
+        this.deliveries.add(workId);
+        try {
+          const receipt = this.ctx.storage.sql.exec<{ discord_id: string }>("SELECT discord_id FROM gateway_rng_receipts WHERE id=? AND channel=? AND (acknowledged=0 OR expires>?)", delivery.id, channel, Date.now()).toArray()[0];
+          if (delivery.operation === "delete") {
+            // A publish ACK can be lost after posting. The account service then has only a cancellation tombstone, while we retain its Discord ID.
+            if (delivery.messageId !== undefined && !snowflake.test(delivery.messageId)) throw new Error("Invalid RNG deletion");
+            const messageId = delivery.messageId ?? receipt?.discord_id;
+            if (messageId) await this.removeRngMessage(channel, messageId);
+            // Forget first: a committed ACK with a lost response removes the account row and cannot retry receipt cleanup.
+            this.ctx.storage.sql.exec("DELETE FROM gateway_rng_receipts WHERE id=? AND channel=?", delivery.id, channel);
+            await this.rngRequest({ action: "ack", id: delivery.id, claim: delivery.claim, operation: "delete" }, channel);
+            continue;
+          }
+          if (delivery.event?.id !== delivery.id) throw new Error("Invalid RNG publication");
+          const card = await rngContent(delivery.event); if (!card) throw new Error("Invalid RNG publication");
+          let messageId = receipt?.discord_id;
+          if (!messageId) {
+            if (!this.rngActive(channel)) break;
+            // Never evict an unacknowledged receipt to make room for another public message.
+            if (this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gateway_rng_receipts").one().count >= MAX_RECEIPTS) throw new Error("RNG receipts full");
+            const response = await this.rngRest(this.rngDiscordRequest(channel, "/messages", "POST", card));
+            if (!response.ok) { await response.body?.cancel(); throw new Error("RNG post unavailable"); }
+            const posted = await boundedJson(response);
+            if (!snowflake.test(posted.id ?? "") || posted.channel_id !== channel || posted.author?.id !== this.env.USER_BOT_APPLICATION_ID) throw new Error("Invalid RNG post response");
+            messageId = posted.id;
+            try {
+              this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_rng_receipts VALUES (?,?,?,?,?)", delivery.id, channel, messageId!, 0, Date.now() + LIFETIME);
+            } catch (error) { await this.removeRngMessage(channel, messageId!); throw error; }
+          }
+          const ack = await this.rngRequest({ action: "ack", id: delivery.id, claim: delivery.claim, operation: "publish", messageId }, channel);
+          if (ack.deleteRequired === true) {
+            await this.removeRngMessage(channel, messageId!);
+            this.ctx.storage.sql.exec("DELETE FROM gateway_rng_receipts WHERE id=? AND channel=?", delivery.id, channel);
+          } else this.ctx.storage.sql.exec("UPDATE gateway_rng_receipts SET acknowledged=1,expires=? WHERE id=? AND channel=?", Date.now() + LIFETIME, delivery.id, channel);
+          this.state.rngLastAck = Date.now();
+        } finally { this.deliveries.delete(workId); }
+      }
+    } catch { failed = true; }
+    finally {
+      await this.enqueue(async () => {
+        this.rngRunning = false;
+        this.state.rngFailures = failed ? Math.min((this.state.rngFailures ?? 0) + 1, 6) : 0;
+        if (failed) this.state.rngError = "rng_feed_unavailable"; else delete this.state.rngError;
+        this.state.rngDue = Date.now() + Math.min(60_000, 10_000 * 2 ** this.state.rngFailures);
+        this.persist(); await this.schedule();
+      });
+    }
   }
 
   private nativeOperation(event: string, data: Json, eventId: string, descriptionHash?: string): void {
