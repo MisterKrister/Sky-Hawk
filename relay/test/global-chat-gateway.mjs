@@ -91,7 +91,7 @@ for(const mentions of ['everyone',['everyone'],[null],Array(9).fill(namedMention
 const fixture = `
 import { DurableObject } from 'cloudflare:workers';
 import production from './src/index';
-export { RelayRoom, GlobalChatGateway } from './src/index';
+export { RelayRoom, GlobalChatGateway, GatewayControl } from './src/index';
 export class GatewayFixture extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -234,8 +234,10 @@ export class GatewayFixture extends DurableObject {
     }
   }
 }
-export default {fetch(request,env) {
+export default {async fetch(request,env) {
  const path=new URL(request.url).pathname;
+ if(path==='/test/demand') { await env.GATEWAY_CONTROL.wake(); return Response.json({ok:true}); }
+ if(path==='/test/expire-demand') { await env.GLOBAL_CHAT_GATEWAY.getByName('global-chat:${channel}').testOnlyExpireDemand(); return Response.json({ok:true}); }
  if(path.startsWith('/test/')||path==='/discord/bridge') return env.TEST_DISCORD.getByName('fixture').fetch(request);
  return production.fetch(request,env);
 }};
@@ -248,6 +250,9 @@ const built = await build({ stdin: { contents: fixture, resolveDir: process.cwd(
       const anchor = 'private async externalFetch(request: Request): Promise<Response> { return fetch(request); }';
       assert.equal(contents.split(anchor).length, 2);
       contents = contents.replace(anchor, 'private async externalFetch(request: Request): Promise<Response> { return (this.env as any).TEST_DISCORD.getByName("fixture").fetch(request); }');
+      const demandAnchor = 'async renewDemand(): Promise<void> {';
+      assert.equal(contents.split(demandAnchor).length, 2);
+      contents = contents.replace(demandAnchor, 'async testOnlyExpireDemand(): Promise<void> { await this.enqueue(async () => { this.state.demandUntil = 0; this.persist(); await this.tick(); }); }\n' + demandAnchor);
       return { contents, loader: 'ts' };
     });
   }}] });
@@ -255,13 +260,18 @@ const options = convertV4MiniflareOptions({ name:'gateway-runtime-check', module
   bindings:{ GLOBAL_CHAT_ENABLED:'true', GLOBAL_CHAT_CHANNEL_ID:channel, DISCORD_GUILD_ID:guild, USER_BOT_APPLICATION_ID:bot,
     USER_BOT_TOKEN:'test-only-user-bot-token-32bytes-long', DISCORD_BRIDGE_SECRET:'test-only-discord-bridge-secret-32bytes', GLOBAL_CHAT_CONTROL_SECRET:secret, ROOMS:'friends,testing', IRC_ROOMS:'testing', DISCORD_IRC_CHANNEL_ID:channel, DISCORD_IRC_TEST_CHANNEL_ID:'1553537591960412241' },
   durableObjects:{ GLOBAL_CHAT_GATEWAY:{className:'GlobalChatGateway',useSQLite:true}, TEST_DISCORD:{className:'GatewayFixture',useSQLite:true}, RELAY_ROOMS:{className:'RelayRoom',useSQLite:true} },
-  serviceBindings:{SKY_MYCE_BACKEND:'gateway-runtime-check'}, outboundService:()=>{throw new Error('No external traffic is permitted in Gateway fixtures');} });
+  serviceBindings:{SKY_MYCE_BACKEND:'gateway-runtime-check', GATEWAY_CONTROL:{name:'gateway-runtime-check',entrypoint:'GatewayControl'}}, outboundService:()=>{throw new Error('No external traffic is permitted in Gateway fixtures');} });
 options.unsafeInspectDurableObjects=true;
 let mf = new Miniflare(options);
 const call=(path,body,authorization)=>mf.dispatchFetch('https://test.example'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json',...(authorization?{Authorization:authorization}:{})},body:JSON.stringify(body)});
 const snapshot=async()=>await (await call('/test/snapshot')).json();
 const health=async()=>await (await call('/global-chat/health')).json();
-const control=(action,authorization='Bearer '+secret)=>call('/global-chat/control',{action},authorization);
+const control=async(action,authorization='Bearer '+secret)=>{
+ const response=await call('/global-chat/control',{action},authorization);
+ if(action==='start'&&response.ok)await call('/test/demand');
+ return response;
+};
+const demandTimer=setInterval(()=>{call('/test/demand').then(response=>response.body?.cancel()).catch(()=>{});},20_000);
 const inject=(kind,packet)=>call('/test/inject',{kind,packet});
 const until=async(condition,label,timeout=7000)=>{
   const deadline=Date.now()+timeout;
@@ -293,6 +303,11 @@ try {
   assert.equal((await control('start','')).status,401);
   assert.equal((await control('unknown')).status,400);
   assert.equal((await health()).running,false);
+  assert.equal((await call('/global-chat/control',{action:'start'},'Bearer '+secret)).status,200);
+  assert.equal((await health()).gatewayReady,false,'enabling an idle gateway opens no Discord socket');
+  assert.equal((await health()).bridgeReady,false,'enabling an idle gateway opens no backend socket');
+  assert.equal((await call('/global-chat/control',{action:'wake'},'Bearer wrong')).status,401,'public callers cannot renew demand');
+  assert.equal((await call('/global-chat/control',{action:'wake'},'Bearer '+secret)).status,400,'demand is binding-only');
   assert.equal((await control('start')).status,200);
   await until(async()=>{const state=await health();return state.gatewayReady&&state.bridgeReady;},'both real outbound WebSockets ready');
   const ready=await snapshot();
@@ -659,7 +674,24 @@ try {
   assert.equal((await health()).running,false);
   assert.equal((await sql.exec('SELECT COUNT(*) AS count FROM gateway_pending'))[0].count,0);
   console.log('Persistent Discord Gateway runtime checks passed (workerd WebSockets, signed service bridge, SQLite receipts, alarms and actual eviction/Resume).');
-} finally { await mf.dispose(); }
+} finally { clearInterval(demandTimer); await mf.dispose(); }
+
+mf=new Miniflare(options);
+try {
+  await call('/global-chat/control',{action:'start'},'Bearer '+secret);
+  assert.equal((await health()).gatewayReady,false,'enabled gateway stays idle without players');
+  await call('/test/demand');
+  await until(async()=>{const state=await health();return state.gatewayReady&&state.bridgeReady;},'private demand wakes the gateway');
+  await call('/test/expire-demand');
+  const idle=await health();assert.equal(idle.chatDemand,false);assert.equal(idle.gatewayReady,false);assert.equal(idle.bridgeReady,false);assert.equal(idle.running,true,'idle expiry preserves operator enablement');
+  await mf.unsafeEvictDurableObject('gateway-runtime-check','GlobalChatGateway',{name:'global-chat:'+channel,webSockets:'close'});
+  assert.equal((await health()).gatewayReady,false,'expired demand stays idle after actual eviction');
+  await call('/test/demand');
+  await until(async()=>{const state=await health();return state.gatewayReady&&state.bridgeReady;},'next player wakes the evicted gateway');
+  await control('stop');await call('/test/demand');
+  assert.equal((await health()).running,false,'presence cannot override an operator stop');
+  console.log('On-demand Gateway checks passed: private wake, idle socket closure, eviction/rejoin and operator stop.');
+} finally {await mf.dispose();}
 
 const disabledOptions=convertV4MiniflareOptions({name:'gateway-disabled-check',modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-09-21',
   bindings:{GLOBAL_CHAT_ENABLED:'false',GLOBAL_CHAT_CHANNEL_ID:channel,GLOBAL_CHAT_CONTROL_SECRET:secret},

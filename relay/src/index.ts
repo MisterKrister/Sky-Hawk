@@ -7,7 +7,7 @@ import { PlayerCosmetics, codeHash, newLinkCode, normalizedCode, cosmeticPayload
 import { verifiedInteraction, discordCommand } from "./discord";
 import { globalChatRoute, type GlobalChatConfig } from "./global-chat-gateway";
 import { communityBackendInteraction } from "./community-backend";
-export { GlobalChatGateway } from "./global-chat-gateway";
+export { GlobalChatGateway, GatewayControl } from "./global-chat-gateway";
 
 type RelayEnv = Env & DigestConfig & CosmeticsConfig & GlobalChatConfig;
 type JoinPolicy = { floor: string; maxPbMillis: number | null; open: boolean; selectedClass?: string };

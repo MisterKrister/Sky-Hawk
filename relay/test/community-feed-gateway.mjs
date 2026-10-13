@@ -13,6 +13,7 @@ const fixture=`
 import { DurableObject } from 'cloudflare:workers';
 import { GlobalChatGateway, globalChatRoute } from './src/global-chat-gateway';
 export { GlobalChatGateway };
+export { GatewayControl } from './src/global-chat-gateway';
 const guild='${guild}', chat='${chat}', rng='${rng}', bot='${bot}';
 const encode=new TextEncoder();
 const hex=bytes=>[...new Uint8Array(bytes)].map(value=>value.toString(16).padStart(2,'0')).join('');
@@ -88,6 +89,7 @@ export class FeedFixture extends DurableObject {
       return Response.json({ok:true,deleteRequired:false});
     }
     if(path==='/api/v10/gateway/bot')return Response.json({url:'wss://gateway.discord.gg/',session_start_limit:{remaining:100,reset_after:60000}});
+    if(path==='/api/v10/users/@me')return request.headers.get('Authorization')==='Bot ${botToken}' ? Response.json({id:this.take('wrongBot')?human:bot,bot:true}) : new Response(null,{status:401});
     if(path.startsWith('/api/v10/channels/')) {
       if(request.headers.get('Authorization')!=='Bot ${botToken}')return new Response(null,{status:401});
       const [,,,,channel,part,id]=path.split('/');
@@ -144,6 +146,7 @@ export class FeedFixture extends DurableObject {
   }
 }
 export default { async fetch(request,env) { const path=new URL(request.url).pathname;
+  if(path==='/test/demand') { await env.GATEWAY_CONTROL.wake();return Response.json({ok:true}); }
   if(path.startsWith('/test/')||path==='/discord/bridge'||path==='/discord/community-feed')return env.TEST_DISCORD.getByName('fixture').fetch(request);
   return await globalChatRoute(request,env)??new Response(null,{status:404});
 } };
@@ -158,7 +161,7 @@ const bindings={GLOBAL_CHAT_ENABLED:'true',GLOBAL_CHAT_CHANNEL_ID:chat,DISCORD_G
 const makeRuntime=channel=>{
   const name='community-gateway-check';
   const options=convertV4MiniflareOptions({name,modules:true,script:built.outputFiles[0].text,compatibilityDate:'2026-09-21',bindings:{...bindings,...(channel?{DISCORD_RNG_CHANNEL_ID:channel}:{})},
-    durableObjects:{GLOBAL_CHAT_GATEWAY:{className:'GlobalChatGateway',useSQLite:true},TEST_DISCORD:{className:'FeedFixture',useSQLite:true}},serviceBindings:{SKY_MYCE_BACKEND:name},
+    durableObjects:{GLOBAL_CHAT_GATEWAY:{className:'GlobalChatGateway',useSQLite:true},TEST_DISCORD:{className:'FeedFixture',useSQLite:true}},serviceBindings:{SKY_MYCE_BACKEND:name,GATEWAY_CONTROL:{name,entrypoint:'GatewayControl'}},
     outboundService:()=>{throw new Error('Live outbound traffic forbidden');}});
   options.unsafeInspectDurableObjects=true;return new Miniflare(options);
 };
@@ -166,7 +169,8 @@ let mf=makeRuntime(rng);
 const call=(path,body,authorization)=>mf.dispatchFetch('https://fixture.example'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json',...(authorization?{Authorization:authorization}:{})},body:JSON.stringify(body)});
 const snapshot=async()=>await (await call('/test/snapshot')).json();
 const health=async()=>await (await call('/global-chat/health')).json();
-const control=async action=>{ const response=await call('/global-chat/control',{action},'Bearer '+controlSecret);assert.equal(response.status,200);return await response.json(); };
+const control=async action=>{ const response=await call('/global-chat/control',{action},'Bearer '+controlSecret);assert.equal(response.status,200);if(action==='start')await call('/test/demand');return await response.json(); };
+const demandTimer=setInterval(()=>{call('/test/demand').then(response=>response.body?.cancel()).catch(()=>{});},20_000);
 const until=async(condition,label,timeout=8000)=>{const deadline=Date.now()+timeout;do { const result=await condition();if(result)return result;await new Promise(resolve=>setTimeout(resolve,40));}while(Date.now()<deadline);throw new Error('Timed out: '+label+'; health='+JSON.stringify(await health()));};
 const storage=()=>mf.unsafeGetDurableObjectStorage('community-gateway-check','GlobalChatGateway',{name:'global-chat:'+chat});
 const state=async()=>JSON.parse((await (await storage()).exec('SELECT value FROM gateway_state'))[0].value);
@@ -194,9 +198,14 @@ const sendReply=async(parent,changes={})=>{
   return await until(async()=> (await replies()).find(row=>row.id===id),'reply sent through real bridge',6500);
 };
 try {
-  await control('start');await until(async()=>{const current=await health();return current.gatewayReady&&current.bridgeReady;},'single existing Gateway ready');
+  await call('/global-chat/control',{action:'start'},'Bearer '+controlSecret);
   await until(async()=>((await snapshot()).counts.claims??0)>0,'initial signed RNG claim');await until(async()=>(await state()).rngDue>Date.now(),'initial feed drain finished');
-  const id='a'.repeat(32);await publish(id,{displayName:'@everyone **Handle** <:hidden:123456789012345678>'});await poll();
+  assert.equal((await health()).gatewayReady,false);assert.equal((await health()).bridgeReady,false);
+  const id='a'.repeat(32);await publish(id,{displayName:'@everyone **Handle** <:hidden:123456789012345678>'});
+  await call('/global-chat/control',{action:'start'},'Bearer '+controlSecret);
+  await until(async()=>((await snapshot()).posts.length===1),'RNG publication while the chat gateway sleeps');
+  assert.equal((await health()).gatewayReady,false);assert.equal((await health()).bridgeReady,false);
+  await control('start');await until(async()=>{const current=await health();return current.gatewayReady&&current.bridgeReady;},'single existing Gateway ready');
   let result=await snapshot(), first=result.posts[0];assert.equal(result.posts.length,1);assert.equal(first.channel,rng);
   assert.equal(first.body.nonce,createHash('sha256').update('rng:'+id).digest('hex').slice(0,24));assert.equal(first.body.enforce_nonce,true);
   assert.deepEqual(first.body.allowed_mentions,{parse:[],replied_user:false});assert.match(first.body.embeds[0].description,/Anonymous/);assert.match(first.body.embeds[0].fields.find(field=>field.name==='Source').value,/unverified/i);
@@ -262,6 +271,17 @@ try {
   const slow=snowflake();await flags({slowParent:4000});const heartbeatBefore=(await snapshot()).counts.heartbeats, connectionsBefore=(await snapshot()).counts.gatewayConnections;
   assert.equal((await sendReply(slow)).reply.from,'Unavailable message');assert.ok((await snapshot()).counts.heartbeats>heartbeatBefore,'slow reply lookup leaves heartbeat queue active');assert.equal((await snapshot()).counts.gatewayConnections,connectionsBefore,'slow lookup never forces a second Gateway');
   await control('stop');
+  clearInterval(demandTimer);
+  await mf.dispose();mf=makeRuntime(rng);
+  await flags({wrongBot:true});await publish('9'.repeat(32));
+  await call('/global-chat/control',{action:'start'},'Bearer '+controlSecret);
+  await until(async()=>(await health()).rngFeedLastError==='rng_feed_unavailable','wrong REST bot identity rejected');
+  assert.equal((await snapshot()).posts.length,0,'idle RNG feed never publishes with another bot identity');
+  assert.equal((await health()).gatewayReady,false);
+  await call('/global-chat/control',{action:'start'},'Bearer '+controlSecret);
+  await until(async()=>(await snapshot()).posts.length===1,'verified REST bot publishes while chat stays idle');
+  assert.equal((await health()).gatewayReady,false);assert.equal((await health()).bridgeReady,false);
+  await control('stop');
   for(const channel of [undefined,chat]) {await mf.dispose();mf=makeRuntime(channel);await control('start');await until(async()=>(await health()).gatewayReady,'disabled feed Gateway ready');assert.equal((await health()).rngFeedConfigured,false);await new Promise(resolve=>setTimeout(resolve,650));assert.equal((await snapshot()).counts.claims??0,0,'unset/conflicting feed stays disabled');await control('stop');}
   console.log('Community Gateway workerd checks passed: exact HMAC, isolated channel, nonce/receipts, eviction, consent cancellation, capacity, cooldown, bounded replies and heartbeats.');
-} finally { await mf.dispose(); }
+} finally { clearInterval(demandTimer); await mf.dispose(); }

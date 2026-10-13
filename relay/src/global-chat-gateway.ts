@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { GLOBAL_ROOM, discordPacket, discordMessageLinks, embedPacket, minecraftContent, minecraftCard, discordOperation, discordMedia, validBridgeOperation, bridgeOperationApplied, minecraftReactionFooter, minecraftId, snowflake, rngContent } from "./gateway-chat";
 
 export type GlobalChatConfig = {
@@ -20,7 +20,8 @@ type Json = Record<string, any>;
 type BridgeAttempt = { generation: number; controller: AbortController; deadline: number };
 type State = { running: boolean; room?: string; channel?: string; guild?: string; application?: string; session?: string; resume?: string; sequence?: number; ownBot?: string;
   gatewayDue: number; bridgeDue: number; gatewayFailures: number; bridgeFailures: number; blocked?: string; lastError?: string; lastAck?: number; postDue?: number;
-  rngDue?: number; rngFailures?: number; rngError?: string; rngLastAck?: number; rngReceiptCursor?: string };
+  rngDue?: number; rngFailures?: number; rngError?: string; rngLastAck?: number; rngReceiptCursor?: string; demandUntil?: number };
+const DEMAND_TTL = 60_000;
 const LIFETIME = 900_000;
 const TTL = 120_000, MAX_PENDING = 256, MAX_RECEIPTS = 1024;
 /** Keep Discord's full cooldown, rounding up; invalid/overflowing values use a safe retry delay. */
@@ -97,7 +98,16 @@ export async function globalChatRoute(request: Request, env: GlobalChatConfig): 
   return env.GLOBAL_CHAT_GATEWAY.getByName(name).fetch(request);
 }
 
-/** Outbound sockets deliberately keep this one DO active; server WebSocket hibernation does not apply. */
+/** Binding-only wakeup: the backend supplies demand after verifying a Global IRC listener. */
+export class GatewayControl extends WorkerEntrypoint<GlobalChatConfig> {
+  async wake(): Promise<void> {
+    const channel = selectedChannel(this.env, GLOBAL_ROOM);
+    if (this.env.GLOBAL_CHAT_ENABLED !== "true" || !this.env.GLOBAL_CHAT_GATEWAY || !channel) return;
+    await this.env.GLOBAL_CHAT_GATEWAY.getByName(`global-chat:${channel}`).renewDemand();
+  }
+}
+
+/** Outbound sockets stay open only while verified Global IRC listeners renew their lease. */
 export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private state: State;
   private get room(): string { return this.state.room ?? GLOBAL_ROOM; }
@@ -126,6 +136,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private readonly replies = new Set<string>();
   private rngRunning = false;
   private rngVerified?: string;
+  private rngIdentityVerified = false;
   private chain: Promise<unknown> = Promise.resolve();
   private queued = 0;
 
@@ -152,6 +163,16 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   }
 
   private persist(): void { this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_state VALUES (1, ?)", JSON.stringify(this.state)); }
+  private chatWanted(): boolean { return this.room !== GLOBAL_ROOM || (this.state.demandUntil ?? 0) > Date.now(); }
+  async renewDemand(): Promise<void> {
+    await this.enqueue(async () => {
+      if (!this.state.running || this.env.GLOBAL_CHAT_ENABLED !== "true" || !configured(this.env, this.room) || this.state.blocked) return;
+      const idle = !this.chatWanted();
+      this.state.demandUntil = Date.now() + DEMAND_TTL;
+      this.persist();
+      if (idle) await this.tick(); else await this.schedule();
+    });
+  }
   private prune(): void {
     const now = Date.now();
     for (const table of ["gateway_pending", "gateway_seen", "gateway_receipts", "gateway_previews", "gateway_sources", "gateway_operations"]) this.ctx.storage.sql.exec(`DELETE FROM ${table} WHERE expires <= ?`, now);
@@ -213,7 +234,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private health(): Json {
     this.prune();
     return { room: this.room, scope: this.scope, enabled: this.env.GLOBAL_CHAT_ENABLED === "true", configured: configured(this.env, this.room), running: this.state.running,
-      gatewayReady: this.gatewayReady, bridgeReady: this.bridgeReady, richChatVersion: this.richReady ? 1 : 0, blocked: this.state.blocked ?? null,
+      gatewayReady: this.gatewayReady, bridgeReady: this.bridgeReady, chatDemand: this.chatWanted(), richChatVersion: this.richReady ? 1 : 0, blocked: this.state.blocked ?? null,
       lastError: this.state.lastError ?? null, lastDeliveryAt: this.state.lastAck ?? null,
       rngFeedConfigured: this.room === GLOBAL_ROOM && !!rngChannel(this.env), rngFeedLastError: this.state.rngError ?? null, rngFeedLastDeliveryAt: this.state.rngLastAck ?? null,
       pendingMessages: this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gateway_pending").one().count };
@@ -221,38 +242,47 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   async alarm(): Promise<void> { await this.enqueue(() => this.tick()); }
   private async schedule(): Promise<void> {
     if (!this.state.running || this.env.GLOBAL_CHAT_ENABLED !== "true" || !configured(this.env, this.room) || this.state.blocked) { await this.ctx.storage.deleteAlarm(); return; }
+    if (!this.chatWanted()) {
+      if (this.room === GLOBAL_ROOM && rngChannel(this.env) && !this.rngRunning) await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, this.state.rngDue ?? 0, this.state.postDue ?? 0));
+      else await this.ctx.storage.deleteAlarm();
+      return;
+    }
     const pending = this.ctx.storage.sql.exec<{ due: number }>("SELECT MIN(due) AS due FROM gateway_pending WHERE ? = 1 OR id NOT LIKE 'op:%'", this.richReady ? 1 : 0).one().due;
     const next = Math.min(this.gateway ? this.heartbeatDue : this.state.gatewayDue,
       this.bridge ? this.bridgePingDue : this.bridgeConnecting?.deadline ?? this.state.bridgeDue, this.gatewayDeadline, this.bridgeDeadline,
       this.bridgeReady && (!this.richOffered || this.richReady) && pending != null ? pending : Infinity,
-      this.room === GLOBAL_ROOM && this.gatewayReady && rngChannel(this.env) && !this.rngRunning ? Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0) : Infinity, Date.now() + TTL);
+      this.room === GLOBAL_ROOM && rngChannel(this.env) && !this.rngRunning ? Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0) : Infinity,
+      this.room === GLOBAL_ROOM ? this.state.demandUntil! : Infinity, Date.now() + TTL);
     await this.ctx.storage.setAlarm(Math.max(Date.now() + 100, next));
   }
   private async tick(): Promise<void> {
     this.prune();
     if (!this.state.running || this.env.GLOBAL_CHAT_ENABLED !== "true" || !configured(this.env, this.room) || this.state.blocked) { this.closeGateway(); this.closeBridge(); await this.ctx.storage.deleteAlarm(); return; }
     const now = Date.now();
-    if (this.gateway && now >= this.gatewayDeadline) this.disconnectGateway("gateway_ready_timeout");
-    if (this.bridge && now >= this.bridgeDeadline) this.disconnectBridge("bridge_ready_timeout");
-    if (this.bridgeConnecting && now >= this.bridgeConnecting.deadline) this.disconnectBridge("bridge_connect_timeout");
-    if (this.gateway && now >= this.heartbeatDue) {
-      if (this.heartbeatPending) this.disconnectGateway("gateway_heartbeat_timeout");
-      else this.heartbeat();
+    if (!this.chatWanted()) { this.closeGateway(); this.closeBridge(); }
+    else {
+      if (this.gateway && now >= this.gatewayDeadline) this.disconnectGateway("gateway_ready_timeout");
+      if (this.bridge && now >= this.bridgeDeadline) this.disconnectBridge("bridge_ready_timeout");
+      if (this.bridgeConnecting && now >= this.bridgeConnecting.deadline) this.disconnectBridge("bridge_connect_timeout");
+      if (this.gateway && now >= this.heartbeatDue) {
+        if (this.heartbeatPending) this.disconnectGateway("gateway_heartbeat_timeout");
+        else this.heartbeat();
+      }
+      if (this.bridge && now >= this.bridgePingDue) {
+        if (this.bridgePongPending) this.disconnectBridge("bridge_heartbeat_timeout");
+        else { this.bridge.send("ping"); this.bridgePongPending = true; this.bridgePingDue = now + 30_000; }
+      }
+      if (!this.gateway && now >= this.state.gatewayDue) await this.connectGateway();
+      if (!this.bridge && !this.bridgeConnecting && now >= this.state.bridgeDue && !this.state.blocked) {
+        const attempt = { generation: ++this.bridgeGeneration, controller: new AbortController(), deadline: Date.now() + 10_000 };
+        this.bridgeConnecting = attempt;
+        // Handshakes must not hold the serialized heartbeat/control queue. Only adoption joins it.
+        this.ctx.waitUntil(this.connectBridge(attempt));
+      }
+      this.flushDiscord();
     }
-    if (this.bridge && now >= this.bridgePingDue) {
-      if (this.bridgePongPending) this.disconnectBridge("bridge_heartbeat_timeout");
-      else { this.bridge.send("ping"); this.bridgePongPending = true; this.bridgePingDue = now + 30_000; }
-    }
-    if (!this.gateway && now >= this.state.gatewayDue) await this.connectGateway();
-    if (!this.bridge && !this.bridgeConnecting && now >= this.state.bridgeDue && !this.state.blocked) {
-      const attempt = { generation: ++this.bridgeGeneration, controller: new AbortController(), deadline: Date.now() + 10_000 };
-      this.bridgeConnecting = attempt;
-      // Handshakes must not hold the serialized heartbeat/control queue. Only adoption joins it.
-      this.ctx.waitUntil(this.connectBridge(attempt));
-    }
-    this.flushDiscord();
     const channel = this.room === GLOBAL_ROOM ? rngChannel(this.env) : undefined;
-    if (channel && this.gatewayReady && !this.rngRunning && now >= Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0)) {
+    if (channel && !this.rngRunning && now >= Math.max(this.state.rngDue ?? 0, this.state.postDue ?? 0)) {
       this.rngRunning = true;
       // Feed HTTP calls share the Discord cooldown without holding the heartbeat/control queue.
       this.ctx.waitUntil(this.drainRng(channel));
@@ -394,7 +424,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   }
   private currentBridgeAttempt(attempt: BridgeAttempt): boolean {
     return this.bridgeConnecting === attempt && this.bridgeGeneration === attempt.generation && this.state.running &&
-      this.env.GLOBAL_CHAT_ENABLED === "true" && configured(this.env, this.room) && !this.state.blocked;
+      this.env.GLOBAL_CHAT_ENABLED === "true" && configured(this.env, this.room) && !this.state.blocked && this.chatWanted();
   }
   private async connectBridge(attempt: BridgeAttempt): Promise<void> {
     const timeout = setTimeout(() => attempt.controller.abort(new DOMException("Bridge handshake timed out", "TimeoutError")), 10_000);
@@ -601,7 +631,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
 
   private rngActive(channel: string): boolean {
     return this.room === GLOBAL_ROOM && this.state.running && this.env.GLOBAL_CHAT_ENABLED === "true" && !this.state.blocked &&
-      this.gatewayReady && this.state.ownBot === this.env.USER_BOT_APPLICATION_ID && rngChannel(this.env) === channel;
+      this.state.ownBot === this.env.USER_BOT_APPLICATION_ID && rngChannel(this.env) === channel;
   }
   private async rngRequest(raw: Json, channel: string): Promise<Json> {
     const body = JSON.stringify({ ...raw, channelId: channel }), timestamp = String(Date.now()), nonce = hex(crypto.getRandomValues(new Uint8Array(16)).buffer);
@@ -646,6 +676,15 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
   private async drainRng(channel: string): Promise<void> {
     let failed = false;
     try {
+      if (!this.state.running || this.env.GLOBAL_CHAT_ENABLED !== "true" || this.state.blocked || rngChannel(this.env) !== channel) return;
+      if (!this.rngIdentityVerified) {
+        const response = await this.rngRest(new Request("https://discord.com/api/v10/users/@me", {
+          headers: { Authorization: `Bot ${this.env.USER_BOT_TOKEN}` }, redirect: "manual", signal: AbortSignal.timeout(8000) }));
+        if (!response.ok) { await response.body?.cancel(); throw new Error("RNG bot identity unavailable"); }
+        const identity = await boundedJson(response);
+        if (identity.id !== this.env.USER_BOT_APPLICATION_ID || identity.bot !== true) throw new Error("RNG bot identity mismatch");
+        this.state.ownBot = identity.id; this.rngIdentityVerified = true; this.persist();
+      }
       if (!this.rngActive(channel)) return;
       this.prune();
       if (this.rngVerified !== channel) {
@@ -718,7 +757,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
         this.rngRunning = false;
         this.state.rngFailures = failed ? Math.min((this.state.rngFailures ?? 0) + 1, 6) : 0;
         if (failed) this.state.rngError = "rng_feed_unavailable"; else delete this.state.rngError;
-        this.state.rngDue = Date.now() + Math.min(60_000, 10_000 * 2 ** this.state.rngFailures);
+        this.state.rngDue = Date.now() + Math.min(60_000, (this.chatWanted() ? 10_000 : 60_000) * 2 ** this.state.rngFailures);
         this.persist(); await this.schedule();
       });
     }
