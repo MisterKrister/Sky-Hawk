@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { GLOBAL_ROOM, discordPacket, discordMessageLinks, embedPacket, minecraftContent, minecraftCard, discordOperation, discordMedia, validBridgeOperation, minecraftId, snowflake, rngContent } from "./gateway-chat";
+import { GLOBAL_ROOM, discordPacket, discordMessageLinks, embedPacket, minecraftContent, minecraftCard, discordOperation, discordMedia, validBridgeOperation, bridgeOperationApplied, minecraftReactionFooter, minecraftId, snowflake, rngContent } from "./gateway-chat";
 
 export type GlobalChatConfig = {
   GLOBAL_CHAT_GATEWAY?: DurableObjectNamespace<GlobalChatGateway>;
@@ -465,7 +465,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
           url: typeof raw.url === "string" ? raw.url.slice(0, 2048) : undefined, content_type: typeof raw.content_type === "string" ? raw.content_type.slice(0, 80) : undefined,
           size: Number.isSafeInteger(raw.size) && raw.size >= 0 && raw.size <= 25_000_000 ? raw.size : undefined, width: Number.isSafeInteger(raw.width) && raw.width >= 0 && raw.width <= 16384 ? raw.width : undefined, height: Number.isSafeInteger(raw.height) && raw.height >= 0 && raw.height <= 16384 ? raw.height : undefined })) : [] };
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_previews VALUES (?, ?, ?)", data.id, JSON.stringify(preview), expires);
-      const source = { id: data.id, guild_id: data.guild_id, channel_id: data.channel_id, author: user(data.author), member, webhook_id: data.webhook_id, mapped: false };
+      const source = { id: data.id, guild_id: data.guild_id, channel_id: data.channel_id, author: user(data.author), member, webhook_id: data.webhook_id, mapped: false, initialSent: false };
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_sources VALUES (?, ?, ?)", data.id, JSON.stringify(source), created + LIFETIME);
     }
     if (lookupReply) {
@@ -507,6 +507,10 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     this.prune();
     for (const row of this.ctx.storage.sql.exec<{ id: string; packet: string }>("SELECT id, packet FROM gateway_pending WHERE due <= ? ORDER BY expires, id LIMIT 16", Date.now())) {
       if (row.id.startsWith("op:") && !this.richReady) continue;
+      const packet = JSON.parse(row.packet);
+      if (!row.id.startsWith("op:")) {
+        this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = json_set(value, '$.initialSent', json('true')) WHERE id = ?", packet.message_id);
+      }
       this.bridge.send(row.packet);
       this.ctx.storage.sql.exec("UPDATE gateway_pending SET due = ? WHERE id = ?", Date.now() + 5000, row.id);
     }
@@ -728,6 +732,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     if (!source) return;
     const preview = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM gateway_previews WHERE id = ?", sourceId).toArray()[0];
     const previous = { ...(preview ? JSON.parse(preview.value) : {}), ...JSON.parse(source.value) };
+    if (previous.nativeDeleted) return;
     // Our own mirrored reactions/card edits already have authoritative backend updates; suppress feedback loops.
     if (event === "MESSAGE_UPDATE" && previous.mapped && Array.isArray(previous.expectedEdits) && previous.expectedEdits.some((row: Json) => row.until > Date.now() && descriptionHash === row.hash)) return;
     if (event === "MESSAGE_UPDATE" && !previous.mapped && typeof data.content !== "string" && !preview) return;
@@ -739,7 +744,21 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
         this.ctx.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM gateway_pending").one().count >= MAX_PENDING) return;
     const expires = Math.min(source.expires, Date.now() + TTL);
     this.ctx.storage.sql.exec("INSERT INTO gateway_seen VALUES (?, ?)", id, source.expires);
-    this.ctx.storage.sql.exec("INSERT INTO gateway_pending VALUES (?, ?, ?, ?)", id, JSON.stringify(packet), expires, Date.now());
+    const initialId = sourceId + ":body";
+    const initial = !previous.mapped && previous.initialSent === false ? this.ctx.storage.sql.exec<{ packet: string; due: number }>("SELECT packet,due FROM gateway_pending WHERE id = ?", initialId).toArray()[0] : undefined;
+    if (event === "MESSAGE_DELETE") {
+      this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = json_set(value, '$.nativeDeleted', json('true')) WHERE id = ?", sourceId);
+      if (initial) {
+        this.ctx.storage.sql.exec("DELETE FROM gateway_pending WHERE id = ? OR json_extract(packet, '$.message_id') = ?", initialId, sourceId);
+        return;
+      }
+    }
+    if (initial && event === "MESSAGE_UPDATE") {
+      // Reply lookup re-reads this durable packet; it cannot revive stale content.
+      const latest = discordPacket({ ...previous, ...data }, this.env.DISCORD_GUILD_ID!, this.channelId!, this.state.ownBot!);
+      const create = { ...JSON.parse(initial.packet), text: packet.text, media: packet.media, mentions: latest?.mentions ?? [] };
+      this.ctx.storage.sql.exec("UPDATE gateway_pending SET packet = ? WHERE id = ?", JSON.stringify(create), initialId);
+    } else this.ctx.storage.sql.exec("INSERT INTO gateway_pending VALUES (?, ?, ?, ?)", id, JSON.stringify(packet), expires, initial?.due ?? Date.now());
     if (event === "MESSAGE_UPDATE") {
       const merged = { ...previous, ...data };
       // Existing two-minute recovery body stays bounded; routing-only metadata lives fifteen minutes.
@@ -772,7 +791,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     if (!metadata || packet.operation !== "reaction" && (!mapping || mapping.discord_id !== packet.discordMessageId || metadata.author?.id !== this.state.ownBot || !metadata.mapped)) {
       this.operationError(packet, "destination_unavailable"); return;
     }
-    if (metadata.revision >= packet.revision) { this.operationError(packet, "superseded"); return; }
+    if (bridgeOperationApplied(metadata, packet)) { this.operationError(packet, "superseded"); return; }
     if (!this.state.running || !this.gatewayReady || packet.expiresAt <= Date.now() || Date.now() < (this.state.postDue ?? 0)) return;
     const endpoint = `https://discord.com/api/v10/channels/${this.channelId}/messages/${packet.discordMessageId}`;
     const request = (url: string, method: string, body?: Json): Request => new Request(url, { method,
@@ -781,11 +800,11 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
     try {
       const current = await this.externalFetch(request(endpoint, "GET"));
       if (current.status === 429) { await current.body?.cancel(); this.state.postDue = retryAfterDeadline(current.headers.get("Retry-After")); this.persist(); return; }
-      const absent = current.status === 404;
+      const absent = current.status === 404; let found: Json | undefined;
       if (absent) await current.body?.cancel();
       if (!absent) {
         if (!current.ok) { await current.body?.cancel(); this.operationError(packet, current.status === 403 ? "not_authorized" : "temporarily_unavailable"); return; }
-        const found = await current.json<Json>();
+        found = await boundedJson(current);
         if (found.id !== packet.discordMessageId || found.channel_id !== this.channelId || found.author?.id !== metadata.author.id ||
             packet.operation !== "reaction" && found.author?.id !== this.state.ownBot) { this.operationError(packet, "not_authorized"); return; }
       }
@@ -797,6 +816,7 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
             from: packet.sender?.name, mentions: [] }, this.scope, this.room) ?? undefined;
           if (!body) { this.operationError(packet, "invalid_message"); return; }
           body.content = ""; delete body.message_reference; method = "PATCH";
+          body.embeds[0].footer = { text: (metadata.reactionSummaryRevision ?? 0) > packet.revision && typeof found?.embeds?.[0]?.footer?.text === "string" ? found.embeds[0].footer.text : minecraftReactionFooter(packet, this.scope) };
           const hash = hex(await crypto.subtle.digest("SHA-256", encoder.encode(body.embeds[0].description)));
           metadata.expectedEdits = [...(Array.isArray(metadata.expectedEdits) ? metadata.expectedEdits.filter((row: Json) => row.until > Date.now()) : []), { hash, until: Date.now() + 15_000 }].slice(-8);
           this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = ? WHERE id = ?", JSON.stringify(metadata), packet.discordMessageId);
@@ -815,10 +835,27 @@ export class GlobalChatGateway extends DurableObject<GlobalChatConfig> {
             this.operationError(packet, "invalid_destination_response"); return;
           }
         } else await response.body?.cancel();
+        if (packet.operation === "reaction" && metadata.mapped && found && found.author?.id === this.state.ownBot &&
+            found.embeds?.length === 1 && typeof found.embeds[0].description === "string" && (metadata.reactionSummaryRevision ?? 0) <= packet.revision) {
+          const embed = { ...found.embeds[0], footer: { text: minecraftReactionFooter(packet, this.scope) } };
+          const hash = hex(await crypto.subtle.digest("SHA-256", encoder.encode(embed.description)));
+          metadata.expectedEdits = [...(Array.isArray(metadata.expectedEdits) ? metadata.expectedEdits.filter((row: Json) => row.until > Date.now()) : []), { hash, until: Date.now() + 15_000 }].slice(-8);
+          this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = ? WHERE id = ?", JSON.stringify(metadata), packet.discordMessageId);
+          if (!validBridgeOperation(packet, this.scope, this.room) || !this.state.running) return;
+          const summary = await this.externalFetch(request(endpoint, "PATCH", { embeds: [embed], allowed_mentions: { parse: [], replied_user: false } }));
+          if (summary.status === 429) { await summary.body?.cancel(); this.state.postDue = retryAfterDeadline(summary.headers.get("Retry-After")); this.persist(); return; }
+          if (!summary.ok) { await summary.body?.cancel(); this.operationError(packet, summary.status === 403 ? "not_authorized" : summary.status === 404 ? "destination_unavailable" : "temporarily_unavailable"); return; }
+          const edited = await boundedJson(summary);
+          if (edited.id !== packet.discordMessageId || edited.channel_id !== this.channelId || edited.author?.id !== this.state.ownBot) { this.operationError(packet, "invalid_destination_response"); return; }
+        }
       }
       // Mutations are idempotent PUT/PATCH/DELETE; receipts precede ACK and survive eviction.
       this.ctx.storage.sql.exec("INSERT OR REPLACE INTO gateway_operations VALUES (?, ?, ?, ?, ?)", packet.id, packet.messageId, packet.revision, packet.discordMessageId, Date.now() + LIFETIME);
-      metadata.revision = packet.revision;
+      metadata.revision = Math.max(metadata.revision ?? 0, packet.revision);
+      if (packet.operation === "edit") metadata.bodyRevision = Math.max(metadata.bodyRevision ?? 0, packet.revision);
+      if (packet.operation !== "delete") metadata.reactionSummaryRevision = Math.max(metadata.reactionSummaryRevision ?? 0, packet.revision);
+      if (packet.operation === "reaction") metadata.reactionRevisions = { ...metadata.reactionRevisions, [packet.emoji]: Math.max(metadata.reactionRevisions?.[packet.emoji] ?? 0, packet.revision) };
+      if (packet.operation === "delete") metadata.deletedRevision = packet.revision;
       this.ctx.storage.sql.exec("UPDATE gateway_sources SET value = ? WHERE id = ?", JSON.stringify(metadata), packet.discordMessageId);
       this.prune(); this.operationAck(packet);
     } catch { this.operationError(packet, "temporarily_unavailable"); }

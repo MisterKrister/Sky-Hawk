@@ -4,8 +4,13 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 const formatterBuild=await build({entryPoints:['src/gateway-chat.ts'],bundle:true,format:'esm',write:false});
-const {discordPacket,embedPacket,minecraftContent,discordMediaKey,discordMessageLinks,discordMedia,minecraftCard,discordOperation,validBridgeOperation}=await import('data:text/javascript;base64,'+Buffer.from(formatterBuild.outputFiles[0].text).toString('base64'));
+const {bounded,bridgeOperationApplied,minecraftReactionFooter,discordPacket,embedPacket,minecraftContent,discordMediaKey,discordMessageLinks,discordMedia,minecraftCard,discordOperation,validBridgeOperation}=await import('data:text/javascript;base64,'+Buffer.from(formatterBuild.outputFiles[0].text).toString('base64'));
 
+assert.equal(bounded('a👩‍👩‍👧‍👦b', 8), 'a', 'whole emoji clusters survive truncation');
+assert.equal(bounded('a<a:dance:100000000000000003>b', 10), 'a', 'custom emoji tokens stay whole');
+assert.equal(bridgeOperationApplied({bodyRevision:2,reactionRevisions:{'🔥':5}}, {operation:'edit',revision:3}), false);
+assert.equal(bridgeOperationApplied({deletedRevision:1}, {operation:'reaction',revision:9,emoji:'🔥'}), true);
+assert.equal(minecraftReactionFooter({reactions:[{emoji:'🔥',count:2},{emoji:'invalid',count:3},{emoji:'👀',count:999}]}, 'global'), 'Minecraft · Sky-Myce Global · 🔥 2');
 // Production code runs in workerd with real SQLite, outbound WebSockets, alarms and eviction.
 // Only Discord's transport is replaced in this in-memory fixture bundle. No live messages are sent.
 const guild = '1552053091493486594', channel = '1553536927498506270', bot = '1553617043914367068';
@@ -13,7 +18,7 @@ const secret = 'test-only-global-chat-control-secret-32bytes';
 const rich=discordPacket({id:'100000000000000001',guild_id:guild,channel_id:channel,author:{id:'100000000000000002',username:'Other bot',bot:true},
  content:'Hello 😀 <a:dance:100000000000000003> <#100000000000000004>',embeds:[{title:'Title',description:'Description',fields:[{name:'Field',value:'Value'}],image:{url:'https://example.com/image'},url:'javascript:unsafe'}],
  attachments:[{filename:'picture.png',url:'https://example.com/picture.png'}],message_reference:{message_id:'100000000000000005',channel_id:channel},referenced_message:{channel_id:channel,author:{username:'Original'},content:'Reply context'}},guild,channel,bot);
-assert.equal(rich.text,'Hello 😀 :dance: #channel\nTitle\nDescription\nField\nValue\nhttps://example.com/image\npicture.png: https://example.com/picture.png');
+assert.equal(rich.text,'Hello 😀 <a:dance:100000000000000003> #channel\nTitle\nDescription\nField\nValue\nhttps://example.com/image\npicture.png: https://example.com/picture.png');
 assert.deepEqual(rich.reply,{message_id:'100000000000000005',from:'Original',text:'Reply context'});
 assert.equal(await minecraftContent({type:'irc_message',scope:'party',room:'global-chat',source:'minecraft',id:'a'.repeat(32),message_id:'a'.repeat(32),from:'Alice',text:'private'}),null);
 const replyMessage={id:'100000000000000010',guild_id:guild,channel_id:channel,author:{id:'100000000000000011',username:'Reply author'},
@@ -152,18 +157,27 @@ export class GatewayFixture extends DurableObject {
       const knownHuman=human&&JSON.parse(human.packet).id===id?JSON.parse(human.packet):undefined;
       const deleted=this.ctx.storage.sql.exec('SELECT value FROM counters WHERE name=?','deleted:'+id).toArray()[0]?.value;
       if(deleted||!own&&!knownHuman)return new Response(null,{status:404});
-      if(request.method==='GET')return Response.json({id,channel_id:'${channel}',author:{id:own?'${bot}':knownHuman.author.id}});
-      this.ctx.storage.sql.exec('INSERT INTO frames VALUES (?,?)','rest',JSON.stringify({method:request.method,path:url.pathname,...(request.method==='PATCH'?{body:await request.json()}:{})}));
+      if(request.method==='GET') {
+        if(this.ctx.storage.sql.exec("SELECT value FROM counters WHERE name='delayNextReply'").toArray()[0]?.value) {
+          this.ctx.storage.sql.exec("UPDATE counters SET value=0 WHERE name='delayNextReply'");this.count('replyLookups');
+          await new Promise(resolve=>setTimeout(resolve,1500));this.count('replyLookupsFinished');
+        }
+        return Response.json({... (own?JSON.parse(own.body):knownHuman),id,channel_id:'${channel}',author:{id:own?'${bot}':knownHuman.author.id}});
+      }
+      const patch=request.method==='PATCH'?await request.json():undefined;
+      this.ctx.storage.sql.exec('INSERT INTO frames VALUES (?,?)','rest',JSON.stringify({method:request.method,path:url.pathname,...(patch?{body:patch}:{})}));
       if(this.ctx.storage.sql.exec("SELECT value FROM counters WHERE name='limitNextOperation'").toArray()[0]?.value){
         this.ctx.storage.sql.exec("UPDATE counters SET value=0 WHERE name='limitNextOperation'");return new Response(null,{status:429,headers:{'Retry-After':'1'}});
       }
       if(url.pathname.includes('/reactions/'))return new Response(null,{status:204});
       if(!own)return new Response(null,{status:403});
+      if(patch)this.ctx.storage.sql.exec('UPDATE posts SET body=? WHERE id=?',JSON.stringify({...JSON.parse(own.body),...patch}),id);
       if(request.method==='DELETE')this.ctx.storage.sql.exec('INSERT OR REPLACE INTO counters VALUES (?,1)','deleted:'+id);
       return request.method==='DELETE'?new Response(null,{status:204}):Response.json({id,channel_id:'${channel}',author:{id:'${bot}'}});
     }
     if(url.pathname==='/test/human-source'){const input=await request.json();this.ctx.storage.sql.exec('INSERT OR REPLACE INTO resume_events VALUES (-1,?)',JSON.stringify(input));return Response.json({ok:true});}
     if(url.pathname==='/test/hold-capabilities'){const input=await request.json();this.ctx.storage.sql.exec("INSERT OR REPLACE INTO counters VALUES ('holdCapabilities',?)",input.hold===false?0:1);return Response.json({ok:true});}
+    if(url.pathname==='/test/delay-next-reply'){this.ctx.storage.sql.exec("INSERT OR REPLACE INTO counters VALUES ('delayNextReply',1)");return Response.json({ok:true});}
     if(url.pathname==='/test/limit-next-operation'){this.ctx.storage.sql.exec("INSERT OR REPLACE INTO counters VALUES ('limitNextOperation',1)");return Response.json({ok:true});}
     if (request.headers.get('Upgrade') === 'websocket') {
       const kind=url.pathname==='/discord/bridge'?'bridge':'gateway';
@@ -585,6 +599,43 @@ try {
   assert.equal(frames(await snapshot(),'bridge','discord_operation').filter(row=>row.operation==='reaction'&&row.message_id===source.id).length,1,'own bot mirrored reaction cannot echo');
   await inject('gateway',{op:0,t:'MESSAGE_DELETE',s:54,d:{id:source.id,guild_id:guild,channel_id:channel}});
   await until(async()=>frames(await snapshot(),'bridge','discord_operation').some(row=>row.message_id===source.id&&row.operation==='delete'),'native deletion uses cached verified author');
+  // A failed body edit and each emoji have independent progress, including after newer success.
+  const failedEdit=outgoingOp('03'.repeat(16),'edit',10,{text:'Recovered earlier edit',sender:richMc.sender,media:[],reactions:[{emoji:'🔥',count:1}]});
+  await call('/test/limit-next-operation',{});await inject('bridge',failedEdit);
+  await until(async()=>(await gatewayState()).postDue>Date.now(),'failed edit retains retry');
+  await new Promise(resolve=>setTimeout(resolve,1100));
+  const newerReaction=outgoingOp('04'.repeat(16),'reaction',11,{emoji:'👍',active:true,reactions:[{emoji:'👍',count:2}]});
+  await inject('bridge',newerReaction);
+  await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').some(row=>row.id===newerReaction.id),'newer reaction succeeds independently');
+  await inject('bridge',failedEdit);
+  await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').some(row=>row.id===failedEdit.id),'earlier failed edit still applies');
+  const recovered=(await snapshot()).posts.find(row=>row.id===destination).body.embeds[0];
+  assert.equal(recovered.description,'Recovered earlier edit');assert.equal(recovered.footer.text,'Minecraft · Sky-Myce Global · 👍 2','older edit preserves newer counts');
+  const olderEmoji=outgoingOp('05'.repeat(16),'reaction',12,{emoji:'🔥',active:true,reactions:[{emoji:'👍',count:2},{emoji:'🔥',count:3}]});
+  await call('/test/limit-next-operation',{});await inject('bridge',olderEmoji);
+  await until(async()=>(await gatewayState()).postDue>Date.now(),'failed emoji retains retry');await new Promise(resolve=>setTimeout(resolve,1100));
+  const otherEmoji=outgoingOp('06'.repeat(16),'reaction',13,{emoji:'👀',active:true,reactions:[{emoji:'👍',count:2},{emoji:'🔥',count:3},{emoji:'👀',count:1}]});
+  await inject('bridge',otherEmoji);
+  await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').some(row=>row.id===otherEmoji.id),'different emoji succeeds independently');
+  await inject('bridge',olderEmoji);
+  await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').some(row=>row.id===olderEmoji.id),'older different emoji still applies');
+  assert.equal((await snapshot()).posts.find(row=>row.id===destination).body.embeds[0].footer.text,'Minecraft · Sky-Myce Global · 👍 2  🔥 3  👀 1');
+
+  const replyCreate=message(newSnowflake(),{content:'Before reply edit',message_reference:{message_id:source.id,channel_id:channel}});
+  await call('/test/delay-next-reply',{});await inject('gateway',{op:0,t:'MESSAGE_CREATE',s:55,d:replyCreate});
+  await until(async()=>(await snapshot()).counters.some(row=>row.name==='replyLookups'&&row.value===1),'reply context is loading');
+  await inject('gateway',{op:0,t:'MESSAGE_UPDATE',s:56,d:{id:replyCreate.id,guild_id:guild,channel_id:channel,content:'Latest reply edit',mentions:[],edited_timestamp:new Date().toISOString()}});
+  await until(async()=>frames(await snapshot(),'bridge','discord_message').some(row=>row.message_id===replyCreate.id),'edited reply create delivered');
+  const replyFrames=frames(await snapshot(),'bridge','discord_message').filter(row=>row.message_id===replyCreate.id);
+  assert.equal(replyFrames.length,1);assert.equal(replyFrames[0].text,'Latest reply edit');assert.deepEqual(replyFrames[0].mentions,[],'removed mentions cannot notify from stale create data');
+  assert.ok(!frames(await snapshot(),'bridge','discord_operation').some(row=>row.message_id===replyCreate.id),'edit cannot precede the delayed create');
+  const deletedReply=message(newSnowflake(),{content:'Reply to delete',message_reference:{message_id:source.id,channel_id:channel}});
+  await call('/test/delay-next-reply',{});await inject('gateway',{op:0,t:'MESSAGE_CREATE',s:57,d:deletedReply});
+  await until(async()=>(await snapshot()).counters.some(row=>row.name==='replyLookups'&&row.value===2),'second reply lookup is loading');
+  await inject('gateway',{op:0,t:'MESSAGE_DELETE',s:58,d:{id:deletedReply.id,guild_id:guild,channel_id:channel}});
+  await inject('gateway',{op:0,t:'MESSAGE_UPDATE',s:59,d:{id:deletedReply.id,guild_id:guild,channel_id:channel,content:'Late edit cannot revive',edited_timestamp:new Date().toISOString()}});
+  await until(async()=>(await snapshot()).counters.some(row=>row.name==='replyLookupsFinished'&&row.value===2),'deleted reply lookup completes');
+  assert.ok(!frames(await snapshot(),'bridge').some(row=>row.message_id===deletedReply.id),'deleted pending create cannot be revived by lookup or update');
   const deleteOp=outgoingOp('f'.repeat(32),'delete',3);
   await inject('bridge',deleteOp);
   await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').some(row=>row.id===deleteOp.id),'owned card deletion reaches REST');
@@ -592,6 +643,8 @@ try {
   await until(async()=>(await health()).gatewayReady&&(await health()).bridgeReady,'rich receipts survive actual eviction');
   await inject('bridge',{type:'bridge_ready',protocol:3,room:'global-chat',globalChat:true,richChatVersion:1});
   await until(async()=>(await health()).richChatVersion===1,'capability restored after eviction');
+  await inject('bridge',outgoingOp('07'.repeat(16),'edit',14,{text:'Cannot revive a deletion',sender:richMc.sender,media:[]}));
+  await until(async()=>frames(await snapshot(),'bridge','discord_operation_result').some(row=>row.id==='07'.repeat(16)&&row.error==='superseded'),'deletion stays terminal across eviction');
   const deletes=frames(await snapshot(),'rest').filter(row=>row.method==='DELETE'&&!row.path.includes('/reactions/')).length;
   await inject('bridge',deleteOp);
   await until(async()=>frames(await snapshot(),'bridge','discord_operation_ack').filter(row=>row.id===deleteOp.id).length===2,'persisted exact operation receipt ACKs reconnect retry');

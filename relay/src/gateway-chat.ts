@@ -5,9 +5,17 @@ export const minecraftId = /^[a-f0-9]{32}$/;
 type Json = Record<string, any>;
 const unsafeDisplay = /[\x00-\x1f\x7f-\x9f\u00a7\u202a-\u202e\u2066-\u2069]/gu;
 const unsafeBody = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u00a7\u202a-\u202e\u2066-\u2069]/gu;
+const graphemes = new Intl.Segmenter("en", { granularity: "grapheme" });
 export function bounded(value: string, maximum: number, suffix = ""): string {
   if (value.length <= maximum) return value;
-  return value.slice(0, maximum - suffix.length).replace(/[\ud800-\udbff]$/u, "") + suffix;
+  const limit = maximum - suffix.length; let end = 0;
+  for (const part of graphemes.segment(value)) {
+    if (part.index + part.segment.length > limit) break;
+    end = part.index + part.segment.length;
+  }
+  for (const match of value.matchAll(/<a?:[A-Za-z0-9_]{1,32}:\d{17,20}>/gu))
+    if (match.index < end && match.index + match[0].length > end) end = match.index;
+  return value.slice(0, end) + suffix;
 }
 function display(user?: Json, member?: Json): string {
   return bounded(String(member?.nick ?? user?.global_name ?? user?.username ?? "Discord user").replace(unsafeDisplay, ""), 64) || "Discord user";
@@ -55,7 +63,7 @@ export function discordBody(message: Json, maximum = 4096, previousLinks: readon
       if (kind === "@&") return "@role";
       const user = mentions.get(id);
       return `@${display(user, user?.member)}`;
-    }).replace(/<a?:([A-Za-z0-9_]{1,32}):\d{17,20}>/g, ":$1:")
+    })
       .replace(/\r\n?/g, "\n").replace(/\t/g, " ").replace(unsafeBody, "");
     if (safe.length) parts.push({ text: safe, url });
   };
@@ -285,6 +293,18 @@ export function minecraftCard(packet: Json, scope: string, room: string): Json |
   if (users.length) body.content = users.map(id => `<@${id}>`).join(' ');
   if (snowflake.test(packet.reply?.discordMessageId ?? '')) body.message_reference = { message_id: packet.reply.discordMessageId, fail_if_not_exists: false };
   return body;
+}
+export function bridgeOperationApplied(metadata: Json, packet: Json): boolean {
+  if (metadata.deletedRevision !== undefined) return true;
+  if (packet.operation === 'edit') return (metadata.bodyRevision ?? 0) >= packet.revision;
+  if (packet.operation === 'reaction') return (metadata.reactionRevisions?.[packet.emoji] ?? 0) >= packet.revision;
+  return false;
+}
+export function minecraftReactionFooter(packet: Json, scope: string): string {
+  const counts = list(packet.reactions).filter(row => REACTION_EMOJI.includes(row.emoji) &&
+    Number.isSafeInteger(row.count) && row.count > 0 && row.count <= 384).slice(0, 6);
+  const summary = counts.map(row => row.emoji + ' ' + row.count).join('  ');
+  return (scope === 'global' ? 'Minecraft · Sky-Myce Global' : 'Minecraft · Sky-Myce IRC') + (summary ? ' · ' + summary : '');
 }
 export function validBridgeOperation(packet: Json, scope: string, room: string, now = Date.now()): boolean {
   return (scope === 'global' && room === GLOBAL_ROOM || scope === 'room' && ['friends', 'testing'].includes(room)) && packet?.type === 'irc_operation' && packet.scope === scope && packet.room === room && minecraftId.test(packet.id ?? '') &&

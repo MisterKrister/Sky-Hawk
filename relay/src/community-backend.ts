@@ -3,7 +3,7 @@ type CommunityBackendConfig = {
   SKY_MYCE_BACKEND_URL?: string; SKY_MYCE_BACKEND?: Fetcher;
 };
 const MAX_BODY_BYTES = 96 * 1024;
-const roots = new Set(["admin", "account", "blacklist", "session", "skyhawk"]);
+const roots = new Set(["admin", "account", "blacklist", "session", "skyhawk", "rng-test"]);
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 

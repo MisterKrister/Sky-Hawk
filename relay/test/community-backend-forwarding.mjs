@@ -69,7 +69,7 @@ async function signed(worker, payload, changes = {}) {
 
 test('actual Workers service binding preserves exact signed bytes, path and headers for current Backend roots', async t => {
   const worker = await runtime(t);
-  for (const name of ['admin', 'account', 'blacklist', 'session', 'skyhawk']) {
+  for (const name of ['admin', 'account', 'blacklist', 'session', 'skyhawk', 'rng-test']) {
     const result = await signed(worker, { ...root(name), padding: 'Unicode \u2603 and whitespace preserved' });
     assert.equal(result.response.status, 200);
     const actual = await result.response.json();
